@@ -294,6 +294,43 @@ impl CommentsRepo {
         .await
     }
 
+    pub async fn list_comments(
+        &self,
+        status: Option<&str>,
+        limit: i64,
+        before: Option<i64>,
+        path: Option<&str>,
+    ) -> RepoResult<Vec<Comment>> {
+        let status_val = status.unwrap_or("").to_string();
+        let path_val = path.unwrap_or("").to_string();
+        let before_val = before.unwrap_or(0);
+
+        self.spawn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at
+                     FROM comments
+                     WHERE (?1 = '' OR ?1 = 'all' OR status = ?1)
+                       AND (?2 = '' OR target_path = ?2)
+                       AND (?3 = 0 OR id < ?3)
+                     ORDER BY id DESC
+                     LIMIT ?4",
+                )
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+
+            let rows = stmt
+                .query_map(params![status_val, path_val, before_val, limit], row_to_comment)
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+
+            let mut comments = Vec::new();
+            for row in rows {
+                comments.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+            }
+            Ok(comments)
+        })
+        .await
+    }
+
     pub async fn update_status(&self, id: i64, status: &str) -> RepoResult<()> {
         let status = status.to_string();
         self.spawn(move |conn| {

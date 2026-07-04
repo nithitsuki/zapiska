@@ -1,48 +1,113 @@
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::Request;
+use axum::http::header;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::error::AppError;
 use crate::state::AppState;
 
-// ── Auth middleware ──────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────
 
-/// Axum middleware that guards `/api/admin/*` routes.
-/// Compares the `Authorization: Bearer <token>` header against
-/// the configured admin token in constant time.
-pub async fn admin_auth(
-    State(state): State<AppState>,
-    req: Request<axum::body::Body>,
-    next: Next,
-) -> Result<Response, AppError> {
-    let header = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    // Even a missing header goes through the same code path.
-    let token = header.strip_prefix("Bearer ").unwrap_or_default();
-
-    let expected = state.config.admin_token.as_bytes();
-    let actual = token.as_bytes();
-
-    // Pad both to the same length to avoid leaking the expected length.
+fn validate_token(actual: &[u8], expected: &[u8]) -> bool {
     let max_len = expected.len().max(actual.len());
     let mut expected_padded = vec![0u8; max_len];
     let mut actual_padded = vec![0u8; max_len];
     expected_padded[..expected.len()].copy_from_slice(expected);
     actual_padded[..actual.len()].copy_from_slice(actual);
+    expected_padded.ct_eq(&actual_padded).unwrap_u8() == 1
+}
 
-    if expected_padded.ct_eq(&actual_padded).unwrap_u8() == 1 {
-        Ok(next.run(req).await)
-    } else {
-        Err(AppError::Unauthorized)
+fn extract_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
+    for pair in cookie_header.split(';') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next()?.trim();
+        let val = parts.next()?;
+        if key.eq_ignore_ascii_case(name) {
+            return Some(val.trim());
+        }
     }
+    None
+}
+
+fn set_cookie_value(token: &str, max_age_secs: i64) -> String {
+    format!(
+        "admin_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        token, max_age_secs
+    )
+}
+
+// ── Auth middleware ──────────────────────────────────────────
+
+pub async fn admin_auth(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, AppError> {
+    let expected = state.config.admin_token.as_bytes();
+
+    let token = {
+        let header = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let t = header.strip_prefix("Bearer ").unwrap_or("");
+        if !t.is_empty() && validate_token(t.as_bytes(), expected) {
+            return Ok(next.run(req).await);
+        }
+
+        let cookie_header = req
+            .headers()
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        extract_cookie(cookie_header, "admin_token")
+    };
+
+    match token {
+        Some(t) if validate_token(t.as_bytes(), expected) => Ok(next.run(req).await),
+        _ => Err(AppError::Unauthorized),
+    }
+}
+
+// ── POST /api/admin/login ───────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub token: String,
+}
+
+pub async fn login(
+    State(state): State<AppState>,
+    Json(body): Json<LoginRequest>,
+) -> Result<Response, AppError> {
+    let expected = state.config.admin_token.as_bytes();
+    let actual = body.token.as_bytes();
+
+    if !validate_token(actual, expected) {
+        return Err(AppError::Unauthorized);
+    }
+
+    let cookie = set_cookie_value(&body.token, 2592000);
+
+    let mut resp = Json(serde_json::json!({"success": true})).into_response();
+    resp.headers_mut()
+        .insert(header::SET_COOKIE, cookie.parse().unwrap());
+    Ok(resp)
+}
+
+// ── POST /api/admin/logout ──────────────────────────────────
+
+pub async fn logout() -> Response {
+    let cookie = set_cookie_value("", 0);
+    let mut resp = Json(serde_json::json!({"success": true})).into_response();
+    resp.headers_mut()
+        .insert(header::SET_COOKIE, cookie.parse().unwrap());
+    resp
 }
 
 // ── GET /api/admin/pending ──────────────────────────────────
@@ -116,6 +181,59 @@ pub async fn list_pending(
     Ok(Json(PendingResponse { comments }))
 }
 
+// ── GET /api/admin/comments ─────────────────────────────────
+
+#[derive(Deserialize, utoipa::IntoParams)]
+pub struct AdminCommentsQuery {
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub before: Option<i64>,
+    pub path: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/comments",
+    params(AdminCommentsQuery),
+    responses(
+        (status = 200, description = "List of comments with optional status filter", body = PendingResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    tag = "admin",
+)]
+pub async fn list_comments(
+    State(state): State<AppState>,
+    Query(query): Query<AdminCommentsQuery>,
+) -> Result<Json<PendingResponse>, AppError> {
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let status = query.status.as_deref();
+    let before = query.before;
+    let path = query.path.as_deref();
+
+    let comments = state
+        .repo
+        .list_comments(status, limit, before, path)
+        .await?;
+
+    let comments: Vec<PendingComment> = comments
+        .into_iter()
+        .map(|c| PendingComment {
+            id: c.id,
+            target_path: c.target_path,
+            comment_type: c.comment_type,
+            source_url: c.source_url,
+            author_name: c.author_name,
+            author_url: c.author_url,
+            author_avatar: c.author_avatar,
+            content: c.content,
+            status: c.status,
+            created_at: c.created_at,
+        })
+        .collect();
+
+    Ok(Json(PendingResponse { comments }))
+}
+
 // ── POST /api/admin/moderate ────────────────────────────────
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -148,14 +266,13 @@ pub async fn moderate(
     State(state): State<AppState>,
     Json(body): Json<ModerateRequest>,
 ) -> Result<Json<ModerateResponse>, AppError> {
-    if body.action != "approved" && body.action != "spam" && body.action != "deleted" {
+    if body.action != "approved" && body.action != "spam" && body.action != "deleted" && body.action != "pending" {
         return Err(AppError::BadRequest(format!(
-            "invalid action '{}', must be one of: approved, spam, deleted",
+            "invalid action '{}', must be one of: approved, spam, deleted, pending",
             body.action
         )));
     }
 
-    // Check the comment exists first (for a better error message).
     let _comment = state
         .repo
         .get_comment(body.id)
@@ -192,7 +309,6 @@ mod tests {
 
     fn json_request(method: axum::http::Method, uri: &str, body: &str) -> Request<Body> {
         let mut req = helpers::request(method, uri);
-        // Override the empty body + Content-Length: 0 set by helpers::request.
         *req.body_mut() = Body::from(body.to_owned());
         req.headers_mut().insert(
             header::CONTENT_TYPE,
@@ -200,10 +316,8 @@ mod tests {
         );
         req.headers_mut()
             .insert(header::CONTENT_LENGTH, body.len().into());
-        req.headers_mut().insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer test"),
-        );
+        req.headers_mut()
+            .insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer test"));
         req
     }
 
@@ -255,7 +369,6 @@ mod tests {
     #[tokio::test]
     async fn pending_list_shows_only_pending() {
         let (state, _dir) = helpers::test_state();
-        // Insert a pending comment.
         state
             .repo
             .insert_comment(crate::db::repo::NewComment {
@@ -386,7 +499,6 @@ mod tests {
 
         let app = build_app(state.clone());
 
-        // Mark as spam
         let body = format!(r#"{{"id":{},"action":"spam"}}"#, id);
         let req = json_request(axum::http::Method::POST, "/api/admin/moderate", &body);
         app.clone().oneshot(req).await.unwrap();
@@ -395,7 +507,6 @@ mod tests {
             "spam"
         );
 
-        // Then delete
         let body = format!(r#"{{"id":{},"action":"deleted"}}"#, id);
         let req = json_request(axum::http::Method::POST, "/api/admin/moderate", &body);
         app.oneshot(req).await.unwrap();
@@ -465,7 +576,6 @@ mod tests {
         let (state, _dir) = helpers::test_state();
         let app = build_app(state);
 
-        // Wrong token — response body should not echo the token.
         let mut req = helpers::request(axum::http::Method::GET, "/api/admin/pending");
         req.headers_mut().insert(
             header::AUTHORIZATION,
@@ -479,5 +589,168 @@ mod tests {
             "token must not appear in response body"
         );
         assert!(!body_str.contains("Bearer"), "header format not echoed");
+    }
+
+    #[tokio::test]
+    async fn cookie_auth_works() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri("/api/admin/pending")
+                    .header(header::COOKIE, "admin_token=test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn cookie_auth_wrong_token_returns_401() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri("/api/admin/pending")
+                    .header(header::COOKIE, "admin_token=wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn login_sets_cookie() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state);
+
+        let req = json_request(
+            axum::http::Method::POST,
+            "/api/admin/login",
+            r#"{"token":"test"}"#,
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let set_cookie = resp.headers().get(header::SET_COOKIE);
+        assert!(set_cookie.is_some(), "login must set Set-Cookie header");
+        let cookie = set_cookie.unwrap().to_str().unwrap();
+        assert!(cookie.contains("admin_token=test"), "cookie has correct value");
+        assert!(cookie.contains("HttpOnly"), "cookie is HttpOnly");
+        assert!(cookie.contains("Max-Age="), "cookie has max age");
+    }
+
+    #[tokio::test]
+    async fn login_wrong_token_returns_401() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state);
+
+        let req = json_request(
+            axum::http::Method::POST,
+            "/api/admin/login",
+            r#"{"token":"wrong"}"#,
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn logout_clears_cookie() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state);
+
+        let req = json_request(
+            axum::http::Method::POST,
+            "/api/admin/logout",
+            r#"{}"#,
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let set_cookie = resp.headers().get(header::SET_COOKIE);
+        assert!(set_cookie.is_some());
+        let cookie = set_cookie.unwrap().to_str().unwrap();
+        assert!(cookie.contains("Max-Age=0"), "logout clears cookie");
+    }
+
+    #[tokio::test]
+    async fn list_comments_filters_by_status() {
+        let (state, _dir) = helpers::test_state();
+
+        state
+            .repo
+            .insert_comment(crate::db::repo::NewComment {
+                target_path: "/filters".to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "A".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "approved one".to_string(),
+            })
+            .await
+            .unwrap();
+        let id2 = state
+            .repo
+            .insert_comment(crate::db::repo::NewComment {
+                target_path: "/filters".to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "B".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "spam one".to_string(),
+            })
+            .await
+            .unwrap();
+        state.repo.update_status(id2, "spam").await.unwrap();
+
+        let app = build_app(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(authorized_request(
+                axum::http::Method::GET,
+                "/api/admin/comments?status=spam",
+            ))
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let comments = body["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["author_name"], "B");
+
+        let resp = app
+            .clone()
+            .oneshot(authorized_request(
+                axum::http::Method::GET,
+                "/api/admin/comments?status=all",
+            ))
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let comments = body["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 2);
     }
 }

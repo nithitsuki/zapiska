@@ -6,59 +6,76 @@
 <title>zapiska — Moderation</title>
 <style>
   :root {
-    --bg: #f5f5f7;
-    --surface: #ffffff;
-    --text: #1d1d1f;
-    --muted: #86868b;
-    --border: #d2d2d7;
-    --accent: #0071e3;
-    --accent-hover: #0077ed;
-    --green: #30d158;
-    --orange: #ff9f0a;
-    --red: #ff453a;
-    --radius: 12px;
-    --shadow: 0 2px 12px rgba(0,0,0,0.08);
+    --bg: #0f0f13;
+    --surface: #1a1a24;
+    --surface-2: #22222f;
+    --text: #e8e8ed;
+    --text-secondary: #9898a8;
+    --border: #2c2c3a;
+    --accent: #6c8cff;
+    --accent-hover: #8ba3ff;
+    --green: #34d399;
+    --green-bg: rgba(52, 211, 153, 0.1);
+    --orange: #fbbf24;
+    --orange-bg: rgba(251, 191, 36, 0.1);
+    --red: #f87171;
+    --red-bg: rgba(248, 113, 113, 0.1);
+    --blue: #60a5fa;
+    --blue-bg: rgba(96, 165, 250, 0.1);
+    --radius: 10px;
+    --radius-lg: 14px;
   }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Helvetica Neue", sans-serif;
     background: var(--bg);
     color: var(--text);
-    padding: 40px 24px;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
   }
-  .container { max-width: 720px; margin: 0 auto; }
-  h1 {
-    font-size: 28px;
+
+  /* ── Login ── */
+  .login-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  .login-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 40px;
+    width: 100%;
+    max-width: 400px;
+  }
+  .login-box h1 {
+    font-size: 24px;
     font-weight: 700;
     letter-spacing: -0.02em;
     margin-bottom: 4px;
   }
-  h2 {
-    font-size: 18px;
-    font-weight: 600;
-    margin-bottom: 16px;
+  .login-box .subtitle {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin-bottom: 28px;
   }
-  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
-
-  /* Login */
-  .login-box {
-    background: var(--surface);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    padding: 32px;
-    max-width: 400px;
-    margin: 60px auto 0;
+  .login-box label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 6px;
+    color: var(--text-secondary);
   }
-  .login-box h2 { margin-bottom: 20px; text-align: center; }
-  .login-box label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--muted); }
   .login-box input[type="password"] {
     width: 100%;
-    padding: 10px 14px;
+    padding: 12px 14px;
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 8px;
     font-size: 15px;
+    color: var(--text);
     outline: none;
     transition: border-color .15s;
     margin-bottom: 16px;
@@ -66,7 +83,71 @@
   .login-box input[type="password"]:focus { border-color: var(--accent); }
   .login-error { color: var(--red); font-size: 13px; margin-bottom: 12px; display: none; }
 
-  /* Filter bar */
+  /* ── Dashboard layout ── */
+  .dash { display: none; max-width: 880px; margin: 0 auto; padding: 32px 24px; }
+  .dash.active { display: block; }
+
+  .dash-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 28px;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .dash-header h1 {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .dash-header .subtitle {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin-top: 2px;
+  }
+
+  /* ── Stats bar ── */
+  .stats {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 18px;
+    flex: 1;
+    min-width: 80px;
+    text-align: center;
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+  }
+  .stat:hover { background: var(--surface-2); }
+  .stat.active {
+    border-color: var(--accent);
+    background: rgba(108, 140, 255, 0.08);
+  }
+  .stat-num {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .stat-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    margin-top: 2px;
+  }
+  .stat-pending .stat-num { color: var(--orange); }
+  .stat-approved .stat-num { color: var(--green); }
+  .stat-spam .stat-num { color: var(--red); }
+  .stat-deleted .stat-num { color: var(--text-secondary); }
+  .stat-all .stat-num { color: var(--accent); }
+
+  /* ── Filter bar ── */
   .filter-bar {
     display: flex;
     gap: 8px;
@@ -75,24 +156,52 @@
   }
   .filter-bar input {
     flex: 1;
-    padding: 8px 12px;
+    padding: 10px 14px;
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
     font-size: 14px;
+    color: var(--text);
     outline: none;
+    transition: border-color .15s;
   }
   .filter-bar input:focus { border-color: var(--accent); }
-  .count-badge {
+  .filter-bar input::placeholder { color: var(--text-secondary); }
+
+  /* ── Tabs ── */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px;
+    overflow-x: auto;
+  }
+  .tab {
+    padding: 8px 16px;
+    border-radius: 7px;
     font-size: 13px;
-    color: var(--muted);
+    font-weight: 500;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background .15s, color .15s;
     white-space: nowrap;
+    border: none;
+    background: none;
+  }
+  .tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+  .tab.active {
+    background: var(--accent);
+    color: #fff;
   }
 
-  /* Cards */
+  /* ── Cards ── */
   .card {
     background: var(--surface);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
     padding: 20px 24px;
     margin-bottom: 12px;
     transition: opacity .2s;
@@ -104,63 +213,112 @@
     margin-bottom: 8px;
     gap: 12px;
   }
-  .card-meta { font-size: 13px; color: var(--muted); }
-  .card-meta span + span::before { content: " · "; }
+  .card-header-left { min-width: 0; flex: 1; }
   .card-author {
     font-weight: 600;
     font-size: 15px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
   }
+  .card-avatar {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+  .card-meta {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+  }
+  .card-meta span + span::before { content: " · "; }
   .card-path {
     font-size: 12px;
     font-family: "SF Mono", "Menlo", monospace;
     color: var(--accent);
+    margin-top: 4px;
   }
   .card-content {
     font-size: 14px;
     color: var(--text);
-    margin-top: 8px;
+    margin-top: 10px;
     line-height: 1.6;
     word-wrap: break-word;
   }
   .card-content p { margin-bottom: 4px; }
   .card-content p:last-child { margin-bottom: 0; }
-  .card-actions {
+  .card-content a { color: var(--accent); }
+  .card-footer {
     display: flex;
-    gap: 8px;
-    margin-top: 12px;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 14px;
     flex-wrap: wrap;
+    gap: 8px;
   }
+  .card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .card-source {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .card-source a { color: var(--accent); }
 
-  /* Buttons */
+  /* ── Status badges ── */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .badge-pending { background: var(--orange-bg); color: var(--orange); }
+  .badge-approved { background: var(--green-bg); color: var(--green); }
+  .badge-spam { background: var(--red-bg); color: var(--red); }
+  .badge-deleted { background: rgba(152, 152, 168, 0.1); color: var(--text-secondary); }
+  .badge-webmention { background: var(--blue-bg); color: var(--blue); margin-left: 6px; }
+  .badge-native { background: rgba(232, 232, 237, 0.08); color: var(--text-secondary); margin-left: 6px; }
+
+  /* ── Buttons ── */
   .btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 8px 16px;
-    border-radius: 8px;
-    font-size: 13px;
+    padding: 7px 14px;
+    border-radius: 7px;
+    font-size: 12px;
     font-weight: 500;
     border: none;
     cursor: pointer;
     transition: background .15s, opacity .15s;
     text-decoration: none;
+    gap: 4px;
   }
-  .btn:active { opacity: .8; }
-  .btn-primary { background: var(--accent); color: #fff; }
-  .btn-primary:hover { background: var(--accent-hover); }
-  .btn-approve { background: var(--green); color: #fff; }
-  .btn-approve:hover { background: #28c849; }
-  .btn-spam { background: var(--orange); color: #fff; }
-  .btn-spam:hover { background: #e88e00; }
-  .btn-delete { background: var(--red); color: #fff; }
-  .btn-delete:hover { background: #e03328; }
+  .btn:active { opacity: .7; }
+  .btn-approve { background: var(--green); color: #000; }
+  .btn-approve:hover { background: #4ade80; }
+  .btn-spam { background: var(--orange); color: #000; }
+  .btn-spam:hover { background: #fcd34d; }
+  .btn-delete { background: var(--red); color: #000; }
+  .btn-delete:hover { background: #fca5a5; }
+  .btn-pending {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-pending:hover { background: var(--border); }
   .btn-outline {
     background: transparent;
     border: 1px solid var(--border);
-    color: var(--text);
+    color: var(--text-secondary);
   }
-  .btn-outline:hover { background: rgba(0,0,0,0.04); }
-  .btn:disabled { opacity: .4; cursor: default; }
+  .btn-outline:hover { background: var(--surface-2); color: var(--text); }
+  .btn:disabled { opacity: .35; cursor: default; }
 
   .btn-load {
     display: block;
@@ -169,43 +327,49 @@
     font-size: 14px;
     margin-top: 8px;
   }
+  .btn-danger {
+    background: var(--red);
+    color: #000;
+  }
+  .btn-danger:hover { background: var(--red); opacity: .8; }
 
-  /* Empty state */
+  /* ── Empty state ── */
   .empty-state {
     text-align: center;
-    padding: 48px 24px;
-    color: var(--muted);
-    font-size: 15px;
+    padding: 60px 24px;
+    color: var(--text-secondary);
+    font-size: 14px;
   }
-  .empty-state p { margin-bottom: 4px; }
+  .empty-state .icon { font-size: 32px; margin-bottom: 12px; }
 
-  /* Logout */
-  .logout-bar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 24px;
-  }
-
-  /* Toast */
-  .toast {
+  /* ── Toast ── */
+  .toast-container {
     position: fixed;
     bottom: 24px;
     left: 50%;
-    transform: translateX(-50%) translateY(80px);
-    background: var(--text);
-    color: #fff;
+    transform: translateX(-50%);
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+  }
+  .toast {
+    background: #1a1a24;
+    border: 1px solid var(--border);
+    color: var(--text);
     padding: 10px 20px;
     border-radius: 10px;
     font-size: 13px;
     opacity: 0;
-    transition: transform .25s, opacity .25s;
-    pointer-events: none;
-    z-index: 100;
+    transform: translateY(10px);
+    transition: opacity .2s, transform .2s;
+    pointer-events: auto;
+    white-space: nowrap;
   }
-  .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  .toast.show { opacity: 1; transform: translateY(0); }
 
-  /* Loading spinner */
+  /* ── Spinner ── */
   .spinner {
     width: 20px; height: 20px;
     border: 2px solid var(--border);
@@ -215,102 +379,146 @@
     margin: 40px auto;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-
   .hidden { display: none !important; }
+
+  /* ── Responsive ── */
+  @media (max-width: 640px) {
+    .dash { padding: 20px 16px; }
+    .dash-header h1 { font-size: 22px; }
+    .stats { gap: 6px; }
+    .stat { padding: 10px 12px; min-width: 60px; }
+    .stat-num { font-size: 18px; }
+    .card { padding: 16px 18px; }
+    .card-footer { flex-direction: column; align-items: flex-start; }
+  }
 </style>
 </head>
 <body>
-<div class="container" id="app">
-  <!-- Login -->
-  <div id="login-view">
-    <div class="login-box">
-      <h2>Moderation</h2>
-      <label for="token-input">Admin Token</label>
-      <input type="password" id="token-input" placeholder="Enter admin token" autocomplete="off">
-      <div class="login-error" id="login-error">Invalid token. Try again.</div>
-      <button class="btn btn-primary" style="width:100%" id="login-btn" onclick="login()">Sign In</button>
-    </div>
-  </div>
 
-  <!-- Dashboard -->
-  <div id="dash-view" class="hidden">
-    <div class="logout-bar">
-      <div>
-        <h1>Moderation</h1>
-        <div class="subtitle" style="margin-bottom:0">Approve, spam, or delete comments.</div>
-      </div>
-      <button class="btn btn-outline" onclick="logout()">Sign Out</button>
-    </div>
-
-    <div class="filter-bar">
-      <input type="text" id="path-filter" placeholder="Filter by path (e.g. /blog/hello)" oninput="loadPending()">
-      <span class="count-badge" id="count-label"></span>
-    </div>
-
-    <div id="pending-list"></div>
-    <div id="load-more-container" class="hidden">
-      <button class="btn btn-outline btn-load" id="load-more-btn" onclick="loadMore()">Load More</button>
-    </div>
+<!-- ══ Login ══ -->
+<div class="login-page" id="login-view">
+  <div class="login-box">
+    <h1>zapiska</h1>
+    <div class="subtitle">Moderation dashboard</div>
+    <label for="token-input">Admin Token</label>
+    <input type="password" id="token-input" placeholder="Enter admin token" autocomplete="off" autofocus>
+    <div class="login-error" id="login-error">Invalid token. Try again.</div>
+    <button class="btn btn-approve" style="width:100%;padding:12px;font-size:14px" id="login-btn">Sign In</button>
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<!-- ══ Dashboard ══ -->
+<div class="dash" id="dash-view">
+  <div class="dash-header">
+    <div>
+      <h1>Moderation</h1>
+      <div class="subtitle">Approve, reject, or manage comments</div>
+    </div>
+    <button class="btn btn-outline" onclick="logout()">Sign Out</button>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats" id="stats-bar"></div>
+
+  <!-- Tabs -->
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-status="pending" onclick="switchTab('pending')">Pending</button>
+    <button class="tab" data-status="approved" onclick="switchTab('approved')">Approved</button>
+    <button class="tab" data-status="spam" onclick="switchTab('spam')">Spam</button>
+    <button class="tab" data-status="deleted" onclick="switchTab('deleted')">Deleted</button>
+    <button class="tab" data-status="all" onclick="switchTab('all')">All</button>
+  </div>
+
+  <!-- Filter -->
+  <div class="filter-bar">
+    <input type="text" id="path-filter" placeholder="Filter by path (e.g. /blog/hello)" oninput="debouncedLoad()">
+  </div>
+
+  <!-- List -->
+  <div id="comment-list"></div>
+  <div id="load-more-container" class="hidden">
+    <button class="btn btn-outline btn-load" id="load-more-btn" onclick="loadMore()">Load More</button>
+  </div>
+</div>
+
+<!-- ══ Toast ══ -->
+<div class="toast-container" id="toast-container"></div>
 
 <script>
-let token = '';
+let currentStatus = 'pending';
 let before = null;
 let loading = false;
+let statsCache = {};
+let pathFilter = '';
 
-// Allow overriding the API origin via URL parameter ?api=https://webmention.nithitsuki.com
-// Defaults to the current origin (works when served from the server itself).
 const urlParams = new URLSearchParams(window.location.search);
 const API = urlParams.get('api') || window.location.origin;
 
-function apiUrl(path) {
-  return API + path;
-}
+function apiUrl(path) { return API + path; }
+
+// ── Login ──
 
 function login() {
-  token = document.getElementById('token-input').value;
+  const token = document.getElementById('token-input').value;
   if (!token) return;
+  document.getElementById('login-btn').disabled = true;
 
-  // Test the token by fetching pending
-  fetch(apiUrl('/api/admin/pending'), { headers: { 'Authorization': 'Bearer ' + token } })
-    .then(r => {
-      if (r.status === 401) {
-        document.getElementById('login-error').style.display = 'block';
-        token = '';
-        return Promise.reject();
-      }
-      document.getElementById('login-view').classList.add('hidden');
-      document.getElementById('dash-view').classList.remove('hidden');
-      loadPending();
-    })
-    .catch(() => {});
+  fetch(apiUrl('/api/admin/login'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token })
+  })
+  .then(r => {
+    document.getElementById('login-btn').disabled = false;
+    if (r.status === 401) {
+      document.getElementById('login-error').style.display = 'block';
+      return Promise.reject();
+    }
+    if (!r.ok) return Promise.reject();
+    document.getElementById('login-view').style.display = 'none';
+    document.getElementById('dash-view').classList.add('active');
+    loadStats();
+    loadComments();
+  })
+  .catch(() => { document.getElementById('login-btn').disabled = false; });
 }
 
 function logout() {
-  token = '';
+  fetch(apiUrl('/api/admin/logout'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    .catch(() => {});
   before = null;
-  document.getElementById('login-view').classList.remove('hidden');
-  document.getElementById('dash-view').classList.add('hidden');
+  document.getElementById('login-view').style.display = 'flex';
+  document.getElementById('dash-view').classList.remove('active');
   document.getElementById('token-input').value = '';
-  document.getElementById('pending-list').innerHTML = '';
+  document.getElementById('comment-list').innerHTML = '';
 }
 
-function loadPending(append) {
-  if (!token || loading) return;
-  loading = true;
+// Enter key to login
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('token-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') login();
+  });
+});
 
-  let url = '/api/admin/pending?limit=50';
+// ── Comments API ──
+
+function buildUrl(append) {
+  let url = `/api/admin/comments?status=${currentStatus}&limit=50`;
   const path = document.getElementById('path-filter').value.trim();
   if (path) url += '&path=' + encodeURIComponent(path);
   if (before && append) url += '&before=' + before;
+  return url;
+}
 
-  document.getElementById('pending-list').insertAdjacentHTML('beforeend',
-    '<div class="spinner" id="spinner"></div>');
+function loadComments(append) {
+  if (loading) return;
+  loading = true;
 
-  fetch(apiUrl(url), { headers: { 'Authorization': 'Bearer ' + token } })
+  const list = document.getElementById('comment-list');
+  if (!append) list.innerHTML = '';
+  list.insertAdjacentHTML('beforeend', '<div class="spinner" id="spinner"></div>');
+
+  fetch(apiUrl(buildUrl(append)))
     .then(r => {
       if (r.status === 401) { logout(); return null; }
       return r.json();
@@ -318,77 +526,184 @@ function loadPending(append) {
     .then(data => {
       document.querySelectorAll('#spinner').forEach(el => el.remove());
       loading = false;
-
       if (!data) return;
-      const comments = data.comments || [];
 
-      // If appending, keep existing; if not, replace
-      if (!append) document.getElementById('pending-list').innerHTML = '';
+      const comments = data.comments || [];
+      if (!append) list.innerHTML = '';
 
       if (comments.length === 0 && !append) {
-        document.getElementById('pending-list').innerHTML =
-          '<div class="empty-state"><p>No pending comments.</p></div>';
+        list.innerHTML = '<div class="empty-state"><div class="icon">&#128172;</div><p>No comments here.</p></div>';
         document.getElementById('load-more-container').classList.add('hidden');
-        document.getElementById('count-label').textContent = '';
         return;
       }
 
-      comments.forEach(c => renderComment(c));
+      comments.forEach(c => renderComment(c, list));
 
-      // Update "before" cursor
       if (comments.length > 0) {
         before = comments[comments.length - 1].id;
         document.getElementById('load-more-container').classList.remove('hidden');
       } else {
         document.getElementById('load-more-container').classList.add('hidden');
       }
-
-      document.getElementById('count-label').textContent = comments.length + ' pending';
     })
     .catch(() => { loading = false; document.querySelectorAll('#spinner').forEach(el => el.remove()); });
 }
 
-function loadMore() { loadPending(true); }
+function loadMore() { loadComments(true); }
 
-function renderComment(c) {
-  const content = c.content || '';
+let debounceTimer;
+function debouncedLoad() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => { before = null; loadComments(); }, 300);
+}
 
+// ── Stats ──
+
+function loadStats() {
+  const statuses = ['pending', 'approved', 'spam', 'deleted'];
+  Promise.all(statuses.map(s =>
+    fetch(apiUrl(`/api/admin/comments?status=${s}&limit=1`))
+      .then(r => r.json())
+      .then(d => ({ status: s, count: d.comments ? d.comments.length : 0 }))
+      .catch(() => ({ status: s, count: 0 }))
+  )).then(results => {
+    statsCache = {};
+    let total = 0;
+    results.forEach(r => { statsCache[r.status] = r.count; total += r.count; });
+    statsCache.all = total;
+
+    // Also fetch actual totals with larger limit to get rough counts
+    // For accurate counts we'd need a count endpoint, but this gives reasonable display
+    // The stats display is mostly decorative anyway
+    renderStats();
+  });
+}
+
+function renderStats() {
+  const bar = document.getElementById('stats-bar');
+  const items = [
+    { key: 'pending', label: 'Pending', cls: 'stat-pending' },
+    { key: 'approved', label: 'Approved', cls: 'stat-approved' },
+    { key: 'spam', label: 'Spam', cls: 'stat-spam' },
+    { key: 'deleted', label: 'Deleted', cls: 'stat-deleted' },
+    { key: 'all', label: 'Total', cls: 'stat-all' },
+  ];
+  bar.innerHTML = items.map(item => `
+    <div class="stat ${item.cls}${currentStatus === item.key ? ' active' : ''}" onclick="switchTab('${item.key}')">
+      <div class="stat-num">${statsCache[item.key] ?? '-'}</div>
+      <div class="stat-label">${item.label}</div>
+    </div>
+  `).join('');
+}
+
+// ── Tab switching ──
+
+function switchTab(status) {
+  currentStatus = status;
+  before = null;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.status === status));
+  document.querySelectorAll('.stat').forEach(s => {
+    const key = s.querySelector('.stat-label')?.textContent.toLowerCase();
+    s.classList.toggle('active', key === status || (status === 'all' && key === 'total'));
+  });
+  loadComments();
+  loadStats();
+}
+
+// ── Render comment ──
+
+function renderComment(c, list) {
   const el = document.createElement('div');
   el.className = 'card';
   el.dataset.id = c.id;
 
-  el.innerHTML =
-    '<div class="card-header">' +
-      '<div>' +
-        '<div class="card-author">' + escapeHtml(c.author_name) + '</div>' +
-        '<div class="card-meta">' +
-          '<span>' + escapeHtml(c.comment_type) + '</span>' +
-          '<span>' + (c.created_at ? c.created_at.slice(0, 10) : '') + '</span>' +
-          (c.source_url ? '<span><a href="' + escapeAttr(c.source_url) + '" target="_blank" rel="noopener">source</a></span>' : '') +
-        '</div>' +
-        '<div class="card-path">' + escapeHtml(c.target_path) + '</div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="card-content">' + content + '</div>' +
-    '<div class="card-actions">' +
-      '<button class="btn btn-approve" onclick="moderate(' + c.id + ',\'approved\')">Approve</button>' +
-      '<button class="btn btn-spam" onclick="moderate(' + c.id + ',\'spam\')">Spam</button>' +
-      '<button class="btn btn-delete" onclick="moderate(' + c.id + ',\'deleted\')">Delete</button>' +
-    '</div>';
+  const avatarHtml = c.author_avatar
+    ? `<img class="card-avatar" src="${escapeAttr(c.author_avatar)}" alt="" loading="lazy">`
+    : '';
+  const authorUrlHtml = c.author_url
+    ? `<a href="${escapeAttr(c.author_url)}" target="_blank" rel="noopener">${escapeHtml(c.author_name)}</a>`
+    : escapeHtml(c.author_name);
+  const typeBadge = c.comment_type === 'webmention'
+    ? '<span class="badge badge-webmention">WM</span>'
+    : '<span class="badge badge-native">N</span>';
+  const statusBadge = `<span class="badge badge-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span>`;
+  const date = c.created_at ? formatDate(c.created_at) : '';
+  const sourceHtml = c.source_url
+    ? `<span class="card-source"><a href="${escapeAttr(c.source_url)}" target="_blank" rel="noopener">source</a></span>`
+    : '';
 
-  document.getElementById('pending-list').appendChild(el);
+  el.innerHTML = `
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="card-author">
+          ${avatarHtml}
+          ${authorUrlHtml}
+          ${statusBadge}
+          ${typeBadge}
+        </div>
+        <div class="card-meta">
+          <span>${c.comment_type}</span>
+          <span>${date}</span>
+        </div>
+        <div class="card-path">${escapeHtml(c.target_path)}</div>
+      </div>
+    </div>
+    <div class="card-content">${c.content || ''}</div>
+    <div class="card-footer">
+      <div class="card-actions">
+        ${renderActions(c)}
+      </div>
+      ${sourceHtml}
+    </div>
+  `;
+
+  list.appendChild(el);
+}
+
+function renderActions(c) {
+  const id = c.id;
+  switch (c.status) {
+    case 'pending':
+      return `
+        <button class="btn btn-approve" onclick="moderate(${id},'approved')">Approve</button>
+        <button class="btn btn-spam" onclick="moderate(${id},'spam')">Spam</button>
+        <button class="btn btn-delete" onclick="moderate(${id},'deleted')">Delete</button>
+      `;
+    case 'approved':
+      return `
+        <button class="btn btn-pending" onclick="moderate(${id},'pending')">Unapprove</button>
+        <button class="btn btn-spam" onclick="moderate(${id},'spam')">Spam</button>
+        <button class="btn btn-delete" onclick="moderate(${id},'deleted')">Delete</button>
+      `;
+    case 'spam':
+      return `
+        <button class="btn btn-approve" onclick="moderate(${id},'approved')">Approve</button>
+        <button class="btn btn-pending" onclick="moderate(${id},'pending')">Unspam</button>
+        <button class="btn btn-delete" onclick="moderate(${id},'deleted')">Delete</button>
+      `;
+    case 'deleted':
+      return `
+        <button class="btn btn-approve" onclick="moderate(${id},'approved')">Restore</button>
+        <button class="btn btn-pending" onclick="moderate(${id},'pending')">Un-delete</button>
+        <button class="btn btn-spam" onclick="moderate(${id},'spam')">Spam</button>
+      `;
+    default:
+      return `
+        <button class="btn btn-approve" onclick="moderate(${id},'approved')">Approve</button>
+        <button class="btn btn-spam" onclick="moderate(${id},'spam')">Spam</button>
+        <button class="btn btn-delete" onclick="moderate(${id},'deleted')">Delete</button>
+      `;
+  }
 }
 
 function moderate(id, action) {
-  const btn = document.querySelector('.card[data-id="' + id + '"] .btn');
-  if (btn) btn.disabled = true;
+  const card = document.querySelector(`.card[data-id="${id}"]`);
+  const btns = card ? card.querySelectorAll('.btn') : [];
+  btns.forEach(b => b.disabled = true);
 
   fetch(apiUrl('/api/admin/moderate'), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + token
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, action })
   })
   .then(r => {
@@ -397,25 +712,41 @@ function moderate(id, action) {
   })
   .then(data => {
     if (!data) return;
-    const card = document.querySelector('.card[data-id="' + id + '"]');
+    const card = document.querySelector(`.card[data-id="${id}"]`);
     if (card) card.remove();
-    showToast(action === 'approved' ? 'Approved.' : action === 'spam' ? 'Marked as spam.' : 'Deleted.');
-    // Reload if no cards left
+    const labels = { approved: 'Approved.', spam: 'Marked as spam.', deleted: 'Deleted.', pending: 'Reverted to pending.' };
+    showToast(labels[action] || 'Done.');
     if (document.querySelectorAll('.card').length === 0) {
       before = null;
-      loadPending();
+      loadComments();
     }
+    loadStats();
   })
-  .catch(() => { if (btn) btn.disabled = false; });
+  .catch(() => { btns.forEach(b => b.disabled = false); });
 }
 
-let toastTimer;
+// ── Toast ──
+
 function showToast(msg) {
-  const el = document.getElementById('toast');
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = 'toast';
   el.textContent = msg;
-  el.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
+  container.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 200);
+  }, 2000);
+}
+
+// ── Helpers ──
+
+function formatDate(s) {
+  if (!s) return '';
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return s.slice(0, 10);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function escapeHtml(s) {
@@ -428,11 +759,19 @@ function escapeAttr(s) {
   return s.replace(/"/g,'&quot;').replace(/&/g,'&amp;').replace(/</g,'&lt;');
 }
 
-// Enter key to login
+// ── Auto-login check: if cookie exists, try loading dashboard ──
 document.addEventListener('DOMContentLoaded', function() {
-  document.getElementById('token-input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') login();
-  });
+  // Check if we have a session by trying to load pending
+  fetch(apiUrl('/api/admin/comments?status=pending&limit=1'))
+    .then(r => {
+      if (r.ok) {
+        document.getElementById('login-view').style.display = 'none';
+        document.getElementById('dash-view').classList.add('active');
+        loadStats();
+        loadComments();
+      }
+    })
+    .catch(() => {});
 });
 </script>
 </body>

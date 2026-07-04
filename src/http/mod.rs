@@ -31,6 +31,10 @@ pub fn build_app(state: AppState) -> Router {
             axum::routing::get(admin::list_pending),
         )
         .route(
+            "/api/admin/comments",
+            axum::routing::get(admin::list_comments),
+        )
+        .route(
             "/api/admin/moderate",
             axum::routing::post(admin::moderate).layer(GovernorLayer {
                 config: Arc::new(admin_moderate_governor),
@@ -49,6 +53,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/healthz", axum::routing::get(healthz))
         .route("/admin", axum::routing::get(admin_dashboard))
         .route("/embed/comments.js", axum::routing::get(comments_js))
+        .route("/api/admin/login", axum::routing::post(admin::login))
+        .route("/api/admin/logout", axum::routing::post(admin::logout))
         .route(
             "/api/comment",
             axum::routing::post(comment_post::create_comment).layer(GovernorLayer {
