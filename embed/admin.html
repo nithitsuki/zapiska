@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zapiska — Moderation</title>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --surface: #ffffff;
+    --text: #1d1d1f;
+    --muted: #86868b;
+    --border: #d2d2d7;
+    --accent: #0071e3;
+    --accent-hover: #0077ed;
+    --green: #30d158;
+    --orange: #ff9f0a;
+    --red: #ff453a;
+    --radius: 12px;
+    --shadow: 0 2px 12px rgba(0,0,0,0.08);
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 40px 24px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container { max-width: 720px; margin: 0 auto; }
+  h1 {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 4px;
+  }
+  h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
+
+  /* Login */
+  .login-box {
+    background: var(--surface);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 32px;
+    max-width: 400px;
+    margin: 60px auto 0;
+  }
+  .login-box h2 { margin-bottom: 20px; text-align: center; }
+  .login-box label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--muted); }
+  .login-box input[type="password"] {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 15px;
+    outline: none;
+    transition: border-color .15s;
+    margin-bottom: 16px;
+  }
+  .login-box input[type="password"]:focus { border-color: var(--accent); }
+  .login-error { color: var(--red); font-size: 13px; margin-bottom: 12px; display: none; }
+
+  /* Filter bar */
+  .filter-bar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    align-items: center;
+  }
+  .filter-bar input {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 14px;
+    outline: none;
+  }
+  .filter-bar input:focus { border-color: var(--accent); }
+  .count-badge {
+    font-size: 13px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 20px 24px;
+    margin-bottom: 12px;
+    transition: opacity .2s;
+  }
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+    gap: 12px;
+  }
+  .card-meta { font-size: 13px; color: var(--muted); }
+  .card-meta span + span::before { content: " · "; }
+  .card-author {
+    font-weight: 600;
+    font-size: 15px;
+  }
+  .card-path {
+    font-size: 12px;
+    font-family: "SF Mono", "Menlo", monospace;
+    color: var(--accent);
+  }
+  .card-content {
+    font-size: 14px;
+    color: var(--text);
+    margin-top: 8px;
+    line-height: 1.6;
+    word-wrap: break-word;
+  }
+  .card-content p { margin-bottom: 4px; }
+  .card-content p:last-child { margin-bottom: 0; }
+  .card-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    border: none;
+    cursor: pointer;
+    transition: background .15s, opacity .15s;
+    text-decoration: none;
+  }
+  .btn:active { opacity: .8; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-approve { background: var(--green); color: #fff; }
+  .btn-approve:hover { background: #28c849; }
+  .btn-spam { background: var(--orange); color: #fff; }
+  .btn-spam:hover { background: #e88e00; }
+  .btn-delete { background: var(--red); color: #fff; }
+  .btn-delete:hover { background: #e03328; }
+  .btn-outline {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  .btn-outline:hover { background: rgba(0,0,0,0.04); }
+  .btn:disabled { opacity: .4; cursor: default; }
+
+  .btn-load {
+    display: block;
+    width: 100%;
+    padding: 12px;
+    font-size: 14px;
+    margin-top: 8px;
+  }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center;
+    padding: 48px 24px;
+    color: var(--muted);
+    font-size: 15px;
+  }
+  .empty-state p { margin-bottom: 4px; }
+
+  /* Logout */
+  .logout-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+  }
+
+  /* Toast */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(80px);
+    background: var(--text);
+    color: #fff;
+    padding: 10px 20px;
+    border-radius: 10px;
+    font-size: 13px;
+    opacity: 0;
+    transition: transform .25s, opacity .25s;
+    pointer-events: none;
+    z-index: 100;
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+
+  /* Loading spinner */
+  .spinner {
+    width: 20px; height: 20px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+    margin: 40px auto;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="container" id="app">
+  <!-- Login -->
+  <div id="login-view">
+    <div class="login-box">
+      <h2>Moderation</h2>
+      <label for="token-input">Admin Token</label>
+      <input type="password" id="token-input" placeholder="Enter admin token" autocomplete="off">
+      <div class="login-error" id="login-error">Invalid token. Try again.</div>
+      <button class="btn btn-primary" style="width:100%" id="login-btn" onclick="login()">Sign In</button>
+    </div>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dash-view" class="hidden">
+    <div class="logout-bar">
+      <div>
+        <h1>Moderation</h1>
+        <div class="subtitle" style="margin-bottom:0">Approve, spam, or delete comments.</div>
+      </div>
+      <button class="btn btn-outline" onclick="logout()">Sign Out</button>
+    </div>
+
+    <div class="filter-bar">
+      <input type="text" id="path-filter" placeholder="Filter by path (e.g. /blog/hello)" oninput="loadPending()">
+      <span class="count-badge" id="count-label"></span>
+    </div>
+
+    <div id="pending-list"></div>
+    <div id="load-more-container" class="hidden">
+      <button class="btn btn-outline btn-load" id="load-more-btn" onclick="loadMore()">Load More</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let token = '';
+let before = null;
+let loading = false;
+
+// Allow overriding the API origin via URL parameter ?api=https://webmention.nithitsuki.com
+// Defaults to the current origin (works when served from the server itself).
+const urlParams = new URLSearchParams(window.location.search);
+const API = urlParams.get('api') || window.location.origin;
+
+function apiUrl(path) {
+  return API + path;
+}
+
+function login() {
+  token = document.getElementById('token-input').value;
+  if (!token) return;
+
+  // Test the token by fetching pending
+  fetch(apiUrl('/api/admin/pending'), { headers: { 'Authorization': 'Bearer ' + token } })
+    .then(r => {
+      if (r.status === 401) {
+        document.getElementById('login-error').style.display = 'block';
+        token = '';
+        return Promise.reject();
+      }
+      document.getElementById('login-view').classList.add('hidden');
+      document.getElementById('dash-view').classList.remove('hidden');
+      loadPending();
+    })
+    .catch(() => {});
+}
+
+function logout() {
+  token = '';
+  before = null;
+  document.getElementById('login-view').classList.remove('hidden');
+  document.getElementById('dash-view').classList.add('hidden');
+  document.getElementById('token-input').value = '';
+  document.getElementById('pending-list').innerHTML = '';
+}
+
+function loadPending(append) {
+  if (!token || loading) return;
+  loading = true;
+
+  let url = '/api/admin/pending?limit=50';
+  const path = document.getElementById('path-filter').value.trim();
+  if (path) url += '&path=' + encodeURIComponent(path);
+  if (before && append) url += '&before=' + before;
+
+  document.getElementById('pending-list').insertAdjacentHTML('beforeend',
+    '<div class="spinner" id="spinner"></div>');
+
+  fetch(apiUrl(url), { headers: { 'Authorization': 'Bearer ' + token } })
+    .then(r => {
+      if (r.status === 401) { logout(); return null; }
+      return r.json();
+    })
+    .then(data => {
+      document.querySelectorAll('#spinner').forEach(el => el.remove());
+      loading = false;
+
+      if (!data) return;
+      const comments = data.comments || [];
+
+      // If appending, keep existing; if not, replace
+      if (!append) document.getElementById('pending-list').innerHTML = '';
+
+      if (comments.length === 0 && !append) {
+        document.getElementById('pending-list').innerHTML =
+          '<div class="empty-state"><p>No pending comments.</p></div>';
+        document.getElementById('load-more-container').classList.add('hidden');
+        document.getElementById('count-label').textContent = '';
+        return;
+      }
+
+      comments.forEach(c => renderComment(c));
+
+      // Update "before" cursor
+      if (comments.length > 0) {
+        before = comments[comments.length - 1].id;
+        document.getElementById('load-more-container').classList.remove('hidden');
+      } else {
+        document.getElementById('load-more-container').classList.add('hidden');
+      }
+
+      document.getElementById('count-label').textContent = comments.length + ' pending';
+    })
+    .catch(() => { loading = false; document.querySelectorAll('#spinner').forEach(el => el.remove()); });
+}
+
+function loadMore() { loadPending(true); }
+
+function renderComment(c) {
+  const content = c.content || '';
+
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.dataset.id = c.id;
+
+  el.innerHTML =
+    '<div class="card-header">' +
+      '<div>' +
+        '<div class="card-author">' + escapeHtml(c.author_name) + '</div>' +
+        '<div class="card-meta">' +
+          '<span>' + escapeHtml(c.comment_type) + '</span>' +
+          '<span>' + (c.created_at ? c.created_at.slice(0, 10) : '') + '</span>' +
+          (c.source_url ? '<span><a href="' + escapeAttr(c.source_url) + '" target="_blank" rel="noopener">source</a></span>' : '') +
+        '</div>' +
+        '<div class="card-path">' + escapeHtml(c.target_path) + '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="card-content">' + content + '</div>' +
+    '<div class="card-actions">' +
+      '<button class="btn btn-approve" onclick="moderate(' + c.id + ',\'approved\')">Approve</button>' +
+      '<button class="btn btn-spam" onclick="moderate(' + c.id + ',\'spam\')">Spam</button>' +
+      '<button class="btn btn-delete" onclick="moderate(' + c.id + ',\'deleted\')">Delete</button>' +
+    '</div>';
+
+  document.getElementById('pending-list').appendChild(el);
+}
+
+function moderate(id, action) {
+  const btn = document.querySelector('.card[data-id="' + id + '"] .btn');
+  if (btn) btn.disabled = true;
+
+  fetch(apiUrl('/api/admin/moderate'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + token
+    },
+    body: JSON.stringify({ id, action })
+  })
+  .then(r => {
+    if (r.status === 401) { logout(); return null; }
+    return r.json();
+  })
+  .then(data => {
+    if (!data) return;
+    const card = document.querySelector('.card[data-id="' + id + '"]');
+    if (card) card.remove();
+    showToast(action === 'approved' ? 'Approved.' : action === 'spam' ? 'Marked as spam.' : 'Deleted.');
+    // Reload if no cards left
+    if (document.querySelectorAll('.card').length === 0) {
+      before = null;
+      loadPending();
+    }
+  })
+  .catch(() => { if (btn) btn.disabled = false; });
+}
+
+let toastTimer;
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+function escapeHtml(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function escapeAttr(s) {
+  if (!s) return '';
+  return s.replace(/"/g,'&quot;').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+}
+
+// Enter key to login
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('token-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') login();
+  });
+});
+</script>
+</body>
+</html>

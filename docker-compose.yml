@@ -1,0 +1,18 @@
+services:
+  zapiska:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      ADMIN_TOKEN: "${ADMIN_TOKEN}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      PUBLIC_TARGET_ORIGIN: "${PUBLIC_TARGET_ORIGIN:-https://nithitsuki.com}"
+      ALLOWED_CORS_ORIGIN: "${ALLOWED_CORS_ORIGIN:-https://nithitsuki.com}"
+      DATABASE_PATH: /data/comments.db
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
+      - zapiska-data:/data
+    restart: unless-stopped
+
+volumes:
+  zapiska-data:
