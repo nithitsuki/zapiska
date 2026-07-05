@@ -360,7 +360,7 @@
       return;
     }
 
-    var heading = document.createElement('h3');
+    var heading = document.createElement('h2');
     heading.className = 'nc-heading';
     heading.textContent = 'Comments (' + (total || comments.length) + ')';
     target.appendChild(heading);

@@ -68,11 +68,12 @@ Author resolution (priority order):
 2. `author_url` → name from form, URL kept as-is
 
 Avatar resolution (priority order, independent of name):
-1. `author_url` is a github.com URL → GitHub API avatar for that user
-2. (webmentions feature) Fetch author's page → h-card photo → favicon parse
-3. `author_url` domain → `https://icon.horse/<domain>` favicon proxy
-4. `github_username` → GitHub API avatar (fallback)
-5. `/embed/default-avatar.jpg` (local default, not hotlinked)
+1. `author_url` is a github.com URL → GitHub API avatar
+2. (webmentions feature) Fetch author's page → h-card photo → favicon
+3. `github_username` → GitHub API avatar
+4. `author_url` domain → DiceBear generated avatar (consistent per domain)
+5. `github_username` → DiceBear generated avatar (consistent per user)
+6. DiceBear from a generic seed (anonymous fallback)
 
 ---
 
@@ -165,7 +166,7 @@ Response (200):
       "source_url": null,
       "author_name": "Bob",
       "author_url": "https://bob.example",
-      "author_avatar": "https://icon.horse/bob.example",
+      "author_avatar": "https://api.dicebear.com/7.x/notionists/svg?seed=bob.example",
       "content": "<p>Hi!</p>",
       "status": "pending",
       "parent_id": null,

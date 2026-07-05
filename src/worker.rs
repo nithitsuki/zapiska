@@ -198,13 +198,13 @@ fn resolve_author_info(
                 .author_url
                 .as_ref()
                 .and_then(|u| Url::parse(u).ok())
-                .and_then(|u| u.host_str().map(|h| format!("https://icon.horse/{h}")))
+                .and_then(|u| u.host_str().map(|h| format!("https://api.dicebear.com/7.x/notionists/svg?seed={h}")))
         });
 
         (name, entry.author_url.clone(), avatar)
     } else {
         let domain = domain_fallback(source_url);
-        let avatar = Some(format!("https://icon.horse/{domain}"));
+        let avatar = Some(format!("https://api.dicebear.com/7.x/notionists/svg?seed={domain}"));
         (domain, Some(source_url.to_string()), avatar)
     }
 }

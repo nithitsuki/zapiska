@@ -376,11 +376,11 @@ async fn resolve_author(
 /// Resolve a profile picture URL. Tries multiple strategies in priority order:
 ///
 /// 1. GitHub API avatar (if `author_url` is a github.com URL)
-/// 2. (webmentions feature) h-card photo from the author's page
-/// 3. (webmentions feature) Favicon from the author's page
-/// 4. icon.horse favicon service (always available)
-/// 5. GitHub API avatar (if `github_username` was provided as fallback)
-/// 6. Default avatar
+/// 2. (webmentions feature) h-card photo + favicon from author's page
+/// 3. GitHub API avatar (if `github_username` was provided)
+/// 4. DiceBear generated avatar from author URL domain
+/// 5. DiceBear generated avatar from GitHub username
+/// 6. DiceBear from a generic seed (absolute last resort)
 async fn resolve_avatar(
     resolved_url: &Option<String>,
     raw_author_url: Option<&str>,
@@ -397,8 +397,7 @@ async fn resolve_avatar(
         }
     }
 
-    // Priority 2-3: Fetch the author's page and try h-card photo + favicon.
-    // Requires the webmentions feature for HTML parsing.
+    // Priority 2: Fetch the author's page and try h-card photo + favicon.
     #[cfg(feature = "webmentions")]
     if let Some(url) = resolved_url {
         if let Ok(parsed) = Url::parse(url) {
@@ -409,16 +408,7 @@ async fn resolve_avatar(
         }
     }
 
-    // Priority 4: icon.horse fallback from the author URL domain.
-    if let Some(url) = raw_author_url {
-        if let Ok(parsed) = Url::parse(url) {
-            if let Some(domain) = parsed.host_str() {
-                return Some(format!("https://icon.horse/{}", domain));
-            }
-        }
-    }
-
-    // Priority 5: GitHub avatar from `github_username` form field.
+    // Priority 3: GitHub avatar from `github_username` form field.
     if let Some(gh) = github_username {
         let gh = gh.trim();
         if !gh.is_empty() {
@@ -428,8 +418,25 @@ async fn resolve_avatar(
         }
     }
 
-    // Priority 6: Default avatar.
-    Some("/embed/default-avatar.jpg".to_string())
+    // Priority 4: DiceBear generated avatar from the author URL domain.
+    if let Some(url) = raw_author_url {
+        if let Ok(parsed) = Url::parse(url) {
+            if let Some(domain) = parsed.host_str() {
+                return Some(format!("https://api.dicebear.com/7.x/notionists/svg?seed={domain}"));
+            }
+        }
+    }
+
+    // Priority 5: DiceBear from GitHub username.
+    if let Some(gh) = github_username {
+        let gh = gh.trim();
+        if !gh.is_empty() {
+            return Some(format!("https://api.dicebear.com/7.x/notionists/svg?seed={gh}"));
+        }
+    }
+
+    // Priority 6: DiceBear from IP address (unique per-author without any other signal).
+    Some("https://api.dicebear.com/7.x/notionists/svg?seed=anonymous".to_string())
 }
 
 /// Fetch a URL, parse the HTML, and try to extract an avatar.
@@ -642,13 +649,13 @@ mod tests {
         assert_eq!(c.author_name, "Bob", "name stayed as form value");
         assert_eq!(
             c.author_avatar.as_deref(),
-            Some("/embed/default-avatar.jpg"),
-            "default avatar when no URL and unknown GitHub"
+            Some("https://api.dicebear.com/7.x/notionists/svg?seed=nobody"),
+            "DiceBear avatar from github_username when GitHub lookup fails"
         );
     }
 
     #[tokio::test]
-    async fn author_url_sets_icon_horse_avatar() {
+    async fn author_url_sets_dicebear_avatar() {
         let (state, _dir) = test_state();
         let app = build_app(state.clone());
         let body =
@@ -664,7 +671,7 @@ mod tests {
         assert_eq!(c.author_url, Some("https://alice.blog".to_string()));
         assert_eq!(
             c.author_avatar,
-            Some("https://icon.horse/alice.blog".to_string())
+            Some("https://api.dicebear.com/7.x/notionists/svg?seed=alice.blog".to_string())
         );
     }
 
@@ -682,8 +689,8 @@ mod tests {
         assert!(c.author_url.is_none());
         assert_eq!(
             c.author_avatar.as_deref(),
-            Some("/embed/default-avatar.jpg"),
-            "default avatar should be set when no URL or GitHub is provided"
+            Some("https://api.dicebear.com/7.x/notionists/svg?seed=anonymous"),
+            "DiceBear avatar should be set as fallback"
         );
     }
 

@@ -1,89 +1,54 @@
-# zapiska
+<p align="center">
+  <img src="assets/logo_transparent.png" alt="zapiska" width="100%">
+</p>
 
-A comment and webmention engine. Self-hosted, one binary, SQLite-backed.
+<p align="center">
+  <strong>A comment and webmention engine.</strong>
+  <br>
+  Self-hosted. One binary. Your data.
+</p>
 
-Submit comments via a form, accept webmentions from other sites, serve them all through a JSON API. Every entry passes through a pending queue. What happens next is up to your moderation system.
+---
 
-## Quick start
+zapiska is a backend for blog comments and webmentions. You style the frontend. You choose the moderation. We handle the plumbing.
+
+## features
+
+**Style it all you want** — zapiska is backend only. Use the included JS widget, build your own frontend, or pipe comments into a static site. The API gives you data; how it looks is up to you.
+
+**Bring your own moderation** — hook in an LLM, a rules engine, a community blocklist, or the built-in dashboard. zapiska doesn't decide what spam means — that's your call. Community moderation tools plug in via the admin API.
+
+**Threaded replies** — nested conversations up to 4 levels deep. Sorted oldest-first within each thread. Flat mode available (set depth to 0).
+
+**Webmention support** — accepts W3C webmentions from other sites. Auto-fetches source pages, parses author profiles, pulls in avatars.
+
+**Built-in spam protection** — rate limiting, per-IP daily caps, per-domain caps, honeypot fields, content hash dedup, URL cross-referencing. All configurable, none of it decides what's spam for you.
+
+**Profile pictures built-in** — GitHub avatars, h-card photos, favicon extraction, DiceBear fallback. No external service required.
+
+**Admin API** — every moderation action is an API call. Query by status, path, IP, content hash, or URL. Fetch parent chains and author stats. Moderate singly or in batch. Your tool talks to zapiska, not the other way around.
+
+**One binary, zero dependencies** — Rust + SQLite. No Postgres, no Redis, no JS runtime. ~10MB. Runs on a $5 VPS or a Raspberry Pi.
+
+## quick start
 
 ```sh
 echo 'ADMIN_TOKEN="your-secret"' > .env
 cargo run --release
 ```
 
-Server starts at `http://127.0.0.1:3000`. Put it behind nginx or Caddy for TLS.
+Server starts at `http://127.0.0.1:3000`. Open `/admin` to log in.
 
-## Features
-
-- **Comment submission** — form-based, with threaded replies (4 levels)
-- **Webmention support** — W3C standard, auto-fetches and parses source pages
-- **JSON API** — embeddable JS widget included, or build your own frontend
-- **Admin API** — moderate, batch, filter by IP/status/path, get parent chains
-- **Rate limiting** — per-IP, per-domain, daily caps. Configurable limits
-- **Honeypot** — marks suspected spam submissions for your moderation tool
-- **SSRF protection** — DNS blocklist, redirect policy on outbound fetches
-- **GitHub enrichment** — resolves author names and avatars via the GitHub API
-- **Optional IP storage** — enable `STORE_IP_ADDRESS` for spam analysis
-
-## Quick embed
+## embed
 
 ```html
 <div id="nc-comments"></div>
-<script id="nc-comments"
+<script
+  id="nc-comments"
   src="https://your-server.com/embed/comments.js"
   data-path="/blog/post-1"></script>
 ```
 
-The widget renders threaded replies with inline reply forms. See [embed docs](embed/README.md).
+## links
 
-## Webmention endpoint
-
-```html
-<link rel="webmention" href="https://your-server.com/api/webmention" />
-```
-
-## API
-
-The admin API is how external moderation tools control zapiska. Fetch pending comments, get parent context, filter by IP, look up author identity across signals, check duplicate content by hash, cross-reference URLs, batch-moderate, bulk fetch context. Everything a stateless moderation engine needs.
-
-See [docs/api.md](docs/api.md) for the full reference. OpenAPI UI at `/swagger-ui/`.
-
-## Configuration
-
-Key environment variables:
-
-| Variable | Default | What it does |
-|---|---|---|
-| `ADMIN_TOKEN` | required | Auth token for the admin API |
-| `DATABASE_PATH` | `./comments.db` | Where data lives |
-| `ALLOWED_CORS_ORIGIN` | `https://nithitsuki.com` | Your blog's origin |
-| `DEFAULT_COMMENT_STATUS` | `pending` | `pending` = manual review, `approved` = auto-publish |
-| `MAX_THREAD_DEPTH` | `0` | Nesting depth for replies. 0 = disabled. |
-| `MAX_COMMENTS_PER_IP_PER_DAY` | `50` | Per-IP daily comment cap |
-| `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` | `10` | Per-domain hourly webmention cap |
-| `STORE_IP_ADDRESS` | `false` | Store submitter IPs for spam analysis |
-| `MODERATION_WEBHOOK_URL` | (unset) | URL for external moderation engine |
-| `HONEYPOT_FIELD` | `website` | Anti-spam honeypot field name |
-
-All config vars are in [docs/deployment.md](docs/deployment.md).
-
-## Deployment
-
-```sh
-docker build -t zapiska .
-docker run -e ADMIN_TOKEN=your-secret -v data:/data zapiska
-```
-
-See [docs/deployment.md](docs/deployment.md) for systemd, nginx, Docker, and feature flags.
-
-## Development
-
-```sh
-cargo test
-```
-
-See [docs/development.md](docs/development.md).
-
-## License
-
-MIT
+[Admin API reference](docs/api.md) · [Deployment guide](docs/deployment.md) · [Building a moderation engine](docs/moderation-engine.md) · [Configuration](docs/deployment.md)

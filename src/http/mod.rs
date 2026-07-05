@@ -84,7 +84,6 @@ pub fn build_app(state: AppState) -> Router {
         .route("/healthz", axum::routing::get(healthz))
         .route("/admin", axum::routing::get(admin_dashboard))
         .route("/embed/comments.js", axum::routing::get(comments_js))
-        .route("/embed/default-avatar.jpg", axum::routing::get(default_avatar))
         .route("/api/admin/login", axum::routing::post(admin::login))
         .route("/api/admin/logout", axum::routing::post(admin::logout))
         .route(
@@ -121,21 +120,6 @@ pub fn build_app(state: AppState) -> Router {
 
 async fn admin_dashboard() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../embed/admin.html"))
-}
-
-async fn default_avatar() -> (
-    axum::http::StatusCode,
-    [(&'static str, &'static str); 2],
-    &'static [u8],
-) {
-    (
-        axum::http::StatusCode::OK,
-        [
-            ("content-type", "image/jpeg"),
-            ("cache-control", "public, max-age=86400"),
-        ],
-        include_bytes!("../../embed/default-avatar.jpg"),
-    )
 }
 
 async fn comments_js() -> (
