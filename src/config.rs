@@ -17,8 +17,9 @@ pub struct Config {
     pub fetch_timeout_ms: u64,
     pub worker_backlog: usize,
     pub rust_log: String,
-    /// Name of the honeypot form field. If this field is non-empty, the submission
-    /// is silently discarded. The field is hidden from human users via CSS.
+    /// Name of the honeypot form field. When non-empty, the submission is stored
+    /// with `honeypot = 1` (flagged for moderator review, not discarded).
+    /// The field is hidden from human users via CSS.
     pub honeypot_field: String,
     /// Max native comments per IP per day (resets at midnight UTC). 0 = unlimited.
     pub max_comments_per_ip_per_day: u32,
@@ -28,6 +29,18 @@ pub struct Config {
     /// Disabled by default for privacy. Set to "true" to enable IP-based
     /// spam analysis in moderation scripts.
     pub store_ip_address: bool,
+    /// Optional URL of an external moderation webhook. When set, zapiska
+    /// POSTs the full comment data to this URL after every submission.
+    /// The external service can use the admin API for additional context
+    /// and call `/api/admin/moderate` to make a decision at any time.
+    pub moderation_webhook_url: Option<String>,
+    /// Default moderation status for new comments.
+    /// `"pending"` = manual review required (default).
+    /// `"approved"` = auto-approve (posts appear immediately).
+    /// Either way, the moderation webhook is still notified if configured.
+    pub default_comment_status: String,
+    /// Maximum nesting depth for threaded replies. 0 = disabled (no nesting).
+    pub max_thread_depth: i64,
 }
 
 #[derive(Debug, Error)]
@@ -150,6 +163,13 @@ impl Config {
 
         let store_ip_address = env_or_default("STORE_IP_ADDRESS", "false") == "true";
 
+        let moderation_webhook_url = env::var("MODERATION_WEBHOOK_URL").ok().filter(|s| !s.is_empty());
+        let default_comment_status = env_or_default("DEFAULT_COMMENT_STATUS", "pending");
+        let max_thread_depth = env_or_default("MAX_THREAD_DEPTH", "0")
+            .parse::<i64>()
+            .unwrap_or(0)
+            .clamp(0, 10);
+
         Ok(Config {
             bind_addr,
             public_target_origin,
@@ -167,6 +187,9 @@ impl Config {
             max_comments_per_ip_per_day,
             max_webmentions_per_domain_per_hour,
             store_ip_address,
+            moderation_webhook_url,
+            default_comment_status,
+            max_thread_depth,
         })
     }
 
@@ -199,6 +222,13 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 max_body_size: {}, \
                 fetch_timeout_ms: {}, \
                 worker_backlog: {}, \
+                honeypot_field: {}, \
+                max_comments_per_ip_per_day: {}, \
+                max_webmentions_per_domain_per_hour: {}, \
+                store_ip_address: {}, \
+                moderation_webhook_url: {}, \
+                default_comment_status: {}, \
+                max_thread_depth: {}, \
                 rust_log: {} \
             }}",
             self.0.bind_addr,
@@ -211,6 +241,13 @@ impl std::fmt::Display for RedactedConfig<'_> {
             self.0.max_body_size,
             self.0.fetch_timeout_ms,
             self.0.worker_backlog,
+            self.0.honeypot_field,
+            self.0.max_comments_per_ip_per_day,
+            self.0.max_webmentions_per_domain_per_hour,
+            self.0.store_ip_address,
+            self.0.moderation_webhook_url.as_deref().unwrap_or("(unset)"),
+            self.0.default_comment_status,
+            self.0.max_thread_depth,
             self.0.rust_log,
         )
     }
@@ -428,6 +465,9 @@ mod tests {
         max_comments_per_ip_per_day: 50,
         max_webmentions_per_domain_per_hour: 10,
         store_ip_address: false,
+        moderation_webhook_url: None,
+        default_comment_status: "pending".to_string(),
+        max_thread_depth: 0,
         };
         let rendered = format!("{}", config.redacted_display());
         assert!(

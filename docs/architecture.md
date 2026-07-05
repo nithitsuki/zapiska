@@ -17,7 +17,7 @@ SQLite (r2d2 pool, WAL mode, all access via spawn_blocking)
 
 ```
 src/
-  config.rs          Environment config (12 vars)
+  config.rs          Environment config (19 vars)
   error.rs           AppError enum + IntoResponse + Display (6 HTTP status variants)
   state.rs           AppState: config, pool, repo, github, wm_sender, http_client
   sanitize.rs        HTML sanitization via ammonia

@@ -8,7 +8,7 @@ Interactive docs at `/swagger-ui/` when the server is running. Raw OpenAPI 3.1 s
 
 Approved comments for a path. Returns a flat list — the embed widget builds the thread tree client-side.
 
-`parent_id` is the ID of the parent comment (null for top-level). `depth` is the nesting level (0 = top-level, max 4).
+`parent_id` is the ID of the parent comment (null for top-level). `depth` is the nesting level (0 = top-level, up to `MAX_THREAD_DEPTH`).
 
 | Param | Type | Default | Description |
 |---|---|---|---|
@@ -29,7 +29,7 @@ Response (200):
       "author_url": "https://alice.blog",
       "author_avatar": "https://alice.blog/me.jpg",
       "content": "<p>Mentioned your page</p>",
-      "created_at": "2026-07-03 16:40:00",
+      "created_at": "2026-07-03T16:40:00",
       "parent_id": null,
       "depth": 0
     }
@@ -45,7 +45,7 @@ Errors: 400 (path missing/invalid).
 
 ### POST /api/comment
 
-Submit a native comment. Creates a `pending` entry.
+Submit a native comment. Creates a `pending` (or `approved`, depending on `DEFAULT_COMMENT_STATUS`) entry.
 
 `Content-Type: application/x-www-form-urlencoded`
 
@@ -56,16 +56,23 @@ Submit a native comment. Creates a `pending` entry.
 | `content` | yes | HTML content (ammonia sanitized, max 2000 chars). |
 | `author_url` | no | Author's website (absolute http/https). |
 | `github_username` | no | GitHub username for profile enrichment. |
-| `parent_id` | no | ID of the parent comment for threaded replies. Parent must exist, be approved, on the same path, and at depth < 4. |
+| `parent_id` | no | ID of the parent comment for threaded replies. Requires `MAX_THREAD_DEPTH > 0`. |
+| `website` | no | Honeypot field — if non-empty the comment is stored with `honeypot = 1`. |
 
-Response: 201 (empty body).
+Response: 201 with `{ "delete_token": "a1b2c3d4e5f6g7h8" }`. The `delete_token` is a 16-char hex string for self-service deletion.
 
 Errors: 400 (validation), 429 (rate limited).
 
-Author resolution:
+Author resolution (priority order):
 1. `github_username` → GitHub API name + avatar (cached 30d)
-2. `author_url` → name from form, avatar from `icon.horse/<domain>`
-3. Neither → name from form, no avatar/URL
+2. `author_url` → name from form, URL kept as-is
+
+Avatar resolution (priority order, independent of name):
+1. `author_url` is a github.com URL → GitHub API avatar for that user
+2. (webmentions feature) Fetch author's page → h-card photo → favicon parse
+3. `author_url` domain → `https://icon.horse/<domain>` favicon proxy
+4. `github_username` → GitHub API avatar (fallback)
+5. `/embed/default-avatar.jpg` (local default, not hotlinked)
 
 ---
 
@@ -86,9 +93,25 @@ Errors: 400 (invalid URL, origin mismatch, source=target), 503 (backlog full).
 
 ---
 
+### POST /api/comment/{id}/delete
+
+Self-service comment deletion. Uses the `delete_token` returned from the original submission.
+
+`Content-Type: application/json`
+
+```json
+{ "token": "a1b2c3d4e5f6g7h8" }
+```
+
+Response (200): `{ "success": true }`
+
+Errors: 404 (comment not found or token doesn't match).
+
+---
+
 ## Auth
 
-All admin endpoints need either:
+All `/api/admin/*` endpoints need either:
 - `Authorization: Bearer <ADMIN_TOKEN>` header, or
 - `admin_token=<ADMIN_TOKEN>` cookie (set via `POST /api/admin/login`)
 
@@ -118,6 +141,8 @@ Response (200): `Set-Cookie: admin_token=; Path=/; Max-Age=0` + `{ "success": tr
 
 ## Admin
 
+All admin endpoints return comment objects with these fields: `id`, `target_path`, `comment_type`, `source_url`, `author_name`, `author_url`, `author_avatar`, `content`, `status`, `parent_id`, `depth`, `honeypot`, `delete_token`, `submitter_ip`, `created_at`.
+
 ### GET /api/admin/pending
 
 Pending comments, newest first.
@@ -145,19 +170,22 @@ Response (200):
       "status": "pending",
       "parent_id": null,
       "depth": 0,
-      "created_at": "2026-07-03 17:00:00"
+      "honeypot": false,
+      "delete_token": null,
+      "submitter_ip": "192.168.1.1",
+      "created_at": "2026-07-03T17:00:00"
     }
   ]
 }
 ```
 
-Errors: 401 (no/invalid token).
+Errors: 401.
 
 ---
 
 ### GET /api/admin/comments
 
-List comments by status, with optional path filter. Useful for building moderation queues.
+List comments by status, with optional path and IP filters.
 
 | Param | Type | Default | Description |
 |---|---|---|---|
@@ -165,8 +193,9 @@ List comments by status, with optional path filter. Useful for building moderati
 | `limit` | int | 50 | Max results (clamped 1-100). |
 | `before` | int | — | Cursor. |
 | `path` | string | — | Filter by target_path. |
+| `ip` | string | — | Filter by submitter IP address (requires `STORE_IP_ADDRESS=true`). |
 
-Response (200): Same shape as `/api/admin/pending`.
+Response (200): Same shape as `/api/admin/pending`. Each comment includes all fields.
 
 Errors: 401.
 
@@ -180,35 +209,10 @@ Response (200):
 
 ```json
 {
-  "comment": {
-    "id": 10,
-    "target_path": "/blog/hello",
-    "comment_type": "native",
-    "source_url": null,
-    "author_name": "Charlie",
-    "author_url": null,
-    "author_avatar": null,
-    "content": "<p>Does it support Markdown?</p>",
-    "status": "pending",
-    "parent_id": 9,
-    "depth": 2,
-    "created_at": "2026-07-04 12:00:00"
-  },
+  "comment": { "...all PendingComment fields..." },
   "parents": [
-    {
-      "id": 9,
-      "author_name": "Bob",
-      "content": "<p>Up to 4 levels.</p>",
-      "depth": 1,
-      "created_at": "2026-07-04 11:30:00"
-    },
-    {
-      "id": 8,
-      "author_name": "Alice",
-      "content": "<p>How does threading work?</p>",
-      "depth": 0,
-      "created_at": "2026-07-04 11:00:00"
-    }
+    { "...parent comment fields..." },
+    { "...grandparent comment fields..." }
   ]
 }
 ```
@@ -245,8 +249,7 @@ Moderate multiple comments in one request. Each action is processed independentl
 {
   "actions": [
     { "id": 10, "action": "approved" },
-    { "id": 11, "action": "spam" },
-    { "id": 999, "action": "approved" }
+    { "id": 11, "action": "spam" }
   ]
 }
 ```
@@ -257,13 +260,12 @@ Response (200):
 {
   "results": [
     { "id": 10, "status": "approved", "error": null },
-    { "id": 11, "status": "spam", "error": null },
-    { "id": 999, "status": "", "error": "comment 999 not found" }
+    { "id": 11, "status": "spam", "error": null }
   ]
 }
 ```
 
-Errors: 401 (top-level — no auth at all). Individual action failures appear as `error` in each result.
+Errors: 401 (top-level). Individual action failures appear as `error` in each result.
 
 ---
 

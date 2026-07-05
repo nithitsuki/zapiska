@@ -30,7 +30,8 @@ pub struct CommentForm {
     /// ID of the parent comment for threaded replies. Omit for top-level comments.
     pub parent_id: Option<i64>,
     /// Honeypot field — bots auto-fill this, humans don't see it.
-    /// If non-empty, the submission is silently discarded.
+    /// When non-empty, the submission is stored with `honeypot = 1`.
+    /// The moderation system decides what to do with flagged comments.
     pub website: Option<String>,
 }
 
@@ -128,7 +129,11 @@ pub async fn create_comment(
         None
     };
 
-    // 7. Store
+    // 7. Store. Clone values needed for the webhook payload later.
+    let hook_name = resolved_name.clone();
+    let hook_url = resolved_url.clone();
+    let hook_avatar = resolved_avatar.clone();
+    let hook_ip = submitter_ip.clone();
     let new_id = state
         .repo
         .insert_comment(NewComment {
@@ -147,6 +152,44 @@ pub async fn create_comment(
         })
         .await?;
 
+    // 8. Optionally auto-approve (allowed-by-default moderation).
+    if state.config.default_comment_status == "approved" {
+        let _ = state.repo.update_status(new_id, "approved").await;
+    }
+
+    // 9. Fire moderation webhook (fire-and-forget — doesn't block the response).
+    if let Some(ref webhook_url) = state.config.moderation_webhook_url {
+        let client = state.http_client.clone();
+        let url = webhook_url.clone();
+        let payload = serde_json::json!({
+            "event": "comment.created",
+            "id": new_id,
+            "target_path": target_path,
+            "comment_type": "native",
+            "author_name": hook_name,
+            "author_url": hook_url,
+            "author_avatar": hook_avatar,
+            "honeypot": is_honeypot,
+            "parent_id": parent_id,
+            "depth": depth,
+            "submitter_ip": hook_ip,
+            "delete_token": delete_token_str,
+            "admin_url": format!("/api/admin/comments/{}", new_id),
+        });
+        tokio::spawn(async move {
+            let resp = client
+                .post(&url)
+                .json(&payload)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await;
+            match resp {
+                Ok(r) => tracing::debug!(webhook = %url, status = %r.status(), "moderation webhook notified"),
+                Err(e) => tracing::warn!(webhook = %url, err = %e, "moderation webhook failed"),
+            }
+        });
+    }
+
     tracing::debug!(id = new_id, "comment stored");
 
     Ok((
@@ -154,10 +197,6 @@ pub async fn create_comment(
         Json(serde_json::json!({ "delete_token": delete_token_str })),
     ))
 }
-
-/// Maximum nesting depth for replies. Depth 0 = top-level, 4 = deepest allowed.
-/// This prevents infinite recursion in rendering and keeps thread trees readable.
-const MAX_DEPTH: i64 = 4;
 
 /// Generate a random hex token for self-service comment deletion.
 /// Uses a hash of the peer IP, current time, and a monotonic counter.
@@ -211,8 +250,9 @@ pub async fn delete_comment(
 /// - If `form_parent_id` is None: top-level comment (parent_id = None, depth = 0).
 /// - If `form_parent_id` is Some(id):
 ///   - Parent must exist, be approved, and belong to the same target_path.
-///   - Parent's depth must be < MAX_DEPTH.
+///   - Parent's depth must be < max_thread_depth.
 ///   - Reply depth = parent.depth + 1.
+/// - If max_thread_depth is 0, nesting is disabled entirely.
 async fn resolve_parent(
     form_parent_id: &Option<i64>,
     target_path: &str,
@@ -222,6 +262,13 @@ async fn resolve_parent(
         return Ok((None, 0));
     };
     let pid = *pid;
+
+    let max_depth = state.config.max_thread_depth;
+    if max_depth == 0 {
+        return Err(AppError::BadRequest(
+            "threaded replies are disabled on this server".to_string(),
+        ));
+    }
 
     let parent = state
         .repo
@@ -243,9 +290,9 @@ async fn resolve_parent(
         )));
     }
 
-    if parent.depth >= MAX_DEPTH {
+    if parent.depth >= max_depth {
         return Err(AppError::BadRequest(format!(
-            "nesting depth exceeded: parent comment {pid} is at depth {}, max allowed is {MAX_DEPTH}",
+            "nesting depth exceeded: parent comment {pid} is at depth {}, max allowed is {max_depth}",
             parent.depth
         )));
     }

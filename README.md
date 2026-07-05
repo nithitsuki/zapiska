@@ -57,9 +57,13 @@ Key environment variables:
 | `ADMIN_TOKEN` | required | Auth token for the admin API |
 | `DATABASE_PATH` | `./comments.db` | Where data lives |
 | `ALLOWED_CORS_ORIGIN` | `https://nithitsuki.com` | Your blog's origin |
-| `STORE_IP_ADDRESS` | `false` | Store submitter IPs for spam analysis |
+| `DEFAULT_COMMENT_STATUS` | `pending` | `pending` = manual review, `approved` = auto-publish |
+| `MAX_THREAD_DEPTH` | `0` | Nesting depth for replies. 0 = disabled. |
 | `MAX_COMMENTS_PER_IP_PER_DAY` | `50` | Per-IP daily comment cap |
 | `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` | `10` | Per-domain hourly webmention cap |
+| `STORE_IP_ADDRESS` | `false` | Store submitter IPs for spam analysis |
+| `MODERATION_WEBHOOK_URL` | (unset) | URL for external moderation engine |
+| `HONEYPOT_FIELD` | `website` | Anti-spam honeypot field name |
 
 All config vars are in [docs/deployment.md](docs/deployment.md).
 
