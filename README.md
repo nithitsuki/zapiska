@@ -12,9 +12,16 @@
 
 ---
 
-zapiska is a backend for blog comments and webmentions. You style the frontend. You choose the moderation. We handle the plumbing.
+# features
 
-## features
+<p align="center">
+  <span style="font-size: 0.8em; color: #666;">fully custom UI left upto you!</span>
+  <br>
+  <img src="assets/basic-ss.png" alt="zapiska screenshot" width="300px">
+  <br>
+  <span style="font-size: 0.8em; color: #666;">Basic screenshot of the a minimal UI frontend</span>
+</p>
+
 
 #### Style it all you want
 Zapiska is backend only. Use the included JS widget, build your own frontend, or pipe comments into a static site. The API gives you the data; how it looks is up to you.
