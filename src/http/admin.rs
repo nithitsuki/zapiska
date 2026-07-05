@@ -150,6 +150,8 @@ pub struct PendingComment {
     pub delete_token: Option<String>,
     /// Submitter IP address (only available when STORE_IP_ADDRESS is enabled).
     pub submitter_ip: Option<String>,
+    /// Content hash for duplicate detection.
+    pub content_hash: Option<String>,
 }
 
 #[utoipa::path(
@@ -189,6 +191,7 @@ pub async fn list_pending(
             honeypot: c.honeypot,
             delete_token: c.delete_token,
             submitter_ip: c.submitter_ip,
+            content_hash: c.content_hash,
             created_at: c.created_at,
         })
         .collect();
@@ -206,6 +209,8 @@ pub struct AdminCommentsQuery {
     pub path: Option<String>,
     /// Filter by submitter IP address (requires STORE_IP_ADDRESS=true).
     pub ip: Option<String>,
+    /// Filter by content hash (for duplicate detection).
+    pub content_hash: Option<String>,
 }
 
 #[utoipa::path(
@@ -227,10 +232,11 @@ pub async fn list_comments(
     let before = query.before;
     let path = query.path.as_deref();
     let ip = query.ip.as_deref();
+    let content_hash = query.content_hash.as_deref();
 
     let comments = state
         .repo
-        .list_comments(status, limit, before, path, ip)
+        .list_comments(status, limit, before, path, ip, content_hash)
         .await?;
 
     let comments: Vec<PendingComment> = comments
@@ -250,6 +256,7 @@ pub async fn list_comments(
             honeypot: c.honeypot,
             delete_token: c.delete_token,
             submitter_ip: c.submitter_ip,
+            content_hash: c.content_hash,
             created_at: c.created_at,
         })
         .collect();
@@ -292,6 +299,7 @@ pub async fn get_comment(
         honeypot: c.honeypot,
         delete_token: c.delete_token,
         submitter_ip: c.submitter_ip,
+        content_hash: c.content_hash,
         created_at: c.created_at,
     };
 
@@ -347,6 +355,37 @@ pub async fn moderate_batch(
     Ok(Json(BatchModerateResponse { results }))
 }
 
+/// Fire a webhook notification when a comment's status changes.
+/// Used by the moderation system to keep its cache in sync.
+fn fire_status_webhook(state: &AppState, id: i64, old_status: &str, new_status: &str, changed_by: &str) {
+    if let Some(ref url) = state.config.moderation_webhook_url {
+        let client = state.http_client.clone();
+        let url = url.clone();
+        let old = old_status.to_string();
+        let new = new_status.to_string();
+        let by = changed_by.to_string();
+        tokio::spawn(async move {
+            let payload = serde_json::json!({
+                "event": "comment.status_changed",
+                "id": id,
+                "old_status": old,
+                "new_status": new,
+                "changed_by": by,
+            });
+            let resp = client
+                .post(&url)
+                .json(&payload)
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await;
+            match resp {
+                Ok(r) => tracing::debug!(id, new_status = %new, webhook_status = %r.status(), "status change webhook sent"),
+                Err(e) => tracing::warn!(id, err = %e, "status change webhook failed"),
+            }
+        });
+    }
+}
+
 /// Moderate a single comment. Returns the new status on success.
 async fn moderate_single(
     state: &AppState,
@@ -367,6 +406,147 @@ async fn moderate_single(
 
     state.repo.update_status(id, action).await?;
     Ok(action.to_string())
+}
+
+// ── Author lookup endpoint ──────────────────────────────────
+
+/// GET /api/admin/authors/lookup — resolve author identity and return stats.
+/// Query params: ip, author_name, author_url, combine (bool).
+pub async fn author_lookup(
+    State(state): State<AppState>,
+    Query(query): Query<AuthorLookupQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let combine = query.combine.unwrap_or(false);
+    let result = state
+        .repo
+        .lookup_author(
+            query.ip.as_deref(),
+            query.author_name.as_deref(),
+            query.author_url.as_deref(),
+            combine,
+        )
+        .await?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+pub struct AuthorLookupQuery {
+    pub ip: Option<String>,
+    pub author_name: Option<String>,
+    pub author_url: Option<String>,
+    pub combine: Option<bool>,
+}
+
+// ── URL query endpoints ─────────────────────────────────────
+
+/// GET /api/admin/urls/lookup?url_hash=<hash> — find all comments with a given URL.
+pub async fn url_lookup(
+    State(state): State<AppState>,
+    Query(query): Query<UrlLookupQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if let Some(hash) = &query.url_hash {
+        let stats = state.repo.lookup_url(hash).await?;
+        return Ok(Json(serde_json::to_value(&stats).unwrap()));
+    }
+    if let Some(domain) = &query.domain {
+        let hashes = state.repo.lookup_domain(domain).await?;
+        let mut results = Vec::new();
+        for h in hashes {
+            if let Ok(stats) = state.repo.lookup_url(&h).await {
+                results.push(serde_json::to_value(&stats).unwrap());
+            }
+        }
+        return Ok(Json(serde_json::json!({"urls": results, "domain": domain})));
+    }
+    Err(AppError::BadRequest("provide url_hash or domain".to_string()))
+}
+
+#[derive(Deserialize)]
+pub struct UrlLookupQuery {
+    pub url_hash: Option<String>,
+    pub domain: Option<String>,
+}
+
+/// GET /api/admin/comments/{id}/urls — list extracted URLs for a comment.
+pub async fn comment_urls(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let urls = state.repo.get_comment_urls(id).await?;
+    Ok(Json(serde_json::json!({"comment_id": id, "urls": urls})))
+}
+
+// ── POST /api/admin/comments/context ────────────────────────
+
+/// Fetch context for multiple comments in one call: parent chains, author stats, URLs.
+#[derive(Deserialize)]
+pub struct BulkContextRequest {
+    pub comment_ids: Vec<i64>,
+    pub include_parents: Option<bool>,
+    pub include_author_stats: Option<bool>,
+    pub include_urls: Option<bool>,
+}
+
+pub async fn bulk_context(
+    State(state): State<AppState>,
+    Json(body): Json<BulkContextRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut results = Vec::new();
+
+    for cid in body.comment_ids {
+        let comment = state.repo.get_comment(cid).await?;
+        let Some(c) = comment else { continue };
+
+        let mut entry = serde_json::json!({
+            "id": c.id,
+            "target_path": c.target_path,
+            "comment_type": c.comment_type,
+            "author_name": c.author_name,
+            "content": c.content,
+            "status": c.status,
+            "parent_id": c.parent_id,
+            "depth": c.depth,
+            "created_at": c.created_at,
+        });
+
+        if body.include_parents.unwrap_or(false) {
+            if let Ok(Some((_, chain))) = state.repo.get_comment_chain(cid).await {
+                entry["parents"] = serde_json::json!(chain.iter().map(|p| {
+                    serde_json::json!({
+                        "id": p.id,
+                        "author_name": p.author_name,
+                        "depth": p.depth,
+                        "created_at": p.created_at,
+                    })
+                }).collect::<Vec<_>>());
+            }
+        }
+
+        if body.include_author_stats.unwrap_or(false) {
+            if let Some(ref ip) = c.submitter_ip {
+                if let Ok(stats) = state.repo.submitter_stats(ip).await {
+                    entry["author_stats"] = serde_json::json!({
+                        "total_comments": stats.0,
+                        "approved": stats.1,
+                        "spam": stats.2,
+                        "pending": stats.3,
+                        "deleted": stats.4,
+                        "first_seen": stats.5,
+                    });
+                }
+            }
+        }
+
+        if body.include_urls.unwrap_or(false) {
+            if let Ok(urls) = state.repo.get_comment_urls(cid).await {
+                entry["urls"] = serde_json::json!(urls);
+            }
+        }
+
+        results.push(entry);
+    }
+
+    Ok(Json(serde_json::json!({"comments": results})))
 }
 
 // ── POST /api/admin/moderate ────────────────────────────────
@@ -401,10 +581,23 @@ pub async fn moderate(
     State(state): State<AppState>,
     Json(body): Json<ModerateRequest>,
 ) -> Result<Json<ModerateResponse>, AppError> {
-    let status = moderate_single(&state, body.id, &body.action).await?;
+    // Validate action first (before any DB calls) for consistent error messages.
+    if body.action != "approved" && body.action != "spam" && body.action != "deleted" && body.action != "pending" {
+        return Err(AppError::BadRequest(format!(
+            "invalid action '{}', must be one of: approved, spam, deleted, pending",
+            body.action
+        )));
+    }
+    // Fetch the current status for the webhook notification.
+    let old_status = state.repo.get_comment(body.id).await?.ok_or_else(|| {
+        AppError::NotFound(format!("comment {} not found", body.id))
+    })?.status;
+
+    state.repo.update_status(body.id, &body.action).await?;
+    fire_status_webhook(&state, body.id, &old_status, &body.action, "admin");
     Ok(Json(ModerateResponse {
         id: body.id,
-        status,
+        status: body.action.clone(),
     }))
 }
 
@@ -505,6 +698,7 @@ mod tests {
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            content_hash: None,
             })
             .await
             .unwrap();
@@ -547,6 +741,7 @@ mod tests {
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            content_hash: None,
             })
             .await
             .unwrap();
@@ -565,6 +760,7 @@ mod tests {
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            content_hash: None,
             })
             .await
             .unwrap();
@@ -607,6 +803,7 @@ mod tests {
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            content_hash: None,
             })
             .await
             .unwrap();
@@ -639,6 +836,7 @@ mod tests {
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            content_hash: None,
             })
             .await
             .unwrap();
@@ -706,6 +904,7 @@ mod tests {
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            content_hash: None,
             })
             .await
             .unwrap();
@@ -854,6 +1053,7 @@ mod tests {
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            content_hash: None,
             })
             .await
             .unwrap();
@@ -872,6 +1072,7 @@ mod tests {
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            content_hash: None,
             })
             .await
             .unwrap();

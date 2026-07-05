@@ -98,10 +98,13 @@ pub async fn create_comment(
             .map_err(|e| AppError::BadRequest(format!("invalid author_url: {e}")))?;
     }
 
-    // 2. Sanitize content
+    // 2. Compute content hash for dedup detection.
+    let content_hash = Some(sanitize::content_hash(&form.content));
+
+    // 3. Sanitize content
     let content = sanitize::sanitize_html(&form.content, state.config.max_content_len);
 
-    // 3. Resolve author info
+    // 4. Resolve author info
     let (resolved_name, resolved_url) =
         resolve_author(author_url.as_deref(), github_username.as_deref(), author_name, &state.github).await;
 
@@ -115,7 +118,7 @@ pub async fn create_comment(
     )
     .await;
 
-    // 5. Resolve parent for nesting
+    // 6. Resolve parent for nesting
     let (parent_id, depth) = resolve_parent(&form.parent_id, target_path, &state).await?;
 
     // 5. Generate delete token for self-service deletion.
@@ -134,6 +137,7 @@ pub async fn create_comment(
     let hook_url = resolved_url.clone();
     let hook_avatar = resolved_avatar.clone();
     let hook_ip = submitter_ip.clone();
+    let hook_content_hash = content_hash.clone();
     let new_id = state
         .repo
         .insert_comment(NewComment {
@@ -149,52 +153,93 @@ pub async fn create_comment(
             honeypot: is_honeypot,
             delete_token: Some(delete_token),
             submitter_ip,
+            content_hash,
         })
         .await?;
 
-    // 8. Optionally auto-approve (allowed-by-default moderation).
+    // 9. Optionally auto-approve (allowed-by-default moderation).
     if state.config.default_comment_status == "approved" {
         let _ = state.repo.update_status(new_id, "approved").await;
     }
 
-    // 9. Fire moderation webhook (fire-and-forget — doesn't block the response).
+    // 9. Extract and store URLs from content for cross-comment tracking.
+    let urls = sanitize::extract_urls(&form.content);
+    if !urls.is_empty() {
+        let _ = state.repo.insert_urls(new_id, urls).await;
+    }
+
+    // 10. Moderation webhook — either sync (await decision) or async (fire-and-forget).
+    let mut final_status = state.config.default_comment_status.clone(); // already applied above
     if let Some(ref webhook_url) = state.config.moderation_webhook_url {
         let client = state.http_client.clone();
         let url = webhook_url.clone();
+        let is_sync = state.config.moderation_webhook_mode == "sync";
+
+        // Build enriched payload
+        let submitter_stats = if let Some(ref ip) = hook_ip {
+            state.repo.submitter_stats(ip).await.ok()
+        } else {
+            None
+        };
+        let parent_chain = if parent_id.is_some() {
+            state.repo.get_comment_chain(new_id).await.ok().flatten()
+        } else {
+            None
+        };
+        let (total, approved, spam, pending, deleted, first_seen) = submitter_stats
+            .unwrap_or((0, 0, 0, 0, 0, None));
+        let parents = parent_chain.map(|(_, chain)| {
+            chain.into_iter().map(|p| serde_json::json!({
+                "id": p.id, "author_name": p.author_name, "content": p.content, "depth": p.depth,
+            })).collect::<Vec<_>>()
+        });
+
         let payload = serde_json::json!({
             "event": "comment.created",
-            "id": new_id,
-            "target_path": target_path,
-            "comment_type": "native",
-            "author_name": hook_name,
-            "author_url": hook_url,
-            "author_avatar": hook_avatar,
-            "honeypot": is_honeypot,
-            "parent_id": parent_id,
-            "depth": depth,
-            "submitter_ip": hook_ip,
-            "delete_token": delete_token_str,
+            "id": new_id, "target_path": target_path, "comment_type": "native",
+            "author_name": hook_name, "author_url": hook_url, "author_avatar": hook_avatar,
+            "honeypot": is_honeypot, "parent_id": parent_id, "depth": depth,
+            "submitter_ip": hook_ip, "delete_token": delete_token_str,
+            "content_hash": hook_content_hash, "is_reply": parent_id.is_some(),
+            "parents": parents,
+            "submitter": { "ip": hook_ip, "total_comments": total, "approved_comments": approved,
+                "spam_comments": spam, "pending_comments": pending, "deleted_comments": deleted,
+                "first_seen": first_seen },
             "admin_url": format!("/api/admin/comments/{}", new_id),
         });
-        tokio::spawn(async move {
-            let resp = client
-                .post(&url)
-                .json(&payload)
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await;
-            match resp {
-                Ok(r) => tracing::debug!(webhook = %url, status = %r.status(), "moderation webhook notified"),
-                Err(e) => tracing::warn!(webhook = %url, err = %e, "moderation webhook failed"),
+
+        if is_sync {
+            // Sync: wait for the webhook to respond with a decision.
+            match client.post(&url).json(&payload).timeout(std::time::Duration::from_secs(10)).send().await {
+                Ok(r) if r.status().is_success() => {
+                    if let Ok(decision) = r.json::<serde_json::Value>().await {
+                        if let Some(action) = decision["action"].as_str() {
+                            if matches!(action, "approved" | "spam" | "deleted" | "pending") {
+                                let _ = state.repo.update_status(new_id, action).await;
+                                final_status = action.to_string();
+                            }
+                        }
+                    }
+                }
+                Ok(r) => tracing::warn!(webhook = %url, status = %r.status(), "sync webhook returned error"),
+                Err(e) => tracing::warn!(webhook = %url, err = %e, "sync webhook failed"),
             }
-        });
+        } else {
+            // Async: fire-and-forget.
+            tokio::spawn(async move {
+                match client.post(&url).json(&payload).timeout(std::time::Duration::from_secs(10)).send().await {
+                    Ok(r) => tracing::debug!(webhook = %url, status = %r.status(), "moderation webhook notified"),
+                    Err(e) => tracing::warn!(webhook = %url, err = %e, "moderation webhook failed"),
+                }
+            });
+        }
     }
 
-    tracing::debug!(id = new_id, "comment stored");
+    tracing::debug!(id = new_id, status = %final_status, "comment stored");
 
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "delete_token": delete_token_str })),
+        Json(serde_json::json!({ "delete_token": delete_token_str, "status": final_status })),
     ))
 }
 

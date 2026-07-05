@@ -44,7 +44,7 @@ The widget renders threaded replies with inline reply forms. See [embed docs](em
 
 ## API
 
-The admin API is how external moderation tools control zapiska. Fetch pending comments, get parent context, filter by IP, batch-moderate. Everything a moderation engine needs.
+The admin API is how external moderation tools control zapiska. Fetch pending comments, get parent context, filter by IP, look up author identity across signals, check duplicate content by hash, cross-reference URLs, batch-moderate, bulk fetch context. Everything a stateless moderation engine needs.
 
 See [docs/api.md](docs/api.md) for the full reference. OpenAPI UI at `/swagger-ui/`.
 

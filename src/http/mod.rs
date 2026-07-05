@@ -42,6 +42,22 @@ pub fn build_app(state: AppState) -> Router {
             axum::routing::get(admin::get_comment),
         )
         .route(
+            "/api/admin/comments/{id}/urls",
+            axum::routing::get(admin::comment_urls),
+        )
+        .route(
+            "/api/admin/urls/lookup",
+            axum::routing::get(admin::url_lookup),
+        )
+        .route(
+            "/api/admin/authors/lookup",
+            axum::routing::get(admin::author_lookup),
+        )
+        .route(
+            "/api/admin/comments/context",
+            axum::routing::post(admin::bulk_context),
+        )
+        .route(
             "/api/admin/moderate",
             axum::routing::post(admin::moderate).layer(GovernorLayer {
                 config: Arc::new(admin_moderate_governor),
@@ -386,6 +402,7 @@ mod tests {
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            content_hash: None,
             })
             .await
             .unwrap();

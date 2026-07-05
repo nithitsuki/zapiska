@@ -63,6 +63,23 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error
     let _ = conn.execute(
         "ALTER TABLE comments ADD COLUMN submitter_ip TEXT",
         []);
+    // Migration 5: content hash for dedup detection.
+    let _ = conn.execute(
+        "ALTER TABLE comments ADD COLUMN content_hash TEXT",
+        []);
+    // Migration 6: extracted URLs for cross-comment tracking.
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS comment_urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            comment_id INTEGER NOT NULL REFERENCES comments(id),
+            url TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            url_hash TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_comment_urls_comment ON comment_urls(comment_id);
+        CREATE INDEX IF NOT EXISTS idx_comment_urls_domain ON comment_urls(domain);
+        CREATE INDEX IF NOT EXISTS idx_comment_urls_hash ON comment_urls(url_hash);",
+    );
 
     Ok(())
 }

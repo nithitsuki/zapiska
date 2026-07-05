@@ -49,6 +49,7 @@ pub(crate) mod helpers {
             max_webmentions_per_domain_per_hour: 10,
             store_ip_address: false,
             moderation_webhook_url: None,
+            moderation_webhook_mode: "async".to_string(),
             default_comment_status: "pending".to_string(),
             max_thread_depth: 0,
             },

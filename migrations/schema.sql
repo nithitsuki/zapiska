@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS comments (
     depth           INTEGER NOT NULL DEFAULT 0,
     honeypot        INTEGER NOT NULL DEFAULT 0,
     delete_token    TEXT,
-    submitter_ip    TEXT
+    submitter_ip    TEXT,
+    content_hash    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_comments_read
@@ -47,6 +48,17 @@ CREATE TABLE IF NOT EXISTS webmention_seen (
     last_status     TEXT    NOT NULL CHECK (last_status IN ('alive', 'gone')),
     PRIMARY KEY (source, target)
 );
+
+CREATE TABLE IF NOT EXISTS comment_urls (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    comment_id  INTEGER NOT NULL REFERENCES comments(id),
+    url         TEXT NOT NULL,
+    domain      TEXT NOT NULL,
+    url_hash    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_comment_urls_comment ON comment_urls(comment_id);
+CREATE INDEX IF NOT EXISTS idx_comment_urls_domain ON comment_urls(domain);
+CREATE INDEX IF NOT EXISTS idx_comment_urls_hash ON comment_urls(url_hash);
 
 CREATE TABLE IF NOT EXISTS github_profiles (
     login       TEXT    PRIMARY KEY,
