@@ -18,7 +18,12 @@ CREATE TABLE IF NOT EXISTS comments (
     status          TEXT    NOT NULL DEFAULT 'pending'
                             CHECK (status IN ('pending', 'approved', 'spam', 'deleted')),
     created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
-    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    parent_id       INTEGER REFERENCES comments(id),
+    depth           INTEGER NOT NULL DEFAULT 0,
+    honeypot        INTEGER NOT NULL DEFAULT 0,
+    delete_token    TEXT,
+    submitter_ip    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_comments_read
@@ -30,6 +35,10 @@ CREATE INDEX IF NOT EXISTS idx_comments_read
 CREATE UNIQUE INDEX IF NOT EXISTS idx_comments_source_target
     ON comments(source_url, target_path)
     WHERE source_url IS NOT NULL;
+
+-- Efficiently find replies to a given parent comment.
+CREATE INDEX IF NOT EXISTS idx_comments_parent
+    ON comments(parent_id);
 
 CREATE TABLE IF NOT EXISTS webmention_seen (
     source          TEXT    NOT NULL,

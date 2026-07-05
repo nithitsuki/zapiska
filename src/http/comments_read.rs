@@ -34,6 +34,10 @@ pub struct CommentJson {
     pub author_avatar: Option<String>,
     pub content: String,
     pub created_at: String,
+    /// ID of the parent comment, if a reply. Null for top-level comments.
+    pub parent_id: Option<i64>,
+    /// Nesting depth (0 = top-level).
+    pub depth: i64,
 }
 
 #[utoipa::path(
@@ -76,6 +80,8 @@ pub async fn list_comments(
             author_avatar: c.author_avatar,
             content: c.content,
             created_at: c.created_at,
+            parent_id: c.parent_id,
+            depth: c.depth,
         })
         .collect();
 

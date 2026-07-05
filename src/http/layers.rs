@@ -62,6 +62,7 @@ pub fn native_comment_governor() -> RateLimitConfig {
     governor_config(60, 5) // 5 per 60s
 }
 
+#[cfg(feature = "webmentions")]
 pub fn webmention_governor() -> RateLimitConfig {
     governor_config(60, 30) // 30 per 60s
 }

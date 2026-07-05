@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use ipnet::IpNet;
 
@@ -13,16 +14,14 @@ pub enum SsrfError {
     LookupFailed(String, String),
 }
 
-/// Blocked private/loopback/carrier-grade NAT / link-local etc. address ranges.
-/// Matches SPEC §6.1.
-fn blocked_nets() -> Vec<IpNet> {
-    // IPv4 ranges
+/// Blocked private/loopback/CGNAT/link-local address ranges. Matches SPEC §6.1.
+static BLOCKED_NETS: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
     let v4 = [
         "0.0.0.0/8",
         "10.0.0.0/8",
-        "100.64.0.0/10", // CGNAT
+        "100.64.0.0/10",
         "127.0.0.0/8",
-        "169.254.0.0/16", // link-local (incl. AWS metadata 169.254.169.254)
+        "169.254.0.0/16",
         "172.16.0.0/12",
         "192.0.0.0/24",
         "192.0.2.0/24",
@@ -30,18 +29,12 @@ fn blocked_nets() -> Vec<IpNet> {
         "198.18.0.0/15",
         "240.0.0.0/4",
     ];
-    // IPv6 ranges.
-    // IPv4-mapped addresses (::ffff:x.x.x.x) are handled by extracting
-    // the embedded IPv4 and re-running the IPv4 check; the /96 prefix is
-    // deliberately excluded here so legitimate public IPv4-mapped addrs
-    // are not falsely blocked.
     let v6 = ["::1/128", "fc00::/7", "fe80::/10"];
-
     v4.iter()
         .chain(v6.iter())
         .map(|s| IpNet::from_str(s).expect("hardcoded CIDR is valid"))
         .collect()
-}
+});
 
 /// Check if `ip` falls in any blocked range.
 pub fn is_blocked_ip(ip: IpAddr) -> bool {
@@ -56,7 +49,7 @@ pub fn is_blocked_ip(ip: IpAddr) -> bool {
 }
 
 fn is_blocked_ip_inner(ip: IpAddr) -> bool {
-    blocked_nets().iter().any(|net| net.contains(&ip))
+    BLOCKED_NETS.iter().any(|net| net.contains(&ip))
 }
 
 /// Check if a hostname string belongs to a blocked namespace.

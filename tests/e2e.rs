@@ -3,14 +3,17 @@ use std::sync::Arc;
 
 use reqwest::Client;
 use tempfile::tempdir;
+#[cfg(feature = "webmentions")]
 use wiremock::matchers::{method, path};
+#[cfg(feature = "webmentions")]
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use zapiska::config::Config;
 use zapiska::db::pool::{create_pool, run_migrations};
 use zapiska::db::repo::CommentsRepo;
 use zapiska::http::build_app;
-use zapiska::state::AppState;
+use zapiska::state::{AppState, Limiter};
+#[cfg(feature = "webmentions")]
 use zapiska::worker;
 
 /// Helper: start a real server on a random port, return the base URL + state.
@@ -28,6 +31,10 @@ async fn start_server() -> (String, AppState) {
         fetch_timeout_ms: 4000,
         worker_backlog: 64,
         rust_log: "info".to_string(),
+    honeypot_field: "website".to_string(),
+    max_comments_per_ip_per_day: 50,
+    max_webmentions_per_domain_per_hour: 10,
+    store_ip_address: false,
     };
 
     let dir = tempdir().unwrap();
@@ -38,8 +45,9 @@ async fn start_server() -> (String, AppState) {
 
     let http_client = reqwest::Client::builder().build().unwrap();
 
+    #[cfg(feature = "webmentions")]
     let (wm_sender, mut wm_receiver) = worker::channel(config.worker_backlog);
-    // Spawn a no-op worker that drains the channel so `try_send` doesn't fail.
+    #[cfg(feature = "webmentions")]
     tokio::spawn(async move {
         while let Some(job) = wm_receiver.recv().await {
             tracing::debug!(source = %job.source, "e2e test worker drained job");
@@ -51,8 +59,10 @@ async fn start_server() -> (String, AppState) {
         pool,
         repo: repo.clone(),
         github: Arc::new(zapiska::github::StubGitHub),
+        #[cfg(feature = "webmentions")]
         wm_sender,
         http_client: http_client.clone(),
+        limiter: Arc::new(Limiter::new()),
     };
 
     let app = build_app(state.clone());
@@ -197,6 +207,7 @@ async fn e2e_native_post_stays_pending_in_public_read() {
     assert!(body["comments"].as_array().unwrap().is_empty());
 }
 
+#[cfg(feature = "webmentions")]
 #[tokio::test]
 async fn e2e_webmention_full_lifecycle() {
     let source_mock = MockServer::start().await;

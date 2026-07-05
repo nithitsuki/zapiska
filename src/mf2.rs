@@ -27,6 +27,35 @@ static P_SUMMARY: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".p-summ
 static A_HREF: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
 static LINK_HREF: LazyLock<Selector> = LazyLock::new(|| Selector::parse("link[href]").unwrap());
 
+/// Extract a photo URL from the page's h-card markup.
+/// Looks for `.h-card .u-photo` or a standalone `.u-photo` element.
+/// Returns the absolute URL if found.
+pub fn extract_photo(html: &str, base_url: &Url) -> Option<String> {
+    let doc = Html::parse_document(html);
+
+    // Try .h-card .u-photo first
+    if let Some(hcard) = doc.select(&H_CARD).next() {
+        if let Some(el) = hcard.select(&U_PHOTO).next() {
+            if let Some(href) = el.value().attr("src").or(el.value().attr("href")) {
+                if let Ok(abs) = base_url.join(href) {
+                    return Some(abs.to_string());
+                }
+            }
+        }
+    }
+
+    // Fallback: any .u-photo or img[class~='u-photo'] in the page
+    for el in doc.select(&U_PHOTO) {
+        if let Some(src) = el.value().attr("src").or(el.value().attr("href")) {
+            if let Ok(abs) = base_url.join(src) {
+                return Some(abs.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 /// Check if the HTML from `source` contains a link to `target`.
 pub fn has_backlink(html: &str, target: &str) -> bool {
     let doc = Html::parse_document(html);

@@ -3,10 +3,25 @@
 ## Build
 
 ```sh
+# With webmention support (default)
 cargo build --release
+
+# Comments-only (smaller binary, no webmentions)
+cargo build --release --no-default-features --features comments
 ```
 
 Binary ends up at `target/release/zapiska`.
+
+## Feature flags
+
+The binary can be compiled with or without webmention support:
+
+| Feature | Default | Components |
+|---|---|---|
+| `comments` | on | Comment submission, threaded read API, moderation dashboard, embed widget, GitHub enrichment |
+| `webmentions` | on | W3C webmention endpoint, background worker, SSRF protection, h-entry/microformats parser |
+
+Disabling `webmentions` removes the webmention endpoint, worker, SSRF guards, and ~30 transitive dependencies (scraper, html5ever, ipnet). Comment features are unaffected.
 
 ## Run
 
@@ -47,7 +62,7 @@ server {
 
 ```ini
 [Unit]
-Description=webmention.nithitsuki.com
+Description=zapiska comment server
 After=network.target
 
 [Service]
@@ -120,9 +135,48 @@ curl http://127.0.0.1:3000/healthz
 # -> ok
 ```
 
+## Logging
+
+All output goes to stdout as structured JSON via `tracing`. Redirect to a file:
+
+```sh
+./zapiska >> /var/log/zapiska.log 2>&1
+```
+
+Or use systemd's built-in journal (`journalctl -u zapiska`). Log level is controlled by `RUST_LOG` env var (default `info`). Set to `debug` for verbose output, `warn` for errors only.
+
+Never logs raw `content`, `author_url`, or `ADMIN_TOKEN`. Safe fields: `id`, `target_path`, `status`, `peer_ip`.
+
 ## Graceful shutdown
 
 Handles SIGTERM and SIGINT. Stops accepting connections, drains the webmention worker queue, then exits.
+
+## Script-based moderation
+
+The admin API is designed to be consumed by automated moderation scripts. Typical workflow:
+
+```sh
+# 1. Log in to get a session cookie
+curl -c cookies.txt -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"token":"your-admin-token"}' \
+  http://localhost:3000/api/admin/login
+
+# 2. Fetch pending comments (with parent context via {id} endpoint)
+curl -b cookies.txt http://localhost:3000/api/admin/comments?status=pending
+
+# 3. For each pending comment, fetch its parent chain for context
+curl -b cookies.txt http://localhost:3000/api/admin/comments/42
+
+# 4. Submit moderation decisions in batch
+curl -b cookies.txt -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"actions":[
+    {"id":42,"action":"approved"},
+    {"id":43,"action":"spam"}
+  ]}' \
+  http://localhost:3000/api/admin/moderate/batch
+```
 
 ## Updating
 

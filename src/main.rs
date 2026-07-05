@@ -5,14 +5,15 @@ use zapiska::config::Config;
 use zapiska::db::pool;
 use zapiska::db::repo::CommentsRepo;
 use zapiska::github::{GitHubLookup, RealGitHub};
+#[cfg(feature = "webmentions")]
 use zapiska::http::reqwest_client;
 use zapiska::http::{build_app, shutdown};
 use zapiska::state::AppState;
+#[cfg(feature = "webmentions")]
 use zapiska::worker;
 
 #[tokio::main]
 async fn main() {
-    // Load .env if present (silently ignores if missing)
     let _ = dotenvy::dotenv();
 
     tracing_subscriber::fmt()
@@ -23,7 +24,14 @@ async fn main() {
     let config = Config::from_env().expect("failed to load configuration");
     info!(config = %config.redacted_display(), "server starting");
 
+    // Build an HTTP client. With webmentions enabled, it uses the SSRF-safe
+    // builder; without, a plain client suffices for GitHub lookup.
+    #[cfg(feature = "webmentions")]
     let http_client = reqwest_client::build_client(&config);
+    #[cfg(not(feature = "webmentions"))]
+    let http_client = reqwest::Client::builder()
+        .build()
+        .expect("failed to build HTTP client");
 
     let sqlite_pool =
         pool::create_pool(&config.database_path).expect("failed to create SQLite pool");
@@ -40,7 +48,10 @@ async fn main() {
         http_client.clone(),
     ));
 
+    // Webmention worker — only spawned when the feature is enabled.
+    #[cfg(feature = "webmentions")]
     let (wm_sender, wm_receiver) = worker::channel(config.worker_backlog);
+    #[cfg(feature = "webmentions")]
     worker::spawn_worker_for_state(
         wm_receiver,
         repo.clone(),
@@ -56,8 +67,10 @@ async fn main() {
         pool: sqlite_pool,
         repo,
         github,
+        #[cfg(feature = "webmentions")]
         wm_sender,
         http_client,
+        limiter: Arc::new(zapiska::state::Limiter::new()),
     };
 
     let app = build_app(state);

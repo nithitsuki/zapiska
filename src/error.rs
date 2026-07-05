@@ -17,6 +17,19 @@ pub enum AppError {
     ServiceUnavailable(String),
 }
 
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadRequest(msg) => write!(f, "{msg}"),
+            Self::Unauthorized => write!(f, "unauthorized"),
+            Self::NotFound(msg) => write!(f, "{msg}"),
+            Self::RateLimited { reason, .. } => write!(f, "{reason}"),
+            Self::Internal(msg) => write!(f, "{msg}"),
+            Self::ServiceUnavailable(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,

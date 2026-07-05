@@ -1,80 +1,84 @@
 # zapiska
 
-A self-hosted comment and webmention server in Rust (Axum + SQLite).
+A comment and webmention engine. Self-hosted, one binary, SQLite-backed.
 
-Handles native comment form submissions, incoming [W3C webmentions](https://www.w3.org/TR/webmention/), and serves approved comments via a JSON API + embeddable JS widget. All entries go through a pending moderation queue before they show up publicly.
+Submit comments via a form, accept webmentions from other sites, serve them all through a JSON API. Every entry passes through a pending queue. What happens next is up to your moderation system.
 
 ## Quick start
 
 ```sh
-export ADMIN_TOKEN="your-secret-admin-token"
+echo 'ADMIN_TOKEN="your-secret"' > .env
 cargo run --release
 ```
 
-Server starts on `127.0.0.1:3000`. Point a reverse proxy at it or use a Cloudflare Tunnel.
+Server starts at `http://127.0.0.1:3000`. Put it behind nginx or Caddy for TLS.
 
-Open `http://127.0.0.1:3000/swagger-ui/` for interactive API docs.
+## Features
 
-## Configuration
+- **Comment submission** — form-based, with threaded replies (4 levels)
+- **Webmention support** — W3C standard, auto-fetches and parses source pages
+- **JSON API** — embeddable JS widget included, or build your own frontend
+- **Admin API** — moderate, batch, filter by IP/status/path, get parent chains
+- **Rate limiting** — per-IP, per-domain, daily caps. Configurable limits
+- **Honeypot** — marks suspected spam submissions for your moderation tool
+- **SSRF protection** — DNS blocklist, redirect policy on outbound fetches
+- **GitHub enrichment** — resolves author names and avatars via the GitHub API
+- **Optional IP storage** — enable `STORE_IP_ADDRESS` for spam analysis
 
-Everything goes through environment variables:
-
-| Variable | Default | Description |
-|---|---|---|
-| `ADMIN_TOKEN` | **required** | Bearer token for admin moderation endpoints. |
-| `BIND_ADDR` | `127.0.0.1:3000` | Listen address. |
-| `PUBLIC_TARGET_ORIGIN` | `https://nithitsuki.com` | Main site origin. Webmention `target` must match this. |
-| `ALLOWED_CORS_ORIGIN` | `https://nithitsuki.com` | Single origin allowed to read the public API cross-origin. |
-| `DATABASE_PATH` | `./comments.db` | SQLite file path. |
-| `GITHUB_TOKEN` | *(optional)* | GitHub PAT for higher API rate limits (5000/hr vs 60/hr). |
-| `MAX_CONTENT_LEN` | `2000` | Max comment content length in chars. |
-| `MAX_AUTHOR_LEN` | `100` | Max author name length in chars. |
-| `MAX_BODY_SIZE` | `8192` | Max HTTP request body size in bytes. |
-| `FETCH_TIMEOUT_MS` | `4000` | Outbound HTTP fetch timeout (webmentions, GitHub API). |
-| `WORKER_BACKLOG` | `64` | Webmention worker channel capacity. Overflow returns 503. |
-| `RUST_LOG` | `info` | Tracing log filter directive. |
-
-## Embed
-
-Drop this on any page to show comments:
+## Quick embed
 
 ```html
 <div id="nc-comments"></div>
-<script
-  id="nc-comments"
-  src="https://webmention.nithitsuki.com/embed/comments.js"
-  data-path="/blog/hello-world"
-  data-limit="50"
-></script>
+<script id="nc-comments"
+  src="https://your-server.com/embed/comments.js"
+  data-path="/blog/post-1"></script>
 ```
 
-For the comment form, POST to `https://webmention.nithitsuki.com/api/comment` with `application/x-www-form-urlencoded` fields: `target_path`, `author_name`, `content`, and optionally `author_url` and `github_username`.
+The widget renders threaded replies with inline reply forms. See [embed docs](embed/README.md).
 
-To point to the webmention endpoint, add to your `<head>`:
+## Webmention endpoint
 
 ```html
-<link rel="webmention" href="https://webmention.nithitsuki.com/api/webmention" />
+<link rel="webmention" href="https://your-server.com/api/webmention" />
 ```
 
-## Local development
+## API
+
+The admin API is how external moderation tools control zapiska. Fetch pending comments, get parent context, filter by IP, batch-moderate. Everything a moderation engine needs.
+
+See [docs/api.md](docs/api.md) for the full reference. OpenAPI UI at `/swagger-ui/`.
+
+## Configuration
+
+Key environment variables:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `ADMIN_TOKEN` | required | Auth token for the admin API |
+| `DATABASE_PATH` | `./comments.db` | Where data lives |
+| `ALLOWED_CORS_ORIGIN` | `https://nithitsuki.com` | Your blog's origin |
+| `STORE_IP_ADDRESS` | `false` | Store submitter IPs for spam analysis |
+| `MAX_COMMENTS_PER_IP_PER_DAY` | `50` | Per-IP daily comment cap |
+| `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` | `10` | Per-domain hourly webmention cap |
+
+All config vars are in [docs/deployment.md](docs/deployment.md).
+
+## Deployment
+
+```sh
+docker build -t zapiska .
+docker run -e ADMIN_TOKEN=your-secret -v data:/data zapiska
+```
+
+See [docs/deployment.md](docs/deployment.md) for systemd, nginx, Docker, and feature flags.
+
+## Development
 
 ```sh
 cargo test
-cargo clippy -- -D warnings
-cargo fmt --check
-cargo run
 ```
 
-See [docs/development.md](docs/development.md) for the full setup.
-
-## More
-
-- [Architecture](docs/architecture.md)
-- [API reference](docs/api.md)
-- [Security model](docs/security.md)
-- [Deployment](docs/deployment.md)
-- [Development](docs/development.md)
-- [Specification](SPEC.md)
+See [docs/development.md](docs/development.md).
 
 ## License
 

@@ -23,9 +23,9 @@ The webmention worker fetches arbitrary URLs. Protections:
 
 The GitHub enrichment service uses the same shared client with `redirect::Policy::none()`.
 
-### Admin auth
+### Admin API auth
 
-Middleware extracts `Authorization: Bearer <token>`, compares against `ADMIN_TOKEN` with `subtle::ConstantTimeEq`. Both values zero-padded to the same length. Missing header still goes through the comparison (against empty string). Token never logged — config display redacts it.
+All admin endpoints require either an `Authorization: Bearer <token>` header or an `admin_token` cookie, compared against `ADMIN_TOKEN` with `subtle::ConstantTimeEq`. Both values zero-padded to the same length. Token never logged — config display redacts it. The admin API is designed for external moderation engines and automation scripts.
 
 ### Rate limiting
 

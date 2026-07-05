@@ -140,6 +140,16 @@ pub struct PendingComment {
     #[schema(example = "pending")]
     pub status: String,
     pub created_at: String,
+    /// ID of the parent comment, if a reply. Null for top-level.
+    pub parent_id: Option<i64>,
+    /// Nesting depth (0 = top-level).
+    pub depth: i64,
+    /// True if this comment was caught by the honeypot anti-spam field.
+    pub honeypot: bool,
+    /// Self-deletion token (if one was generated for this comment).
+    pub delete_token: Option<String>,
+    /// Submitter IP address (only available when STORE_IP_ADDRESS is enabled).
+    pub submitter_ip: Option<String>,
 }
 
 #[utoipa::path(
@@ -174,6 +184,11 @@ pub async fn list_pending(
             author_avatar: c.author_avatar,
             content: c.content,
             status: c.status,
+            parent_id: c.parent_id,
+            depth: c.depth,
+            honeypot: c.honeypot,
+            delete_token: c.delete_token,
+            submitter_ip: c.submitter_ip,
             created_at: c.created_at,
         })
         .collect();
@@ -189,6 +204,8 @@ pub struct AdminCommentsQuery {
     pub limit: Option<i64>,
     pub before: Option<i64>,
     pub path: Option<String>,
+    /// Filter by submitter IP address (requires STORE_IP_ADDRESS=true).
+    pub ip: Option<String>,
 }
 
 #[utoipa::path(
@@ -209,10 +226,11 @@ pub async fn list_comments(
     let status = query.status.as_deref();
     let before = query.before;
     let path = query.path.as_deref();
+    let ip = query.ip.as_deref();
 
     let comments = state
         .repo
-        .list_comments(status, limit, before, path)
+        .list_comments(status, limit, before, path, ip)
         .await?;
 
     let comments: Vec<PendingComment> = comments
@@ -227,11 +245,128 @@ pub async fn list_comments(
             author_avatar: c.author_avatar,
             content: c.content,
             status: c.status,
+            parent_id: c.parent_id,
+            depth: c.depth,
+            honeypot: c.honeypot,
+            delete_token: c.delete_token,
+            submitter_ip: c.submitter_ip,
             created_at: c.created_at,
         })
         .collect();
 
     Ok(Json(PendingResponse { comments }))
+}
+
+// ── GET /api/admin/comments/:id ─────────────────────────────
+
+#[derive(Serialize)]
+pub struct CommentDetail {
+    pub comment: PendingComment,
+    /// Ancestor chain from immediate parent up to the root comment.
+    /// Empty for top-level comments.
+    pub parents: Vec<PendingComment>,
+}
+
+pub async fn get_comment(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<CommentDetail>, AppError> {
+    let (comment, chain) = state
+        .repo
+        .get_comment_chain(id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("comment {id} not found")))?;
+
+    let map = |c: crate::db::repo::Comment| PendingComment {
+        id: c.id,
+        target_path: c.target_path,
+        comment_type: c.comment_type,
+        source_url: c.source_url,
+        author_name: c.author_name,
+        author_url: c.author_url,
+        author_avatar: c.author_avatar,
+        content: c.content,
+        status: c.status,
+        parent_id: c.parent_id,
+        depth: c.depth,
+        honeypot: c.honeypot,
+        delete_token: c.delete_token,
+        submitter_ip: c.submitter_ip,
+        created_at: c.created_at,
+    };
+
+    Ok(Json(CommentDetail {
+        parents: chain.into_iter().map(map).collect(),
+        comment: map(comment),
+    }))
+}
+
+// ── POST /api/admin/moderate/batch ──────────────────────────
+
+#[derive(Deserialize)]
+pub struct BatchModerateRequest {
+    pub actions: Vec<ModerateAction>,
+}
+
+#[derive(Deserialize)]
+pub struct ModerateAction {
+    pub id: i64,
+    pub action: String,
+}
+
+#[derive(Serialize)]
+pub struct BatchModerateResponse {
+    pub results: Vec<ModerateResult>,
+}
+
+#[derive(Serialize)]
+pub struct ModerateResult {
+    pub id: i64,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+pub async fn moderate_batch(
+    State(state): State<AppState>,
+    Json(body): Json<BatchModerateRequest>,
+) -> Result<Json<BatchModerateResponse>, AppError> {
+    let mut results = Vec::with_capacity(body.actions.len());
+
+    for action in body.actions {
+        let result = match moderate_single(&state, action.id, &action.action).await {
+            Ok(status) => ModerateResult { id: action.id, status, error: None },
+            Err(e) => ModerateResult {
+                id: action.id,
+                status: String::new(),
+                error: Some(e.to_string()),
+            },
+        };
+        results.push(result);
+    }
+
+    Ok(Json(BatchModerateResponse { results }))
+}
+
+/// Moderate a single comment. Returns the new status on success.
+async fn moderate_single(
+    state: &AppState,
+    id: i64,
+    action: &str,
+) -> Result<String, AppError> {
+    if action != "approved" && action != "spam" && action != "deleted" && action != "pending" {
+        return Err(AppError::BadRequest(format!(
+            "invalid action '{action}', must be one of: approved, spam, deleted, pending"
+        )));
+    }
+
+    let _comment = state
+        .repo
+        .get_comment(id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("comment {id} not found")))?;
+
+    state.repo.update_status(id, action).await?;
+    Ok(action.to_string())
 }
 
 // ── POST /api/admin/moderate ────────────────────────────────
@@ -266,24 +401,10 @@ pub async fn moderate(
     State(state): State<AppState>,
     Json(body): Json<ModerateRequest>,
 ) -> Result<Json<ModerateResponse>, AppError> {
-    if body.action != "approved" && body.action != "spam" && body.action != "deleted" && body.action != "pending" {
-        return Err(AppError::BadRequest(format!(
-            "invalid action '{}', must be one of: approved, spam, deleted, pending",
-            body.action
-        )));
-    }
-
-    let _comment = state
-        .repo
-        .get_comment(body.id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("comment {} not found", body.id)))?;
-
-    state.repo.update_status(body.id, &body.action).await?;
-
+    let status = moderate_single(&state, body.id, &body.action).await?;
     Ok(Json(ModerateResponse {
         id: body.id,
-        status: body.action,
+        status,
     }))
 }
 
@@ -379,6 +500,11 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "moderate me".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
             })
             .await
             .unwrap();
@@ -416,6 +542,11 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "a".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
             })
             .await
             .unwrap();
@@ -429,6 +560,11 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "b".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
             })
             .await
             .unwrap();
@@ -466,6 +602,11 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "approve".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
             })
             .await
             .unwrap();
@@ -493,6 +634,11 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "buy now".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
             })
             .await
             .unwrap();
@@ -555,6 +701,11 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "x".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
             })
             .await
             .unwrap();
@@ -698,6 +849,11 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "approved one".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
             })
             .await
             .unwrap();
@@ -711,6 +867,11 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "spam one".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
             })
             .await
             .unwrap();

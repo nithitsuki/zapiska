@@ -29,10 +29,41 @@ pub fn create_pool(database_path: &str) -> Result<SqlitePool, r2d2::Error> {
         .build(manager)
 }
 
+/// Run schema migrations. Fresh databases get the full schema from schema.sql.
+/// Existing databases get incremental ALTER TABLE migrations (errors silently
+/// ignored when a column already exists).
 pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
     let conn = pool.get()?;
     let schema = include_str!("../../migrations/schema.sql");
     conn.execute_batch(schema)?;
+
+    // Migration 2: nested comments — add parent_id, depth, and indexes.
+    let _ = conn.execute(
+        "ALTER TABLE comments ADD COLUMN parent_id INTEGER REFERENCES comments(id)",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE comments ADD COLUMN depth INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id)",
+    );
+
+    // Migration 3: honeypot flag and self-deletion tokens.
+    let _ = conn.execute(
+        "ALTER TABLE comments ADD COLUMN honeypot INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE comments ADD COLUMN delete_token TEXT",
+        []);
+
+    // Migration 4: optional submitter IP address storage.
+    let _ = conn.execute(
+        "ALTER TABLE comments ADD COLUMN submitter_ip TEXT",
+        []);
+
     Ok(())
 }
 

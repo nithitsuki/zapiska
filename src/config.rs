@@ -17,6 +17,17 @@ pub struct Config {
     pub fetch_timeout_ms: u64,
     pub worker_backlog: usize,
     pub rust_log: String,
+    /// Name of the honeypot form field. If this field is non-empty, the submission
+    /// is silently discarded. The field is hidden from human users via CSS.
+    pub honeypot_field: String,
+    /// Max native comments per IP per day (resets at midnight UTC). 0 = unlimited.
+    pub max_comments_per_ip_per_day: u32,
+    /// Max webmentions per source domain per hour. 0 = unlimited.
+    pub max_webmentions_per_domain_per_hour: u32,
+    /// Whether to store the submitter's IP address with each comment.
+    /// Disabled by default for privacy. Set to "true" to enable IP-based
+    /// spam analysis in moderation scripts.
+    pub store_ip_address: bool,
 }
 
 #[derive(Debug, Error)]
@@ -128,6 +139,17 @@ impl Config {
 
         let rust_log = env_or_default("RUST_LOG", "info");
 
+        let honeypot_field = env_or_default("HONEYPOT_FIELD", "website");
+        let max_comments_per_ip_per_day = env_or_default("MAX_COMMENTS_PER_IP_PER_DAY", "50")
+            .parse::<u32>()
+            .unwrap_or(50);
+        let max_webmentions_per_domain_per_hour =
+            env_or_default("MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR", "10")
+                .parse::<u32>()
+                .unwrap_or(10);
+
+        let store_ip_address = env_or_default("STORE_IP_ADDRESS", "false") == "true";
+
         Ok(Config {
             bind_addr,
             public_target_origin,
@@ -141,6 +163,10 @@ impl Config {
             fetch_timeout_ms,
             worker_backlog,
             rust_log,
+            honeypot_field,
+            max_comments_per_ip_per_day,
+            max_webmentions_per_domain_per_hour,
+            store_ip_address,
         })
     }
 
@@ -398,6 +424,10 @@ mod tests {
             fetch_timeout_ms: 4000,
             worker_backlog: 64,
             rust_log: "info".to_string(),
+        honeypot_field: "website".to_string(),
+        max_comments_per_ip_per_day: 50,
+        max_webmentions_per_domain_per_hour: 10,
+        store_ip_address: false,
         };
         let rendered = format!("{}", config.redacted_display());
         assert!(

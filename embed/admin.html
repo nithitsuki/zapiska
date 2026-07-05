@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>zapiska — Moderation</title>
-<style>
+<style id="css-main">
   :root {
     --bg: #0f0f13;
     --surface: #1a1a24;
@@ -392,6 +392,42 @@
     .card-footer { flex-direction: column; align-items: flex-start; }
   }
 </style>
+<style id="css-brutalist">
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { padding: 16px; font-family: monospace; }
+  .flex { display: flex; }
+  .flex-wrap { flex-wrap: wrap; }
+  .items-start { align-items: flex-start; }
+  .items-center { align-items: center; }
+  .justify-between { justify-content: space-between; }
+  .gap { gap: 8px; }
+  .gap4 { gap: 4px; }
+  .w-full { width: 100%; }
+  .mb { margin-bottom: 8px; }
+  .mb16 { margin-bottom: 16px; }
+  .mt { margin-top: 8px; }
+  .p8 { padding: 8px; }
+  .hidden { display: none !important; }
+  .overflow { max-height: 120px; overflow-y: auto; }
+  .stat-bar .stat { flex: 1; border: 1px solid; padding: 4px 8px; margin-right: -1px; cursor: pointer; }
+  .stat-bar .stat:last-child { margin-right: 0; }
+  .tab-bar { border: 1px solid; display: inline-flex; }
+  .tab-bar .tab { border: none; padding: 4px 12px; cursor: pointer; background: none; font: inherit; }
+  .tab-bar .tab + .tab { border-left: 1px solid; }
+  input, button, select { font: inherit; }
+  input, select { border: 1px solid; padding: 4px 8px; }
+  button { border: 1px solid; padding: 4px 12px; cursor: pointer; background: none; }
+  button:disabled { opacity: .4; }
+  .box { border: 1px solid; padding: 8px; margin-bottom: 8px; }
+  .badge { display: inline-block; border: 1px solid; padding: 0 4px; font-size: smaller; }
+  .avatar { width: 18px; height: 18px; border: 1px solid; }
+  .login-box { border: 1px solid; padding: 16px; max-width: 360px; margin: 80px auto 0; }
+  .login-box input { width: 100%; margin-bottom: 8px; }
+  .login-box .btn-l { width: 100%; }
+  .login-error { display: none; margin-bottom: 8px; }
+  .toast-c { position: fixed; bottom: 16px; left: 16px; z-index: 100; }
+  .toast { border: 1px solid; padding: 6px 12px; margin-top: 4px; background: white; }
+</style>
 </head>
 <body>
 
@@ -445,6 +481,13 @@
 <div class="toast-container" id="toast-container"></div>
 
 <script>
+// CSS theme toggle: ?brutalist=1 or /admin/brutalist path enables brutalist mode.
+(function() {
+  const el = window.location.pathname.includes('/brutalist') || new URLSearchParams(window.location.search).has('brutalist')
+    ? document.getElementById('css-main') : document.getElementById('css-brutalist');
+  if (el) el.remove();
+})();
+
 let currentStatus = 'pending';
 let before = null;
 let loading = false;
@@ -631,6 +674,12 @@ function renderComment(c, list) {
   const sourceHtml = c.source_url
     ? `<span class="card-source"><a href="${escapeAttr(c.source_url)}" target="_blank" rel="noopener">source</a></span>`
     : '';
+  const depthHtml = c.depth > 0 ? `<span class="card-depth" style="font-size:11px;color:var(--text-secondary)">depth ${c.depth}</span>` : '';
+  const honeypotHtml = c.honeypot ? `<span class="badge badge-spam" style="font-size:10px">HONEYPOT</span>` : '';
+  const ipHtml = c.submitter_ip ? `<span class="card-ip" style="font-size:11px;color:var(--text-secondary);font-family:monospace">${escapeHtml(c.submitter_ip)}</span>` : '';
+  const parentHtml = c.parent_id
+    ? `<span class="card-parent" style="font-size:11px"><a href="#comment-${c.parent_id}" onclick="event.preventDefault();document.querySelector('.card[data-id=\'${c.parent_id}\']')?.scrollIntoView({behavior:'smooth'});return false;" style="color:var(--accent)">reply to #${c.parent_id}</a></span>`
+    : '';
 
   el.innerHTML = `
     <div class="card-header">
@@ -640,10 +689,14 @@ function renderComment(c, list) {
           ${authorUrlHtml}
           ${statusBadge}
           ${typeBadge}
+          ${honeypotHtml}
         </div>
         <div class="card-meta">
           <span>${c.comment_type}</span>
           <span>${date}</span>
+          ${depthHtml}
+          ${parentHtml}
+          ${ipHtml}
         </div>
         <div class="card-path">${escapeHtml(c.target_path)}</div>
       </div>

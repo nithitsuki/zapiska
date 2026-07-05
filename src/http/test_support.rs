@@ -5,10 +5,12 @@ pub(crate) mod helpers {
     use tempfile::TempDir;
 
     use crate::config::Config;
+    use crate::state::Limiter;
     use crate::db::pool::{create_pool, run_migrations};
     use crate::db::repo::CommentsRepo;
     use crate::github::{GitHubLookup, StubGitHub};
     use crate::state::AppState;
+    #[cfg(feature = "webmentions")]
     use crate::worker;
 
     /// A test-ready AppState + a TempDir that keeps the DB file alive.
@@ -23,7 +25,9 @@ pub(crate) mod helpers {
         let pool = create_pool(&path.to_string_lossy()).expect("pool");
         run_migrations(&pool).expect("migrations");
         let repo = CommentsRepo::new(pool.clone());
+        #[cfg(feature = "webmentions")]
         let (wm_sender, rx) = worker::channel(64);
+        #[cfg(feature = "webmentions")]
         worker::spawn_worker(rx);
 
         let state = AppState {
@@ -40,14 +44,20 @@ pub(crate) mod helpers {
                 fetch_timeout_ms: 4000,
                 worker_backlog: 64,
                 rust_log: "info".to_string(),
+            honeypot_field: "website".to_string(),
+            max_comments_per_ip_per_day: 50,
+            max_webmentions_per_domain_per_hour: 10,
+            store_ip_address: false,
             },
             pool,
             repo,
             github,
+            #[cfg(feature = "webmentions")]
             wm_sender,
             http_client: reqwest::Client::builder()
                 .build()
                 .expect("test reqwest client"),
+            limiter: Arc::new(Limiter::new()),
         };
 
         (state, dir)

@@ -5,7 +5,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use url::Url;
 
 use crate::error::AppError;
-use crate::state::AppState;
+use crate::state::{domain_hourly_key, AppState};
 use crate::worker::WebmentionJob;
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -38,6 +38,22 @@ pub async fn receive_webmention(
         return Err(AppError::BadRequest(
             "source URL must be http or https".to_string(),
         ));
+    }
+
+    // 1b. Per-domain hourly cap for webmentions.
+    if state.config.max_webmentions_per_domain_per_hour > 0 {
+        if let Some(host) = source_url.host_str() {
+            let key = domain_hourly_key(host);
+            if !state.limiter.check_and_increment(&key, state.config.max_webmentions_per_domain_per_hour) {
+                return Err(AppError::RateLimited {
+                    retry_after_secs: 3600,
+                    reason: format!(
+                        "hourly webmention limit ({}) reached for domain '{host}'",
+                        state.config.max_webmentions_per_domain_per_hour,
+                    ),
+                });
+            }
+        }
     }
 
     let target_url = Url::parse(&form.target)
@@ -90,7 +106,7 @@ mod tests {
 
     use crate::http::build_app;
     use crate::http::test_support::helpers;
-    use crate::state::AppState;
+    use crate::state::{AppState, Limiter};
     use crate::worker;
 
     fn test_state() -> (AppState, tempfile::TempDir) {
@@ -172,12 +188,17 @@ mod tests {
                 fetch_timeout_ms: 4000,
                 worker_backlog: 1,
                 rust_log: "info".to_string(),
+            honeypot_field: "website".to_string(),
+            max_comments_per_ip_per_day: 50,
+            max_webmentions_per_domain_per_hour: 10,
+            store_ip_address: false,
             },
             pool,
             repo,
             github: Arc::new(crate::github::StubGitHub),
             wm_sender,
             http_client: { reqwest::Client::builder().build().unwrap() },
+            limiter: Arc::new(Limiter::new()),
         };
         let app = build_app(state);
 

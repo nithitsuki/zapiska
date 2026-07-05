@@ -2,10 +2,12 @@ pub(crate) mod admin;
 pub(crate) mod comment_post;
 pub(crate) mod comments_read;
 mod layers;
+#[cfg(feature = "webmentions")]
 pub mod reqwest_client;
 pub mod shutdown;
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(feature = "webmentions")]
 pub(crate) mod webmention_post;
 
 use axum::Router;
@@ -18,6 +20,7 @@ use crate::state::AppState;
 
 pub fn build_app(state: AppState) -> Router {
     let native_governor = layers::native_comment_governor();
+    #[cfg(feature = "webmentions")]
     let webmention_governor = layers::webmention_governor();
     let read_governor = layers::read_governor();
     let admin_moderate_governor = layers::admin_moderate_governor();
@@ -35,10 +38,18 @@ pub fn build_app(state: AppState) -> Router {
             axum::routing::get(admin::list_comments),
         )
         .route(
+            "/api/admin/comments/{id}",
+            axum::routing::get(admin::get_comment),
+        )
+        .route(
             "/api/admin/moderate",
             axum::routing::post(admin::moderate).layer(GovernorLayer {
                 config: Arc::new(admin_moderate_governor),
             }),
+        )
+        .route(
+            "/api/admin/moderate/batch",
+            axum::routing::post(admin::moderate_batch),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -48,11 +59,13 @@ pub fn build_app(state: AppState) -> Router {
     let swagger = utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
         .url("/api-docs/openapi.json", ApiDoc::openapi());
 
-    Router::new()
+    let router = Router::new()
         .merge(swagger)
         .route("/healthz", axum::routing::get(healthz))
         .route("/admin", axum::routing::get(admin_dashboard))
+        .route("/admin/brutalist", axum::routing::get(admin_brutalist))
         .route("/embed/comments.js", axum::routing::get(comments_js))
+        .route("/embed/default-avatar.jpg", axum::routing::get(default_avatar))
         .route("/api/admin/login", axum::routing::post(admin::login))
         .route("/api/admin/logout", axum::routing::post(admin::logout))
         .route(
@@ -62,17 +75,25 @@ pub fn build_app(state: AppState) -> Router {
             }),
         )
         .route(
-            "/api/webmention",
-            axum::routing::post(webmention_post::receive_webmention).layer(GovernorLayer {
-                config: Arc::new(webmention_governor),
-            }),
+            "/api/comment/{id}/delete",
+            axum::routing::post(comment_post::delete_comment),
         )
         .route(
             "/api/comments",
             axum::routing::get(comments_read::list_comments).layer(GovernorLayer {
                 config: Arc::new(read_governor),
             }),
-        )
+        );
+
+    #[cfg(feature = "webmentions")]
+    let router = router.route(
+        "/api/webmention",
+        axum::routing::post(webmention_post::receive_webmention).layer(GovernorLayer {
+            config: Arc::new(webmention_governor),
+        }),
+    );
+
+    router
         .merge(admin_routes)
         .layer(cors)
         .layer(body_limit)
@@ -81,6 +102,25 @@ pub fn build_app(state: AppState) -> Router {
 
 async fn admin_dashboard() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../embed/admin.html"))
+}
+
+async fn admin_brutalist() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../../embed/admin.html"))
+}
+
+async fn default_avatar() -> (
+    axum::http::StatusCode,
+    [(&'static str, &'static str); 2],
+    &'static [u8],
+) {
+    (
+        axum::http::StatusCode::OK,
+        [
+            ("content-type", "image/jpeg"),
+            ("cache-control", "public, max-age=86400"),
+        ],
+        include_bytes!("../../embed/default-avatar.jpg"),
+    )
 }
 
 async fn comments_js() -> (
@@ -341,6 +381,11 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: format!("comment by {author}"),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
             })
             .await
             .unwrap();

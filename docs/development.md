@@ -20,12 +20,23 @@ cargo build
 ## Running tests
 
 ```sh
-cargo test              # all tests (182 unit + 4 e2e)
+cargo test              # all tests (188 unit + 4 e2e)
 cargo test --lib        # unit tests only
 cargo test --test e2e   # e2e integration tests only
 ```
 
 Tests use `tempfile::tempdir()` for isolated SQLite databases. No shared state.
+
+## Feature flags
+
+By default both `comments` and `webmentions` features are enabled. To run tests for only one feature:
+
+```sh
+cargo test --no-default-features --features comments   # 143 unit + 3 e2e
+cargo test --no-default-features --features webmentions # 188 unit + 4 e2e
+```
+
+The `webmentions` feature adds tests for SSRF protection, microformats parsing, the webmention worker, and the webmention ingress endpoint.
 
 ## Linting
 
@@ -49,10 +60,6 @@ curl http://127.0.0.1:3000/swagger-ui/
 ### spawn_blocking for SQL
 
 SQLite is blocking I/O. Running it on the tokio runtime would block the event loop. Every `CommentsRepo` method wraps queries in `spawn_blocking`, moving work to a dedicated thread pool.
-
-### r2d2 over deadpool
-
-Historical — the project started with `r2d2_sqlite`. Switching is a roadmap item if the r2d2/rusqlite version conflict becomes a burden.
 
 ### Separate RepoError
 
