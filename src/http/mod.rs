@@ -34,6 +34,10 @@ pub fn build_app(state: AppState) -> Router {
             axum::routing::get(admin::list_pending),
         )
         .route(
+            "/api/admin/paths",
+            axum::routing::get(admin::list_paths),
+        )
+        .route(
             "/api/admin/comments",
             axum::routing::get(admin::list_comments),
         )
@@ -79,7 +83,6 @@ pub fn build_app(state: AppState) -> Router {
         .merge(swagger)
         .route("/healthz", axum::routing::get(healthz))
         .route("/admin", axum::routing::get(admin_dashboard))
-        .route("/admin/brutalist", axum::routing::get(admin_brutalist))
         .route("/embed/comments.js", axum::routing::get(comments_js))
         .route("/embed/default-avatar.jpg", axum::routing::get(default_avatar))
         .route("/api/admin/login", axum::routing::post(admin::login))
@@ -117,10 +120,6 @@ pub fn build_app(state: AppState) -> Router {
 }
 
 async fn admin_dashboard() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../../embed/admin.html"))
-}
-
-async fn admin_brutalist() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../embed/admin.html"))
 }
 

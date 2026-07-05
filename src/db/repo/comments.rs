@@ -111,6 +111,43 @@ impl CommentsRepo {
         .await
     }
 
+    /// List all distinct paths that have comments, with counts per status.
+    pub async fn list_paths(&self) -> RepoResult<Vec<(String, i64, i64, i64, i64, i64)>> {
+        self.spawn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT target_path,
+                            count(*) as total,
+                            sum(CASE WHEN status='approved' THEN 1 ELSE 0 END),
+                            sum(CASE WHEN status='spam' THEN 1 ELSE 0 END),
+                            sum(CASE WHEN status='pending' THEN 1 ELSE 0 END),
+                            sum(CASE WHEN status='deleted' THEN 1 ELSE 0 END)
+                     FROM comments
+                     GROUP BY target_path
+                     ORDER BY MAX(created_at) DESC",
+                )
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+            }
+            Ok(result)
+        })
+        .await
+    }
+
     pub async fn count_approved(&self, path: &str) -> RepoResult<i64> {
         let path = path.to_string();
         self.spawn(move |conn| {
@@ -220,8 +257,22 @@ impl CommentsRepo {
         let ch_val = content_hash.unwrap_or("").to_string();
 
         self.spawn(move |conn| {
-            let mut stmt = conn
-                .prepare(
+            // When path contains '%', use LIKE (supports wildcards like /blog/%).
+            // Otherwise exact match (or empty = no filter).
+            let mut stmt = if path_val.contains('%') {
+                conn.prepare(
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                     FROM comments
+                     WHERE (?1 = '' OR ?1 = 'all' OR status = ?1)
+                       AND (?2 = '' OR target_path LIKE ?2)
+                       AND (?3 = 0 OR id < ?3)
+                       AND (?4 = '' OR submitter_ip = ?4)
+                       AND (?5 = '' OR content_hash = ?5)
+                     ORDER BY id DESC
+                     LIMIT ?6"
+                ).map_err(|e| RepoError::Internal(e.to_string()))?
+            } else {
+                conn.prepare(
                     "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
                      FROM comments
                      WHERE (?1 = '' OR ?1 = 'all' OR status = ?1)
@@ -230,9 +281,9 @@ impl CommentsRepo {
                        AND (?4 = '' OR submitter_ip = ?4)
                        AND (?5 = '' OR content_hash = ?5)
                      ORDER BY id DESC
-                     LIMIT ?6",
-                )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                     LIMIT ?6"
+                ).map_err(|e| RepoError::Internal(e.to_string()))?
+            };
 
             let rows = stmt
                 .query_map(params![status_val, path_val, before_val, ip_val, ch_val, limit], row_to_comment)

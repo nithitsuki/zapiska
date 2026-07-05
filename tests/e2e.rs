@@ -327,8 +327,9 @@ async fn e2e_rate_limit_blocks_flood_native() {
         ("content", "spam"),
     ]);
 
-    // Native comment limit is 5 per 60s with burst 5. Send 6 requests.
-    for _ in 0..5 {
+    // Burst is 50 (see governor_config(60, 50) in layers.rs). Send 51 requests total.
+    let burst = 50;
+    for _ in 0..burst {
         let resp = client
             .post(format!("{}/api/comment", base))
             .header("Content-Type", "application/x-www-form-urlencoded")
@@ -339,7 +340,7 @@ async fn e2e_rate_limit_blocks_flood_native() {
         assert!(resp.status() == 201 || resp.status() == 429);
     }
 
-    // 6th should be rate limited.
+    // Request after the burst should be rate limited.
     let resp = client
         .post(format!("{}/api/comment", base))
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -347,5 +348,5 @@ async fn e2e_rate_limit_blocks_flood_native() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 429, "rate limit should block 6th request");
+    assert_eq!(resp.status(), 429, "rate limit should block request after burst");
 }

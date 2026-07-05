@@ -1,831 +1,405 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zapiska — Moderation</title>
-<style id="css-main">
-  :root {
-    --bg: #0f0f13;
-    --surface: #1a1a24;
-    --surface-2: #22222f;
-    --text: #e8e8ed;
-    --text-secondary: #9898a8;
-    --border: #2c2c3a;
-    --accent: #6c8cff;
-    --accent-hover: #8ba3ff;
-    --green: #34d399;
-    --green-bg: rgba(52, 211, 153, 0.1);
-    --orange: #fbbf24;
-    --orange-bg: rgba(251, 191, 36, 0.1);
-    --red: #f87171;
-    --red-bg: rgba(248, 113, 113, 0.1);
-    --blue: #60a5fa;
-    --blue-bg: rgba(96, 165, 250, 0.1);
-    --radius: 10px;
-    --radius-lg: 14px;
-  }
+<title>zapiska admin</title>
+<style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Helvetica Neue", sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    line-height: 1.5;
-    -webkit-font-smoothing: antialiased;
-  }
-
-  /* ── Login ── */
-  .login-page {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-    padding: 24px;
-  }
-  .login-box {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    padding: 40px;
-    width: 100%;
-    max-width: 400px;
-  }
-  .login-box h1 {
-    font-size: 24px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    margin-bottom: 4px;
-  }
-  .login-box .subtitle {
-    color: var(--text-secondary);
-    font-size: 14px;
-    margin-bottom: 28px;
-  }
-  .login-box label {
-    display: block;
-    font-size: 13px;
-    font-weight: 500;
-    margin-bottom: 6px;
-    color: var(--text-secondary);
-  }
-  .login-box input[type="password"] {
-    width: 100%;
-    padding: 12px 14px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    font-size: 15px;
-    color: var(--text);
-    outline: none;
-    transition: border-color .15s;
-    margin-bottom: 16px;
-  }
-  .login-box input[type="password"]:focus { border-color: var(--accent); }
-  .login-error { color: var(--red); font-size: 13px; margin-bottom: 12px; display: none; }
-
-  /* ── Dashboard layout ── */
-  .dash { display: none; max-width: 880px; margin: 0 auto; padding: 32px 24px; }
-  .dash.active { display: block; }
-
-  .dash-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 28px;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-  .dash-header h1 {
-    font-size: 28px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-  }
-  .dash-header .subtitle {
-    color: var(--text-secondary);
-    font-size: 14px;
-    margin-top: 2px;
-  }
-
-  /* ── Stats bar ── */
-  .stats {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 24px;
-    flex-wrap: wrap;
-  }
-  .stat {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 12px 18px;
-    flex: 1;
-    min-width: 80px;
-    text-align: center;
-    cursor: pointer;
-    transition: background .15s, border-color .15s;
-  }
-  .stat:hover { background: var(--surface-2); }
-  .stat.active {
-    border-color: var(--accent);
-    background: rgba(108, 140, 255, 0.08);
-  }
-  .stat-num {
-    font-size: 22px;
-    font-weight: 700;
-    letter-spacing: -0.01em;
-  }
-  .stat-label {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-secondary);
-    margin-top: 2px;
-  }
-  .stat-pending .stat-num { color: var(--orange); }
-  .stat-approved .stat-num { color: var(--green); }
-  .stat-spam .stat-num { color: var(--red); }
-  .stat-deleted .stat-num { color: var(--text-secondary); }
-  .stat-all .stat-num { color: var(--accent); }
-
-  /* ── Filter bar ── */
-  .filter-bar {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 20px;
-    align-items: center;
-  }
-  .filter-bar input {
-    flex: 1;
-    padding: 10px 14px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    font-size: 14px;
-    color: var(--text);
-    outline: none;
-    transition: border-color .15s;
-  }
-  .filter-bar input:focus { border-color: var(--accent); }
-  .filter-bar input::placeholder { color: var(--text-secondary); }
-
-  /* ── Tabs ── */
-  .tabs {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 20px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 4px;
-    overflow-x: auto;
-  }
-  .tab {
-    padding: 8px 16px;
-    border-radius: 7px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: background .15s, color .15s;
-    white-space: nowrap;
-    border: none;
-    background: none;
-  }
-  .tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
-  .tab.active {
-    background: var(--accent);
-    color: #fff;
-  }
-
-  /* ── Cards ── */
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    padding: 20px 24px;
-    margin-bottom: 12px;
-    transition: opacity .2s;
-  }
-  .card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 8px;
-    gap: 12px;
-  }
-  .card-header-left { min-width: 0; flex: 1; }
-  .card-author {
-    font-weight: 600;
-    font-size: 15px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .card-avatar {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    object-fit: cover;
-    flex-shrink: 0;
-  }
-  .card-meta {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-top: 2px;
-  }
-  .card-meta span + span::before { content: " · "; }
-  .card-path {
-    font-size: 12px;
-    font-family: "SF Mono", "Menlo", monospace;
-    color: var(--accent);
-    margin-top: 4px;
-  }
-  .card-content {
-    font-size: 14px;
-    color: var(--text);
-    margin-top: 10px;
-    line-height: 1.6;
-    word-wrap: break-word;
-  }
-  .card-content p { margin-bottom: 4px; }
-  .card-content p:last-child { margin-bottom: 0; }
-  .card-content a { color: var(--accent); }
-  .card-footer {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-top: 14px;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-  .card-source {
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-  .card-source a { color: var(--accent); }
-
-  /* ── Status badges ── */
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px 8px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-  .badge-pending { background: var(--orange-bg); color: var(--orange); }
-  .badge-approved { background: var(--green-bg); color: var(--green); }
-  .badge-spam { background: var(--red-bg); color: var(--red); }
-  .badge-deleted { background: rgba(152, 152, 168, 0.1); color: var(--text-secondary); }
-  .badge-webmention { background: var(--blue-bg); color: var(--blue); margin-left: 6px; }
-  .badge-native { background: rgba(232, 232, 237, 0.08); color: var(--text-secondary); margin-left: 6px; }
-
-  /* ── Buttons ── */
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 7px 14px;
-    border-radius: 7px;
-    font-size: 12px;
-    font-weight: 500;
-    border: none;
-    cursor: pointer;
-    transition: background .15s, opacity .15s;
-    text-decoration: none;
-    gap: 4px;
-  }
-  .btn:active { opacity: .7; }
-  .btn-approve { background: var(--green); color: #000; }
-  .btn-approve:hover { background: #4ade80; }
-  .btn-spam { background: var(--orange); color: #000; }
-  .btn-spam:hover { background: #fcd34d; }
-  .btn-delete { background: var(--red); color: #000; }
-  .btn-delete:hover { background: #fca5a5; }
-  .btn-pending {
-    background: var(--surface-2);
-    color: var(--text);
-    border: 1px solid var(--border);
-  }
-  .btn-pending:hover { background: var(--border); }
-  .btn-outline {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text-secondary);
-  }
-  .btn-outline:hover { background: var(--surface-2); color: var(--text); }
-  .btn:disabled { opacity: .35; cursor: default; }
-
-  .btn-load {
-    display: block;
-    width: 100%;
-    padding: 12px;
-    font-size: 14px;
-    margin-top: 8px;
-  }
-  .btn-danger {
-    background: var(--red);
-    color: #000;
-  }
-  .btn-danger:hover { background: var(--red); opacity: .8; }
-
-  /* ── Empty state ── */
-  .empty-state {
-    text-align: center;
-    padding: 60px 24px;
-    color: var(--text-secondary);
-    font-size: 14px;
-  }
-  .empty-state .icon { font-size: 32px; margin-bottom: 12px; }
-
-  /* ── Toast ── */
-  .toast-container {
-    position: fixed;
-    bottom: 24px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 100;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    pointer-events: none;
-  }
-  .toast {
-    background: #1a1a24;
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 10px 20px;
-    border-radius: 10px;
-    font-size: 13px;
-    opacity: 0;
-    transform: translateY(10px);
-    transition: opacity .2s, transform .2s;
-    pointer-events: auto;
-    white-space: nowrap;
-  }
-  .toast.show { opacity: 1; transform: translateY(0); }
-
-  /* ── Spinner ── */
-  .spinner {
-    width: 20px; height: 20px;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin .6s linear infinite;
-    margin: 40px auto;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .hidden { display: none !important; }
-
-  /* ── Responsive ── */
-  @media (max-width: 640px) {
-    .dash { padding: 20px 16px; }
-    .dash-header h1 { font-size: 22px; }
-    .stats { gap: 6px; }
-    .stat { padding: 10px 12px; min-width: 60px; }
-    .stat-num { font-size: 18px; }
-    .card { padding: 16px 18px; }
-    .card-footer { flex-direction: column; align-items: flex-start; }
-  }
-</style>
-<style id="css-brutalist">
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body { padding: 16px; font-family: monospace; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #fff; color: #000; font-size: 14px; line-height: 1.5; padding: 20px; }
+  a { color: #0066cc; }
+  input, button, select, textarea { font: inherit; }
+  input, select { border: 1px solid #ccc; padding: 5px 8px; border-radius: 4px; }
+  input:focus, select:focus { outline: 2px solid #0066cc; outline-offset: -1px; }
+  button { padding: 5px 12px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
+  button:hover { background: #f0f0f0; }
+  button:disabled { opacity: .35; cursor: default; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { padding: 5px 8px; border: 1px solid #ddd; text-align: left; vertical-align: top; }
+  th { background: #f5f5f5; font-weight: 600; font-size: 12px; white-space: nowrap; }
+  tr:nth-child(even) td { background: #fafafa; }
+  tr:hover td { background: #f0f5ff; }
+  .w-full { width: 100%; }
   .flex { display: flex; }
   .flex-wrap { flex-wrap: wrap; }
-  .items-start { align-items: flex-start; }
   .items-center { align-items: center; }
   .justify-between { justify-content: space-between; }
   .gap { gap: 8px; }
-  .gap4 { gap: 4px; }
-  .w-full { width: 100%; }
   .mb { margin-bottom: 8px; }
-  .mb16 { margin-bottom: 16px; }
   .mt { margin-top: 8px; }
-  .p8 { padding: 8px; }
   .hidden { display: none !important; }
-  .overflow { max-height: 120px; overflow-y: auto; }
-  .stat-bar .stat { flex: 1; border: 1px solid; padding: 4px 8px; margin-right: -1px; cursor: pointer; }
-  .stat-bar .stat:last-child { margin-right: 0; }
-  .tab-bar { border: 1px solid; display: inline-flex; }
-  .tab-bar .tab { border: none; padding: 4px 12px; cursor: pointer; background: none; font: inherit; }
-  .tab-bar .tab + .tab { border-left: 1px solid; }
-  input, button, select { font: inherit; }
-  input, select { border: 1px solid; padding: 4px 8px; }
-  button { border: 1px solid; padding: 4px 12px; cursor: pointer; background: none; }
-  button:disabled { opacity: .4; }
-  .box { border: 1px solid; padding: 8px; margin-bottom: 8px; }
-  .badge { display: inline-block; border: 1px solid; padding: 0 4px; font-size: smaller; }
-  .avatar { width: 18px; height: 18px; border: 1px solid; }
-  .login-box { border: 1px solid; padding: 16px; max-width: 360px; margin: 80px auto 0; }
-  .login-box input { width: 100%; margin-bottom: 8px; }
-  .login-box .btn-l { width: 100%; }
-  .login-error { display: none; margin-bottom: 8px; }
-  .toast-c { position: fixed; bottom: 16px; left: 16px; z-index: 100; }
-  .toast { border: 1px solid; padding: 6px 12px; margin-top: 4px; background: white; }
+  .text-mono { font-family: "SF Mono", "Menlo", "Consolas", monospace; font-size: 12px; }
+  .text-sm { font-size: 12px; color: #666; }
+  .overflow { max-height: 80px; overflow-y: auto; word-break: break-word; }
+  .nowrap { white-space: nowrap; }
+
+  .login-box { max-width: 380px; margin: 100px auto; padding: 24px; border: 1px solid #ccc; border-radius: 8px; }
+  .login-box h1 { font-size: 22px; margin-bottom: 4px; }
+  .login-box .sub { font-size: 13px; color: #666; margin-bottom: 16px; }
+  .login-box label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+  .login-box input { width: 100%; margin-bottom: 10px; }
+  .login-box .btn-l { width: 100%; padding: 8px; background: #0066cc; color: #fff; border: none; border-radius: 4px; }
+  .login-box .btn-l:hover { background: #0052a3; }
+  .login-error { display: none; font-size: 13px; color: #c00; margin-bottom: 8px; }
+
+  .stats { display: flex; gap: 4px; margin-bottom: 12px; }
+  .stat { flex: 1; border: 1px solid #ddd; border-radius: 4px; padding: 8px 12px; text-align: center; cursor: pointer; }
+  .stat:hover { background: #f5f5f5; }
+  .stat.active { border-color: #0066cc; background: #f0f5ff; }
+  .stat .num { font-size: 18px; font-weight: 700; }
+  .stat .lbl { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: .04em; }
+
+  .tabs { display: flex; gap: 2px; }
+  .tab { padding: 5px 14px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; background: #fff; font-size: 13px; }
+  .tab:hover { background: #f5f5f5; }
+  .tab.active { background: #0066cc; color: #fff; border-color: #0066cc; }
+
+  .path-list { border: 1px solid #ddd; border-radius: 4px; overflow: hidden; }
+  .path-row { padding: 6px 10px; border-bottom: 1px solid #eee; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+  .path-row:last-child { border-bottom: none; }
+  .path-row:hover { background: #f5f5ff; }
+  .path-row.active { background: #e8f0fe; }
+  .path-row .pname { font-family: "SF Mono", "Menlo", "Consolas", monospace; font-size: 13px; flex: 1; word-break: break-all; }
+  .path-row .pcount { font-weight: 700; min-width: 24px; text-align: right; }
+  .path-row .pmeta { font-size: 11px; color: #888; }
+
+  .clear-filter { font-size: 11px; color: #c00; cursor: pointer; text-decoration: none; }
+  .clear-filter:hover { text-decoration: underline; }
+  .filter-active { background: #fff7e6; border-color: #b8860b; }
+
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+  .badge-approved { background: #e6f7e6; color: #1a7d1a; }
+  .badge-pending { background: #fff7e6; color: #b8860b; }
+  .badge-spam { background: #ffe6e6; color: #c00; }
+  .badge-deleted { background: #f0f0f0; color: #888; }
+  .badge-wm { background: #e6f0ff; color: #0066cc; }
+
+  .toast-container { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 100; }
+  .toast { background: #333; color: #fff; padding: 8px 16px; border-radius: 6px; font-size: 13px; margin-top: 4px; }
+  .spinner { width: 16px; height: 16px; border: 2px solid #ddd; border-top-color: #0066cc; border-radius: 50%; animation: spin .5s linear infinite; margin: 24px auto; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .empty-state { text-align: center; padding: 32px; color: #999; }
 </style>
 </head>
 <body>
 
-<!-- ══ Login ══ -->
-<div class="login-page" id="login-view">
-  <div class="login-box">
-    <h1>zapiska</h1>
-    <div class="subtitle">Moderation dashboard</div>
-    <label for="token-input">Admin Token</label>
-    <input type="password" id="token-input" placeholder="Enter admin token" autocomplete="off" autofocus>
-    <div class="login-error" id="login-error">Invalid token. Try again.</div>
-    <button class="btn btn-approve" style="width:100%;padding:12px;font-size:14px" id="login-btn">Sign In</button>
-  </div>
+<div id="lv" class="login-box">
+  <h1>zapiska</h1>
+  <div class="sub">moderation</div>
+  <label for="ti">admin token</label>
+  <input type="password" id="ti" autocomplete="off" autofocus>
+  <div class="login-error" id="le">invalid token</div>
+  <button class="btn-l" id="lb" onclick="login()">sign in</button>
 </div>
 
-<!-- ══ Dashboard ══ -->
-<div class="dash" id="dash-view">
-  <div class="dash-header">
-    <div>
-      <h1>Moderation</h1>
-      <div class="subtitle">Approve, reject, or manage comments</div>
+<div id="dv" class="hidden">
+  <div class="flex items-center justify-between mb">
+    <div class="flex items-center gap">
+      <strong style="font-size:18px">zapiska</strong>
+      <span class="text-sm">admin</span>
     </div>
-    <button class="btn btn-outline" onclick="logout()">Sign Out</button>
+    <button onclick="logout()">sign out</button>
   </div>
 
-  <!-- Stats -->
-  <div class="stats" id="stats-bar"></div>
+  <div class="stats" id="sb"></div>
 
-  <!-- Tabs -->
-  <div class="tabs" id="tabs">
-    <button class="tab active" data-status="pending" onclick="switchTab('pending')">Pending</button>
-    <button class="tab" data-status="approved" onclick="switchTab('approved')">Approved</button>
-    <button class="tab" data-status="spam" onclick="switchTab('spam')">Spam</button>
-    <button class="tab" data-status="deleted" onclick="switchTab('deleted')">Deleted</button>
-    <button class="tab" data-status="all" onclick="switchTab('all')">All</button>
-  </div>
+  <div class="flex gap" style="align-items:flex-start">
+    <div style="width:280px;flex-shrink:0">
+      <div class="flex items-center justify-between mb">
+        <span class="text-sm"><strong>paths</strong></span>
+        <span class="text-sm" id="path-count"></span>
+      </div>
+      <div class="path-list" id="path-list" style="max-height:70vh;overflow-y:auto"></div>
+    </div>
 
-  <!-- Filter -->
-  <div class="filter-bar">
-    <input type="text" id="path-filter" placeholder="Filter by path (e.g. /blog/hello)" oninput="debouncedLoad()">
-  </div>
-
-  <!-- List -->
-  <div id="comment-list"></div>
-  <div id="load-more-container" class="hidden">
-    <button class="btn btn-outline btn-load" id="load-more-btn" onclick="loadMore()">Load More</button>
+    <div style="flex:1;min-width:0">
+      <div class="flex flex-wrap items-center gap mb">
+        <div class="tabs" id="tabs">
+          <button class="tab" data-s="all">all</button>
+          <button class="tab" data-s="pending">pending</button>
+          <button class="tab" data-s="approved">approved</button>
+          <button class="tab" data-s="spam">spam</button>
+          <button class="tab" data-s="deleted">deleted</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:4px;flex:1;min-width:120px">
+          <input type="text" id="pf" placeholder="path filter (e.g. /blog/*)" style="flex:1;border:1px solid #ddd;border-radius:4px;padding:5px 8px">
+          <a class="clear-filter hidden" id="clear-pf" onclick="clearPathFilter()" title="clear path filter">clear</a>
+        </div>
+        <input type="text" id="ipf" placeholder="ip filter" style="width:130px;border:1px solid #ddd;border-radius:4px;padding:5px 8px">
+        <select id="sort-select" style="border:1px solid #ddd;border-radius:4px;padding:5px 8px">
+          <option value="desc">newest</option>
+          <option value="asc">oldest</option>
+          <option value="path">by path</option>
+        </select>
+      </div>
+      <div class="flex items-center justify-between mb">
+        <span class="text-sm" id="rc"></span>
+      </div>
+      <div id="cl"></div>
+      <div id="lm" class="hidden mt"><button class="w-full" onclick="lm()" style="padding:8px">load more</button></div>
+    </div>
   </div>
 </div>
 
-<!-- ══ Toast ══ -->
-<div class="toast-container" id="toast-container"></div>
+<div class="toast-container" id="tc"></div>
 
 <script>
-// CSS theme toggle: ?brutalist=1 or /admin/brutalist path enables brutalist mode.
-(function() {
-  const el = window.location.pathname.includes('/brutalist') || new URLSearchParams(window.location.search).has('brutalist')
-    ? document.getElementById('css-main') : document.getElementById('css-brutalist');
-  if (el) el.remove();
-})();
+let cs = 'all', bf = null, ld = false, sc = {}, sv = 'desc', selPath = '';
+const A = new URLSearchParams(window.location.search).get('api') || window.location.origin;
+function ap(p) { return A + p; }
 
-let currentStatus = 'pending';
-let before = null;
-let loading = false;
-let statsCache = {};
-let pathFilter = '';
-
-const urlParams = new URLSearchParams(window.location.search);
-const API = urlParams.get('api') || window.location.origin;
-
-function apiUrl(path) { return API + path; }
-
-// ── Login ──
-
+// ── Login/out ──
 function login() {
-  const token = document.getElementById('token-input').value;
-  if (!token) return;
-  document.getElementById('login-btn').disabled = true;
-
-  fetch(apiUrl('/api/admin/login'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token })
-  })
+  const t = document.getElementById('ti').value;
+  if (!t) return;
+  document.getElementById('lb').disabled = true;
+  fetch(ap('/api/admin/login'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: t }) })
   .then(r => {
-    document.getElementById('login-btn').disabled = false;
-    if (r.status === 401) {
-      document.getElementById('login-error').style.display = 'block';
-      return Promise.reject();
-    }
+    document.getElementById('lb').disabled = false;
+    if (r.status === 401) { document.getElementById('le').style.display = 'block'; return Promise.reject(); }
     if (!r.ok) return Promise.reject();
-    document.getElementById('login-view').style.display = 'none';
-    document.getElementById('dash-view').classList.add('active');
-    loadStats();
-    loadComments();
+    document.getElementById('lv').style.display = 'none';
+    document.getElementById('dv').classList.remove('hidden');
+    refreshAll();
   })
-  .catch(() => { document.getElementById('login-btn').disabled = false; });
+  .catch(() => { document.getElementById('lb').disabled = false; });
 }
 
 function logout() {
-  fetch(apiUrl('/api/admin/logout'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-    .catch(() => {});
-  before = null;
-  document.getElementById('login-view').style.display = 'flex';
-  document.getElementById('dash-view').classList.remove('active');
-  document.getElementById('token-input').value = '';
-  document.getElementById('comment-list').innerHTML = '';
+  fetch(ap('/api/admin/logout'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(()=>{});
+  bf = null; document.getElementById('lv').style.display = 'block'; document.getElementById('dv').classList.add('hidden');
+  document.getElementById('ti').value = ''; document.getElementById('cl').innerHTML = '';
 }
 
-// Enter key to login
 document.addEventListener('DOMContentLoaded', function() {
-  document.getElementById('token-input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') login();
-  });
+  document.getElementById('ti').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+  fetch(ap('/api/admin/comments?status=all&limit=1'))
+    .then(r => { if (r.ok) { document.getElementById('lv').style.display = 'none'; document.getElementById('dv').classList.remove('hidden'); refreshAll(); } })
+    .catch(()=>{});
 });
 
-// ── Comments API ──
+function refreshAll() { ls(); lp(); lc(); }
 
-function buildUrl(append) {
-  let url = `/api/admin/comments?status=${currentStatus}&limit=50`;
-  const path = document.getElementById('path-filter').value.trim();
-  if (path) url += '&path=' + encodeURIComponent(path);
-  if (before && append) url += '&before=' + before;
+// ── Tab clicks ──
+document.getElementById('tabs').addEventListener('click', function(e) {
+  const tab = e.target.closest('.tab');
+  if (tab) switchTab(tab.dataset.s);
+});
+
+// ── Path browser ──
+function lp() {
+  fetch(ap('/api/admin/paths')).then(r => r.json()).then(d => {
+    const paths = d.paths || [];
+    document.getElementById('path-count').textContent = paths.length + ' total';
+    document.getElementById('path-list').innerHTML = paths.map(p =>
+      '<div class="path-row' + (selPath === p.path ? ' active' : '') + '" onclick="selectPath(\'' + ea(p.path) + '\')">' +
+        '<div class="flex items-center gap"><span class="pcount">' + p.total + '</span><span class="pname">' + eh(p.path) + '</span></div>' +
+        '<div class="pmeta">' + p.approved + ' approved / ' + p.pending + ' pending / ' + p.spam + ' spam</div>' +
+      '</div>'
+    ).join('');
+  }).catch(()=>{});
+}
+
+function selectPath(path) {
+  selPath = selPath === path ? '' : path;
+  document.querySelectorAll('.path-row').forEach(r => r.classList.toggle('active', r.querySelector('.pname')?.textContent === selPath));
+  document.getElementById('pf').value = selPath;
+  bf = null; updateFilterUI(); lc();
+}
+
+function clearPathFilter() {
+  selPath = '';
+  document.getElementById('pf').value = '';
+  document.querySelectorAll('.path-row').forEach(r => r.classList.remove('active'));
+  bf = null; updateFilterUI(); lc();
+}
+
+function updateFilterUI() {
+  const pf = document.getElementById('pf');
+  const clearBtn = document.getElementById('clear-pf');
+  const hasFilter = pf.value.trim().length > 0;
+  clearBtn.classList.toggle('hidden', !hasFilter);
+  pf.classList.toggle('filter-active', hasFilter);
+}
+
+// ── Comments API ──
+function bu(a) {
+  let url = '/api/admin/comments?status=' + cs + '&limit=50';
+  const p = document.getElementById('pf').value.trim();
+  if (p) {
+    // /blog/* → LIKE '/blog/%' for prefix matching
+    const pathVal = p.endsWith('/*') ? p.slice(0, -1) + '%' : p;
+    url += '&path=' + encodeURIComponent(pathVal);
+  }
+  const ip = document.getElementById('ipf').value.trim();
+  if (ip) url += '&ip=' + encodeURIComponent(ip);
+  if (bf && a) url += '&before=' + bf;
   return url;
 }
 
-function loadComments(append) {
-  if (loading) return;
-  loading = true;
-
-  const list = document.getElementById('comment-list');
-  if (!append) list.innerHTML = '';
-  list.insertAdjacentHTML('beforeend', '<div class="spinner" id="spinner"></div>');
-
-  fetch(apiUrl(buildUrl(append)))
-    .then(r => {
-      if (r.status === 401) { logout(); return null; }
-      return r.json();
-    })
-    .then(data => {
-      document.querySelectorAll('#spinner').forEach(el => el.remove());
-      loading = false;
-      if (!data) return;
-
-      const comments = data.comments || [];
-      if (!append) list.innerHTML = '';
-
-      if (comments.length === 0 && !append) {
-        list.innerHTML = '<div class="empty-state"><div class="icon">&#128172;</div><p>No comments here.</p></div>';
-        document.getElementById('load-more-container').classList.add('hidden');
-        return;
-      }
-
-      comments.forEach(c => renderComment(c, list));
-
-      if (comments.length > 0) {
-        before = comments[comments.length - 1].id;
-        document.getElementById('load-more-container').classList.remove('hidden');
-      } else {
-        document.getElementById('load-more-container').classList.add('hidden');
-      }
-    })
-    .catch(() => { loading = false; document.querySelectorAll('#spinner').forEach(el => el.remove()); });
+function sortComments(c) {
+  if (sv === 'asc') return c.sort((a, b) => a.id - b.id);
+  if (sv === 'path') return c.sort((a, b) => a.target_path.localeCompare(b.target_path) || b.id - a.id);
+  return c; // desc already default from API
 }
 
-function loadMore() { loadComments(true); }
-
-let debounceTimer;
-function debouncedLoad() {
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => { before = null; loadComments(); }, 300);
+function lc(a) {
+  if (ld) return; ld = true;
+  const l = document.getElementById('cl');
+  if (!a) l.innerHTML = '<div class="spinner"></div>';
+  fetch(ap(bu(a)))
+  .then(r => { if (r.status === 401) { logout(); return null; } return r.json(); })
+  .then(d => {
+    ld = false; if (!d) return;
+    const raw = d.comments || [];
+    const comments = sortComments([...raw]);
+    if (!a) l.innerHTML = '';
+    if (comments.length === 0 && !a) {
+      l.innerHTML = '<div class="empty-state">no comments</div>';
+      document.getElementById('lm').classList.add('hidden');
+      document.getElementById('rc').textContent = '0';
+      return;
+    }
+    if (!a) l.innerHTML =
+      '<table><thead><tr><th>id</th><th>author</th><th>status</th><th>type</th><th>path</th><th>content</th><th>date</th><th>ip</th><th style="width:140px">actions</th></tr></thead><tbody></tbody></table>';
+    const tbody = l.querySelector('tbody');
+    comments.forEach(c => {
+      const tr = document.createElement('tr');
+      tr.dataset.id = c.id;
+      const au = c.author_url ? '<a href="' + ea(c.author_url) + '" target="_blank">' + eh(c.author_name) + '</a>' : eh(c.author_name);
+      const sb = '<span class="badge badge-' + eh(c.status) + '">' + eh(c.status) + '</span>';
+      const tb = c.comment_type === 'webmention' ? ' <span class="badge badge-wm">WM</span>' : '';
+      const dt = c.created_at ? c.created_at.slice(0, 10) : '';
+      const ip = c.submitter_ip || '';
+      tr.innerHTML =
+        '<td class="text-mono">' + c.id + '</td>' +
+        '<td>' + au + '</td>' +
+        '<td>' + sb + '</td>' +
+        '<td style="white-space:nowrap">' + tb + (c.depth > 0 ? ' d' + c.depth : '') + (c.honeypot ? ' <span style="color:#c00;font-size:11px">honeypot</span>' : '') + '</td>' +
+        '<td class="text-mono" style="font-size:12px;word-break:break-all">' + eh(c.target_path) + '</td>' +
+        '<td class="overflow" style="max-width:250px;font-size:13px">' + (c.content || '') + '</td>' +
+        '<td class="nowrap text-sm">' + dt + '</td>' +
+        '<td class="text-mono text-sm" style="word-break:break-all">' + ip + '</td>' +
+        '<td class="nowrap">' + actButtons(c.id, c.status) + '</td>';
+      tbody.appendChild(tr);
+    });
+    if (raw.length > 0) { bf = raw[raw.length - 1].id; document.getElementById('lm').classList.remove('hidden'); }
+    else { document.getElementById('lm').classList.add('hidden'); }
+    document.getElementById('rc').textContent = comments.length + (selPath ? ' on ' + selPath : '');
+  })
+  .catch(() => { ld = false; });
 }
+
+function lm() { lc(true); }
+let dt;
+function dl() { clearTimeout(dt); dt = setTimeout(() => { bf = null; lc(); }, 300); }
+document.getElementById('pf').addEventListener('input', function() {
+  selPath = '';
+  document.querySelectorAll('.path-row').forEach(r => r.classList.remove('active'));
+  updateFilterUI(); dl();
+});
+document.getElementById('ipf').addEventListener('input', dl);
+document.getElementById('sort-select').addEventListener('change', function() { sv = this.value; bf = null; lc(); });
 
 // ── Stats ──
-
-function loadStats() {
-  const statuses = ['pending', 'approved', 'spam', 'deleted'];
-  Promise.all(statuses.map(s =>
-    fetch(apiUrl(`/api/admin/comments?status=${s}&limit=1`))
-      .then(r => r.json())
-      .then(d => ({ status: s, count: d.comments ? d.comments.length : 0 }))
-      .catch(() => ({ status: s, count: 0 }))
-  )).then(results => {
-    statsCache = {};
-    let total = 0;
-    results.forEach(r => { statsCache[r.status] = r.count; total += r.count; });
-    statsCache.all = total;
-
-    // Also fetch actual totals with larger limit to get rough counts
-    // For accurate counts we'd need a count endpoint, but this gives reasonable display
-    // The stats display is mostly decorative anyway
-    renderStats();
+function ls() {
+  Promise.all(['pending','approved','spam','deleted'].map(st =>
+    fetch(ap('/api/admin/comments?status=' + st + '&limit=1'))
+      .then(r => r.json()).then(d => ({ status: st, count: d.comments ? d.comments.length : 0 }))
+      .catch(() => ({ status: st, count: 0 }))
+  )).then(r => {
+    sc = {}; let t = 0;
+    r.forEach(x => { sc[x.status] = x.count; t += x.count; });
+    sc.all = t;
+    document.getElementById('sb').innerHTML =
+      [['pending','pending'],['approved','approved'],['spam','spam'],['deleted','deleted'],['all','total']]
+      .map(x => '<div class="stat' + (cs === x[0] ? ' active' : '') + '" onclick="switchTab(\'' + x[0] + '\')"><div class="num">' + (sc[x[0]] ?? '-') + '</div><div class="lbl">' + x[1] + '</div></div>').join('');
   });
-}
-
-function renderStats() {
-  const bar = document.getElementById('stats-bar');
-  const items = [
-    { key: 'pending', label: 'Pending', cls: 'stat-pending' },
-    { key: 'approved', label: 'Approved', cls: 'stat-approved' },
-    { key: 'spam', label: 'Spam', cls: 'stat-spam' },
-    { key: 'deleted', label: 'Deleted', cls: 'stat-deleted' },
-    { key: 'all', label: 'Total', cls: 'stat-all' },
-  ];
-  bar.innerHTML = items.map(item => `
-    <div class="stat ${item.cls}${currentStatus === item.key ? ' active' : ''}" onclick="switchTab('${item.key}')">
-      <div class="stat-num">${statsCache[item.key] ?? '-'}</div>
-      <div class="stat-label">${item.label}</div>
-    </div>
-  `).join('');
 }
 
 // ── Tab switching ──
-
 function switchTab(status) {
-  currentStatus = status;
-  before = null;
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.status === status));
-  document.querySelectorAll('.stat').forEach(s => {
-    const key = s.querySelector('.stat-label')?.textContent.toLowerCase();
-    s.classList.toggle('active', key === status || (status === 'all' && key === 'total'));
+  cs = status; bf = null;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.s === cs));
+  document.querySelectorAll('.stat').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.stat').forEach(el => {
+    const lbl = el.querySelector('.lbl');
+    if (lbl && (lbl.textContent.toLowerCase() === cs || (cs === 'all' && lbl.textContent.toLowerCase() === 'total'))) {
+      el.classList.add('active');
+    }
   });
-  loadComments();
-  loadStats();
+  lc(); ls();
 }
 
-// ── Render comment ──
-
-function renderComment(c, list) {
-  const el = document.createElement('div');
-  el.className = 'card';
-  el.dataset.id = c.id;
-
-  const avatarHtml = c.author_avatar
-    ? `<img class="card-avatar" src="${escapeAttr(c.author_avatar)}" alt="" loading="lazy">`
-    : '';
-  const authorUrlHtml = c.author_url
-    ? `<a href="${escapeAttr(c.author_url)}" target="_blank" rel="noopener">${escapeHtml(c.author_name)}</a>`
-    : escapeHtml(c.author_name);
-  const typeBadge = c.comment_type === 'webmention'
-    ? '<span class="badge badge-webmention">WM</span>'
-    : '<span class="badge badge-native">N</span>';
-  const statusBadge = `<span class="badge badge-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span>`;
-  const date = c.created_at ? formatDate(c.created_at) : '';
-  const sourceHtml = c.source_url
-    ? `<span class="card-source"><a href="${escapeAttr(c.source_url)}" target="_blank" rel="noopener">source</a></span>`
-    : '';
-  const depthHtml = c.depth > 0 ? `<span class="card-depth" style="font-size:11px;color:var(--text-secondary)">depth ${c.depth}</span>` : '';
-  const honeypotHtml = c.honeypot ? `<span class="badge badge-spam" style="font-size:10px">HONEYPOT</span>` : '';
-  const ipHtml = c.submitter_ip ? `<span class="card-ip" style="font-size:11px;color:var(--text-secondary);font-family:monospace">${escapeHtml(c.submitter_ip)}</span>` : '';
-  const parentHtml = c.parent_id
-    ? `<span class="card-parent" style="font-size:11px"><a href="#comment-${c.parent_id}" onclick="event.preventDefault();document.querySelector('.card[data-id=\'${c.parent_id}\']')?.scrollIntoView({behavior:'smooth'});return false;" style="color:var(--accent)">reply to #${c.parent_id}</a></span>`
-    : '';
-
-  el.innerHTML = `
-    <div class="card-header">
-      <div class="card-header-left">
-        <div class="card-author">
-          ${avatarHtml}
-          ${authorUrlHtml}
-          ${statusBadge}
-          ${typeBadge}
-          ${honeypotHtml}
-        </div>
-        <div class="card-meta">
-          <span>${c.comment_type}</span>
-          <span>${date}</span>
-          ${depthHtml}
-          ${parentHtml}
-          ${ipHtml}
-        </div>
-        <div class="card-path">${escapeHtml(c.target_path)}</div>
-      </div>
-    </div>
-    <div class="card-content">${c.content || ''}</div>
-    <div class="card-footer">
-      <div class="card-actions">
-        ${renderActions(c)}
-      </div>
-      ${sourceHtml}
-    </div>
-  `;
-
-  list.appendChild(el);
-}
-
-function renderActions(c) {
-  const id = c.id;
-  switch (c.status) {
-    case 'pending':
-      return `
-        <button class="btn btn-approve" onclick="moderate(${id},'approved')">Approve</button>
-        <button class="btn btn-spam" onclick="moderate(${id},'spam')">Spam</button>
-        <button class="btn btn-delete" onclick="moderate(${id},'deleted')">Delete</button>
-      `;
-    case 'approved':
-      return `
-        <button class="btn btn-pending" onclick="moderate(${id},'pending')">Unapprove</button>
-        <button class="btn btn-spam" onclick="moderate(${id},'spam')">Spam</button>
-        <button class="btn btn-delete" onclick="moderate(${id},'deleted')">Delete</button>
-      `;
-    case 'spam':
-      return `
-        <button class="btn btn-approve" onclick="moderate(${id},'approved')">Approve</button>
-        <button class="btn btn-pending" onclick="moderate(${id},'pending')">Unspam</button>
-        <button class="btn btn-delete" onclick="moderate(${id},'deleted')">Delete</button>
-      `;
-    case 'deleted':
-      return `
-        <button class="btn btn-approve" onclick="moderate(${id},'approved')">Restore</button>
-        <button class="btn btn-pending" onclick="moderate(${id},'pending')">Un-delete</button>
-        <button class="btn btn-spam" onclick="moderate(${id},'spam')">Spam</button>
-      `;
-    default:
-      return `
-        <button class="btn btn-approve" onclick="moderate(${id},'approved')">Approve</button>
-        <button class="btn btn-spam" onclick="moderate(${id},'spam')">Spam</button>
-        <button class="btn btn-delete" onclick="moderate(${id},'deleted')">Delete</button>
-      `;
+// ── Action buttons ──
+function actButtons(id, status) {
+  const m = (a) => ' onclick="m(' + id + ',\'' + a + '\')"';
+  switch (status) {
+    case 'pending': return '<button' + m('approved') + '>approve</button><button' + m('spam') + '>spam</button><button' + m('deleted') + '>delete</button>';
+    case 'approved': return '<button' + m('pending') + '>unapprove</button><button' + m('spam') + '>spam</button><button' + m('deleted') + '>delete</button>';
+    case 'spam': return '<button' + m('approved') + '>approve</button><button' + m('pending') + '>unspam</button><button' + m('deleted') + '>delete</button>';
+    case 'deleted': return '<button' + m('approved') + '>restore</button><button' + m('pending') + '>undelete</button><button' + m('spam') + '>spam</button>';
+    default: return '<button' + m('approved') + '>approve</button><button' + m('spam') + '>spam</button><button' + m('deleted') + '>delete</button>';
   }
 }
 
-function moderate(id, action) {
-  const card = document.querySelector(`.card[data-id="${id}"]`);
-  const btns = card ? card.querySelectorAll('.btn') : [];
-  btns.forEach(b => b.disabled = true);
+function m(id, action) {
+  const el = document.querySelector('[data-id="' + id + '"]');
+  if (el) el.querySelectorAll('button').forEach(b => b.disabled = true);
 
-  fetch(apiUrl('/api/admin/moderate'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, action })
+  // Grab the current status from the badge before it disappears
+  let oldStatus = '';
+  if (el) {
+    const badge = el.querySelector('.badge');
+    if (badge) oldStatus = badge.textContent.trim();
+  }
+
+  fetch(ap('/api/admin/moderate'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action }) })
+  .then(r => { if (r.status === 401) { logout(); return null; } return r.json(); })
+  .then(d => {
+    if (!d) return;
+    const el = document.querySelector('[data-id="' + id + '"]');
+    if (el) el.remove();
+    undoableToast(action, id, oldStatus);
+    if (document.querySelectorAll('[data-id]').length === 0) { bf = null; lc(); }
+    ls(); lp();
   })
-  .then(r => {
-    if (r.status === 401) { logout(); return null; }
-    return r.json();
+  .catch(() => { if (el) el.querySelectorAll('button').forEach(b => b.disabled = false); });
+}
+
+function undoableToast(action, id, oldStatus) {
+  const c = document.getElementById('tc'), e = document.createElement('div');
+  e.className = 'toast';
+  e.innerHTML = '<span>' + action + '</span> <a href="#" style="color:#fff;font-weight:700;margin-left:12px;text-decoration:underline" onclick="undoModerate(' + id + ',\'' + oldStatus + '\',this);return false">undo</a>';
+  c.appendChild(e);
+  setTimeout(() => { if (e.parentNode) e.remove(); }, 4000);
+}
+
+function undoModerate(id, oldStatus, link) {
+  if (!oldStatus) return;
+  link.textContent = '...';
+  fetch(ap('/api/admin/moderate'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: oldStatus }) })
+  .then(r => r.json())
+  .then(d => {
+    if (!d) return;
+    const toast = link.closest('.toast');
+    if (toast) toast.remove();
+    toast('undone');
+    // Reload current view to show the restored comment
+    bf = null; lc(); ls(); lp();
   })
-  .then(data => {
-    if (!data) return;
-    const card = document.querySelector(`.card[data-id="${id}"]`);
-    if (card) card.remove();
-    const labels = { approved: 'Approved.', spam: 'Marked as spam.', deleted: 'Deleted.', pending: 'Reverted to pending.' };
-    showToast(labels[action] || 'Done.');
-    if (document.querySelectorAll('.card').length === 0) {
-      before = null;
-      loadComments();
-    }
-    loadStats();
-  })
-  .catch(() => { btns.forEach(b => b.disabled = false); });
+  .catch(() => { link.textContent = 'failed'; });
 }
 
-// ── Toast ──
-
-function showToast(msg) {
-  const container = document.getElementById('toast-container');
-  const el = document.createElement('div');
-  el.className = 'toast';
-  el.textContent = msg;
-  container.appendChild(el);
-  requestAnimationFrame(() => el.classList.add('show'));
-  setTimeout(() => {
-    el.classList.remove('show');
-    setTimeout(() => el.remove(), 200);
-  }, 2000);
+function toast(m) {
+  const c = document.getElementById('tc'), e = document.createElement('div');
+  e.className = 'toast'; e.textContent = m;
+  c.appendChild(e);
+  setTimeout(() => e.remove(), 1500);
 }
 
-// ── Helpers ──
-
-function formatDate(s) {
-  if (!s) return '';
-  const d = new Date(s);
-  if (isNaN(d.getTime())) return s.slice(0, 10);
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-function escapeHtml(s) {
-  if (!s) return '';
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function escapeAttr(s) {
-  if (!s) return '';
-  return s.replace(/"/g,'&quot;').replace(/&/g,'&amp;').replace(/</g,'&lt;');
-}
-
-// ── Auto-login check: if cookie exists, try loading dashboard ──
-document.addEventListener('DOMContentLoaded', function() {
-  // Check if we have a session by trying to load pending
-  fetch(apiUrl('/api/admin/comments?status=pending&limit=1'))
-    .then(r => {
-      if (r.ok) {
-        document.getElementById('login-view').style.display = 'none';
-        document.getElementById('dash-view').classList.add('active');
-        loadStats();
-        loadComments();
-      }
-    })
-    .catch(() => {});
-});
+function eh(s) { if (!s) return ''; return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function ea(s) { if (!s) return ''; return s.replace(/"/g,'&quot;').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 </script>
 </body>
 </html>

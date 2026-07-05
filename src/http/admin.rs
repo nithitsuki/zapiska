@@ -437,6 +437,29 @@ pub struct AuthorLookupQuery {
     pub combine: Option<bool>,
 }
 
+// ── GET /api/admin/paths ────────────────────────────────────
+
+/// List all paths that have comments, with counts per status.
+pub async fn list_paths(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let paths = state.repo.list_paths().await?;
+    let result: Vec<serde_json::Value> = paths
+        .into_iter()
+        .map(|(path, total, approved, spam, pending, deleted)| {
+            serde_json::json!({
+                "path": path,
+                "total": total,
+                "approved": approved,
+                "spam": spam,
+                "pending": pending,
+                "deleted": deleted,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({"paths": result})))
+}
+
 // ── URL query endpoints ─────────────────────────────────────
 
 /// GET /api/admin/urls/lookup?url_hash=<hash> — find all comments with a given URL.
