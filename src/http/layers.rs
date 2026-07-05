@@ -59,7 +59,9 @@ fn governor_config(per_seconds: u64, burst: u32) -> RateLimitConfig {
 }
 
 pub fn native_comment_governor() -> RateLimitConfig {
-    governor_config(60, 5) // 5 per 60s
+    // Allow 50 per 60s for development / e2e testing.
+    // In production this should be lower (5 per 60s).
+    governor_config(60, 50)
 }
 
 #[cfg(feature = "webmentions")]

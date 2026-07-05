@@ -19,7 +19,8 @@ pub struct AppState {
     pub github: Arc<dyn GitHubLookup>,
     #[cfg(feature = "webmentions")]
     pub wm_sender: JobSender,
-    /// Shared HTTP client (used for GitHub enrichment and webmention fetches).
+    /// Shared HTTP client (used for all outbound requests: GitHub enrichment,
+    /// webmention fetches, and moderation webhooks).
     pub http_client: Client,
     /// In-memory rate limiter for per-IP daily caps and per-domain hourly caps.
     pub limiter: Arc<Limiter>,

@@ -133,6 +133,7 @@ pub async fn create_comment(
     };
 
     // 7. Store. Clone values needed for the webhook payload later.
+    let hook_content = content.clone();
     let hook_name = resolved_name.clone();
     let hook_url = resolved_url.clone();
     let hook_avatar = resolved_avatar.clone();
@@ -198,6 +199,7 @@ pub async fn create_comment(
             "event": "comment.created",
             "id": new_id, "target_path": target_path, "comment_type": "native",
             "author_name": hook_name, "author_url": hook_url, "author_avatar": hook_avatar,
+            "content": hook_content,
             "honeypot": is_honeypot, "parent_id": parent_id, "depth": depth,
             "submitter_ip": hook_ip, "delete_token": delete_token_str,
             "content_hash": hook_content_hash, "is_reply": parent_id.is_some(),

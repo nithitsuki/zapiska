@@ -7,10 +7,10 @@ use crate::config::Config;
 use crate::ssrf::{SsrfError, resolve_and_check, ssrf_safe_redirect_policy};
 
 /// Build an SSRF-safe reqwest Client that enforces the private-IP blocklist
-/// at every redirect hop.
+/// at every redirect hop. Allows both HTTP and HTTPS — SSRF safety comes from
+/// DNS resolution checks + redirect policy, not from https_only.
 pub fn build_client(config: &Config) -> Client {
     Client::builder()
-        .https_only(true)
         .user_agent(format!(
             "webmention.nithitsuki.com/{}",
             env!("CARGO_PKG_VERSION")
