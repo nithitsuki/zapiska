@@ -35,13 +35,15 @@ The server binds `127.0.0.1:3000` by default. Put it behind a reverse proxy (ngi
 
 ## nginx example
 
+Swap `comments.your-site.example` for the subdomain you host zapiska on, and point the TLS paths at your cert files.
+
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name webmention.nithitsuki.com;
+    server_name comments.your-site.example;
 
-    ssl_certificate     /etc/ssl/certs/nithitsuki.com.pem;
-    ssl_certificate_key /etc/ssl/private/nithitsuki.com.key;
+    ssl_certificate     /etc/letsencrypt/live/comments.your-site.example/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/comments.your-site.example/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:3000;
@@ -53,7 +55,7 @@ server {
 
 server {
     listen 80;
-    server_name webmention.nithitsuki.com;
+    server_name comments.your-site.example;
     return 301 https://$host$request_uri;
 }
 ```
@@ -78,13 +80,13 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Environment file (`/opt/zapiska/.env`):
+Environment file (`/opt/zapiska/.env`) — see [.env.example](../.env.example) for the full list:
 
 ```
 ADMIN_TOKEN=your-secret-here
 GITHUB_TOKEN=ghp_optional_token
-PUBLIC_TARGET_ORIGIN=https://nithitsuki.com
-ALLOWED_CORS_ORIGIN=https://nithitsuki.com
+PUBLIC_TARGET_ORIGIN=https://your-site.example
+ALLOWED_CORS_ORIGIN=https://your-site.example
 DATABASE_PATH=/opt/zapiska/comments.db
 RUST_LOG=info
 ```
@@ -107,7 +109,7 @@ docker run -d \
   zapiska
 ```
 
-Or use docker-compose (see [docker-compose.yml](../docker-compose.yml)).
+Or use docker-compose (see [docker-compose-example.yml](../docker-compose-example.yml)).
 
 ## SQLite
 
@@ -151,6 +153,26 @@ Never logs raw `content`, `author_url`, or `ADMIN_TOKEN`. Safe fields: `id`, `ta
 
 Handles SIGTERM and SIGINT. Stops accepting connections, drains the webmention worker queue, then exits.
 
+## Cloudflare Turnstile (optional bot protection)
+
+Turnstile is **off by default**. When enabled, native comment submissions are rejected unless they include a valid `cf-turnstile-response` token from the Cloudflare Turnstile widget. zapiska verifies the token against Cloudflare's `siteverify` endpoint directly from the Rust backend — no Worker, no extra runtime.
+
+| Variable | Default | Description |
+|---|---|---|
+| `TURNSTILE_ENABLED` | `false` | Master switch. When `false`, the `cf-turnstile-response` field is ignored entirely. |
+| `TURNSTILE_SECRET_KEY` | *(required when enabled)* | The Turnstile secret key from the Cloudflare dashboard. Loaded once at startup, never logged, never written to disk. Startup fails fast if `TURNSTILE_ENABLED=true` and this is unset. |
+| `TURNSTILE_VERIFY_URL` | `https://challenges.cloudflare.com/turnstile/v0/siteverify` | Override for the siteverify endpoint. Use only for tests or proxies. Must be `https://`. |
+
+To enable:
+
+1. Create a widget at https://dash.cloudflare.com → Turnstile. Note the **sitekey** (public) and the **secret**.
+2. Add the widget's allowed hostnames — your main site origin (where the form lives), plus `localhost` and `127.0.0.1` for local dev.
+3. Set `TURNSTILE_ENABLED=true` and `TURNSTILE_SECRET_KEY=<secret>` in zapiska's env.
+4. Add the Turnstile widget to your comment form (see [getting-started.md](getting-started.md) and [../embed/README.md](../embed/README.md)).
+5. Restart zapiska. Submissions without a valid token now return `400 { "code": "turnstile_failed" }`. If zapiska can't reach Cloudflare's siteverify endpoint, it returns `503` and **fails closed** — no comment is stored.
+
+The sitekey is public and lives in your HTML; the secret lives only in zapiska's env / Worker secret store. Keep them separate.
+
 ## Script-based moderation
 
 The admin API is designed to be consumed by automated moderation scripts. Typical workflow:
@@ -183,7 +205,7 @@ curl -b cookies.txt -X POST \
 ```sh
 git pull
 cargo build --release
-sudo systemctl restart webmention
+sudo systemctl restart zapiska
 ```
 
 Schema migrations are idempotent and run automatically on startup.

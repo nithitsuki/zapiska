@@ -46,27 +46,20 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error
         "ALTER TABLE comments ADD COLUMN depth INTEGER NOT NULL DEFAULT 0",
         [],
     );
-    let _ = conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id)",
-    );
+    let _ =
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id)");
 
     // Migration 3: honeypot flag and self-deletion tokens.
     let _ = conn.execute(
         "ALTER TABLE comments ADD COLUMN honeypot INTEGER NOT NULL DEFAULT 0",
         [],
     );
-    let _ = conn.execute(
-        "ALTER TABLE comments ADD COLUMN delete_token TEXT",
-        []);
+    let _ = conn.execute("ALTER TABLE comments ADD COLUMN delete_token TEXT", []);
 
     // Migration 4: optional submitter IP address storage.
-    let _ = conn.execute(
-        "ALTER TABLE comments ADD COLUMN submitter_ip TEXT",
-        []);
+    let _ = conn.execute("ALTER TABLE comments ADD COLUMN submitter_ip TEXT", []);
     // Migration 5: content hash for dedup detection.
-    let _ = conn.execute(
-        "ALTER TABLE comments ADD COLUMN content_hash TEXT",
-        []);
+    let _ = conn.execute("ALTER TABLE comments ADD COLUMN content_hash TEXT", []);
     // Migration 6: extracted URLs for cross-comment tracking.
     let _ = conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS comment_urls (

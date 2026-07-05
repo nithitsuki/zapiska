@@ -134,7 +134,6 @@ mod tests {
     #[test]
     fn rejects_over_1024_chars() {
         let long = "/".to_string() + &"a".repeat(1024);
-        let long = long; // &str
         assert_eq!(
             validate_target_path(&long),
             Err(ValidationError::TooLong {

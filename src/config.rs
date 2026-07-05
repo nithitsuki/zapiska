@@ -43,6 +43,17 @@ pub struct Config {
     pub default_comment_status: String,
     /// Maximum nesting depth for threaded replies. 0 = disabled (no nesting).
     pub max_thread_depth: i64,
+    /// Whether Cloudflare Turnstile verification is required on native comment
+    /// submissions. Off by default — when `false`, the `cf-turnstile-response`
+    /// form field is ignored entirely.
+    pub turnstile_enabled: bool,
+    /// Cloudflare Turnstile secret key (the *secret*, never the public sitekey).
+    /// Required when `turnstile_enabled = true`. Loaded once at startup and
+    /// never written to disk or logs.
+    pub turnstile_secret_key: Option<String>,
+    /// Override for the siteverify endpoint. Defaults to the public Cloudflare
+    /// endpoint. Useful for tests or for routing through a proxy.
+    pub turnstile_verify_url: String,
 }
 
 #[derive(Debug, Error)]
@@ -63,10 +74,21 @@ pub enum ConfigError {
     InvalidBodySize(String),
     #[error("WORKER_BACKLOG must be a positive integer, got: {0}")]
     InvalidWorkerBacklog(String),
+    #[error("TURNSTILE_ENABLED is true but TURNSTILE_SECRET_KEY is not set")]
+    TurnstileMissingSecret,
+    #[error("TURNSTILE_VERIFY_URL must be an absolute https URL, got: {0}")]
+    InvalidTurnstileVerifyUrl(String),
 }
 
 fn env_or_default(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    match env::var(key) {
+        Ok(s) => s.eq_ignore_ascii_case("true") || s == "1",
+        Err(_) => default,
+    }
 }
 
 fn parse_or_err<T: FromStr>(
@@ -165,13 +187,30 @@ impl Config {
 
         let store_ip_address = env_or_default("STORE_IP_ADDRESS", "false") == "true";
 
-        let moderation_webhook_url = env::var("MODERATION_WEBHOOK_URL").ok().filter(|s| !s.is_empty());
+        let moderation_webhook_url = env::var("MODERATION_WEBHOOK_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
         let moderation_webhook_mode = env_or_default("MODERATION_WEBHOOK_MODE", "async");
         let default_comment_status = env_or_default("DEFAULT_COMMENT_STATUS", "pending");
         let max_thread_depth = env_or_default("MAX_THREAD_DEPTH", "0")
             .parse::<i64>()
             .unwrap_or(0)
             .clamp(0, 10);
+
+        let turnstile_enabled = env_bool("TURNSTILE_ENABLED", false);
+        let turnstile_secret_key = env::var("TURNSTILE_SECRET_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if turnstile_enabled && turnstile_secret_key.is_none() {
+            return Err(ConfigError::TurnstileMissingSecret);
+        }
+        let turnstile_verify_url = env_or_default(
+            "TURNSTILE_VERIFY_URL",
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+        );
+        if !turnstile_verify_url.starts_with("https://") {
+            return Err(ConfigError::InvalidTurnstileVerifyUrl(turnstile_verify_url));
+        }
 
         Ok(Config {
             bind_addr,
@@ -194,6 +233,9 @@ impl Config {
             moderation_webhook_mode,
             default_comment_status,
             max_thread_depth,
+            turnstile_enabled,
+            turnstile_secret_key,
+            turnstile_verify_url,
         })
     }
 
@@ -234,6 +276,9 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 moderation_webhook_mode: {}, \
                 default_comment_status: {}, \
                 max_thread_depth: {}, \
+                turnstile_enabled: {}, \
+                turnstile_secret_key: {}, \
+                turnstile_verify_url: {}, \
                 rust_log: {} \
             }}",
             self.0.bind_addr,
@@ -250,10 +295,20 @@ impl std::fmt::Display for RedactedConfig<'_> {
             self.0.max_comments_per_ip_per_day,
             self.0.max_webmentions_per_domain_per_hour,
             self.0.store_ip_address,
-            self.0.moderation_webhook_url.as_deref().unwrap_or("(unset)"),
+            self.0
+                .moderation_webhook_url
+                .as_deref()
+                .unwrap_or("(unset)"),
             self.0.moderation_webhook_mode,
             self.0.default_comment_status,
             self.0.max_thread_depth,
+            self.0.turnstile_enabled,
+            if self.0.turnstile_secret_key.is_some() {
+                "***"
+            } else {
+                "(unset)"
+            },
+            self.0.turnstile_verify_url,
             self.0.rust_log,
         )
     }
@@ -284,6 +339,17 @@ mod tests {
                 "FETCH_TIMEOUT_MS",
                 "WORKER_BACKLOG",
                 "RUST_LOG",
+                "HONEYPOT_FIELD",
+                "MAX_COMMENTS_PER_IP_PER_DAY",
+                "MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR",
+                "STORE_IP_ADDRESS",
+                "MODERATION_WEBHOOK_URL",
+                "MODERATION_WEBHOOK_MODE",
+                "DEFAULT_COMMENT_STATUS",
+                "MAX_THREAD_DEPTH",
+                "TURNSTILE_ENABLED",
+                "TURNSTILE_SECRET_KEY",
+                "TURNSTILE_VERIFY_URL",
             ];
             for var in vars {
                 // SAFETY: held ENV_LOCK prevents concurrent env mutation.
@@ -395,7 +461,10 @@ mod tests {
         );
         // ftp:// is rejected
         with_env(
-            &[("ADMIN_TOKEN", "test"), ("ALLOWED_CORS_ORIGIN", "ftp://evil")],
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("ALLOWED_CORS_ORIGIN", "ftp://evil"),
+            ],
             || {
                 let err = Config::from_env().unwrap_err();
                 assert!(matches!(err, ConfigError::CorsOriginInvalid(_)));
@@ -453,6 +522,65 @@ mod tests {
     }
 
     #[test]
+    fn turnstile_disabled_by_default() {
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            let config = Config::from_env().unwrap();
+            assert!(!config.turnstile_enabled);
+            assert!(config.turnstile_secret_key.is_none());
+            assert_eq!(
+                config.turnstile_verify_url,
+                "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+            );
+        });
+    }
+
+    #[test]
+    fn turnstile_enabled_requires_secret() {
+        with_env(
+            &[("ADMIN_TOKEN", "test"), ("TURNSTILE_ENABLED", "true")],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(err, ConfigError::TurnstileMissingSecret));
+            },
+        );
+    }
+
+    #[test]
+    fn turnstile_enabled_with_secret_loads() {
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("TURNSTILE_ENABLED", "true"),
+                ("TURNSTILE_SECRET_KEY", "0x4AAAAAAAsecret"),
+            ],
+            || {
+                let config = Config::from_env().unwrap();
+                assert!(config.turnstile_enabled);
+                assert_eq!(
+                    config.turnstile_secret_key.as_deref(),
+                    Some("0x4AAAAAAAsecret")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn turnstile_verify_url_must_be_https() {
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("TURNSTILE_ENABLED", "true"),
+                ("TURNSTILE_SECRET_KEY", "k"),
+                ("TURNSTILE_VERIFY_URL", "http://insecure.example/verify"),
+            ],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(err, ConfigError::InvalidTurnstileVerifyUrl(_)));
+            },
+        );
+    }
+
+    #[test]
     fn redacted_display_hides_admin_and_github_tokens() {
         let config = Config {
             bind_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -467,14 +595,18 @@ mod tests {
             fetch_timeout_ms: 4000,
             worker_backlog: 64,
             rust_log: "info".to_string(),
-        honeypot_field: "website".to_string(),
-        max_comments_per_ip_per_day: 50,
-        max_webmentions_per_domain_per_hour: 10,
-        store_ip_address: false,
-        moderation_webhook_url: None,
-        moderation_webhook_mode: "async".to_string(),
-        default_comment_status: "pending".to_string(),
-        max_thread_depth: 0,
+            honeypot_field: "website".to_string(),
+            max_comments_per_ip_per_day: 50,
+            max_webmentions_per_domain_per_hour: 10,
+            store_ip_address: false,
+            moderation_webhook_url: None,
+            moderation_webhook_mode: "async".to_string(),
+            default_comment_status: "pending".to_string(),
+            max_thread_depth: 0,
+            turnstile_enabled: true,
+            turnstile_secret_key: Some("0x4AAAAAAAsecret".to_string()),
+            turnstile_verify_url: "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+                .to_string(),
         };
         let rendered = format!("{}", config.redacted_display());
         assert!(
@@ -489,6 +621,14 @@ mod tests {
         assert!(
             rendered.contains("github_token: ***"),
             "github_token not redacted"
+        );
+        assert!(
+            !rendered.contains("0x4AAAAAAAsecret"),
+            "turnstile_secret_key leaked"
+        );
+        assert!(
+            rendered.contains("turnstile_secret_key: ***"),
+            "turnstile_secret_key not redacted"
         );
         // sanity: normal fields are still visible
         assert!(rendered.contains("127.0.0.1:3000"));

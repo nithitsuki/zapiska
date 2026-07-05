@@ -3,7 +3,6 @@
 /// GitHub avatars, and sensible fallbacks.
 ///
 /// Only compiled when the `webmentions` feature is enabled (uses `scraper`).
-
 use scraper::{Html, Selector};
 use std::sync::LazyLock;
 use url::Url;
@@ -53,7 +52,7 @@ pub fn best_favicon(html: &str, base_url: &Url) -> Option<String> {
 
         let is_dark = media.contains("prefers-color-scheme: light");
         let format = icon_format(type_attr, &abs, rel);
-        let size = parse_icon_size(&sizes);
+        let size = parse_icon_size(sizes);
 
         candidates.push(FaviconCandidate {
             url: abs,
@@ -74,7 +73,8 @@ pub fn best_favicon(html: &str, base_url: &Url) -> Option<String> {
         // Icons without media queries first
         a.has_media.cmp(&b.has_media).then_with(|| {
             // Prefer light over dark
-            a.is_dark.cmp(&b.is_dark)
+            a.is_dark
+                .cmp(&b.is_dark)
                 .then_with(|| {
                     // Prefer PNG, then ICO, then SVG, then unknown
                     a.format.priority().cmp(&b.format.priority())
@@ -178,7 +178,8 @@ mod tests {
 
     #[test]
     fn single_png_icon() {
-        let html = r#"<html><head><link rel="icon" href="/favicon.png" type="image/png"></head></html>"#;
+        let html =
+            r#"<html><head><link rel="icon" href="/favicon.png" type="image/png"></head></html>"#;
         let result = best_favicon(html, &test_url());
         assert_eq!(result, Some("https://example.com/favicon.png".to_string()));
     }

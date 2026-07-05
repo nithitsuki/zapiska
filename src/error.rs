@@ -15,6 +15,9 @@ pub enum AppError {
     },
     Internal(String),
     ServiceUnavailable(String),
+    /// Cloudflare Turnstile verification failed (token missing, invalid,
+    /// expired, or replayed). Maps to 400 with `code: "turnstile_failed"`.
+    TurnstileFailed(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -26,6 +29,7 @@ impl std::fmt::Display for AppError {
             Self::RateLimited { reason, .. } => write!(f, "{reason}"),
             Self::Internal(msg) => write!(f, "{msg}"),
             Self::ServiceUnavailable(msg) => write!(f, "{msg}"),
+            Self::TurnstileFailed(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -87,6 +91,14 @@ impl IntoResponse for AppError {
                 ErrorBody {
                     error: msg.clone(),
                     code: None,
+                    retry_after: None,
+                },
+            ),
+            AppError::TurnstileFailed(msg) => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: msg.clone(),
+                    code: Some("turnstile_failed".to_string()),
                     retry_after: None,
                 },
             ),
@@ -153,6 +165,23 @@ mod tests {
     fn service_unavailable_returns_503() {
         let resp = AppError::ServiceUnavailable("worker backlog full".into()).into_response();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn turnstile_failed_returns_400_with_code() {
+        let resp = AppError::TurnstileFailed("invalid token".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn turnstile_failed_body_has_code() {
+        let resp = AppError::TurnstileFailed("invalid token".into()).into_response();
+        let bytes = to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .expect("body fits in 1 MiB");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "turnstile_failed");
+        assert_eq!(body["error"], "invalid token");
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
-use rusqlite::params;
 use rusqlite::OptionalExtension;
+use rusqlite::params;
 
-use super::{Comment, NewComment, RepoError, RepoResult, CommentsRepo, row_to_comment};
+use super::{Comment, CommentsRepo, NewComment, RepoError, RepoResult, row_to_comment};
 
 impl CommentsRepo {
     pub async fn insert_comment(&self, input: NewComment) -> RepoResult<i64> {

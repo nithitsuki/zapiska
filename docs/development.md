@@ -13,7 +13,7 @@ sudo apt-get install libsqlite3-dev pkg-config
 
 ```sh
 git clone <repo-url>
-cd webmention.nithitsuki.com
+cd zapiska
 cargo build
 ```
 

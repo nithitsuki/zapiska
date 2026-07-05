@@ -33,10 +33,7 @@ pub fn build_app(state: AppState) -> Router {
             "/api/admin/pending",
             axum::routing::get(admin::list_pending),
         )
-        .route(
-            "/api/admin/paths",
-            axum::routing::get(admin::list_paths),
-        )
+        .route("/api/admin/paths", axum::routing::get(admin::list_paths))
         .route(
             "/api/admin/comments",
             axum::routing::get(admin::list_comments),
@@ -380,12 +377,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: format!("comment by {author}"),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();

@@ -36,7 +36,11 @@ pub struct UrlCommentRef {
 
 impl CommentsRepo {
     /// Insert extracted URLs for a comment.
-    pub async fn insert_urls(&self, comment_id: i64, urls: Vec<(String, String, String)>) -> RepoResult<()> {
+    pub async fn insert_urls(
+        &self,
+        comment_id: i64,
+        urls: Vec<(String, String, String)>,
+    ) -> RepoResult<()> {
         self.spawn(move |conn| {
             for (url, domain, url_hash) in &urls {
                 conn.execute(
@@ -164,7 +168,9 @@ impl CommentsRepo {
         let domain = domain.to_string();
         self.spawn(move |conn| {
             let mut stmt = conn
-                .prepare("SELECT DISTINCT url_hash FROM comment_urls WHERE domain = ?1 ORDER BY url")
+                .prepare(
+                    "SELECT DISTINCT url_hash FROM comment_urls WHERE domain = ?1 ORDER BY url",
+                )
                 .map_err(|e| RepoError::Internal(e.to_string()))?;
             let hashes: Vec<String> = stmt
                 .query_map(params![domain], |row| row.get(0))

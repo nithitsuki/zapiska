@@ -7,7 +7,7 @@
   <br>
   Self-hosted. One binary. Your data.
   <br>
-  <a href="docs/api.md">Docs</a> · <a href="https://discord.gg/Q9fjx3gynN">Discord</a> · <a href="https://github.com/sponsors/nithitsuki">Sponsor</a>
+  <a href="docs/getting-started.md">Getting started</a> · <a href="docs/api.md">API</a> · <a href="https://discord.gg/Q9fjx3gynN">Discord</a> · <a href="https://github.com/sponsors/nithitsuki">Sponsor</a>
 </p>
 
 ---

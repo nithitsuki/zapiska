@@ -342,7 +342,11 @@ pub async fn moderate_batch(
 
     for action in body.actions {
         let result = match moderate_single(&state, action.id, &action.action).await {
-            Ok(status) => ModerateResult { id: action.id, status, error: None },
+            Ok(status) => ModerateResult {
+                id: action.id,
+                status,
+                error: None,
+            },
             Err(e) => ModerateResult {
                 id: action.id,
                 status: String::new(),
@@ -357,7 +361,13 @@ pub async fn moderate_batch(
 
 /// Fire a webhook notification when a comment's status changes.
 /// Used by the moderation system to keep its cache in sync.
-fn fire_status_webhook(state: &AppState, id: i64, old_status: &str, new_status: &str, changed_by: &str) {
+fn fire_status_webhook(
+    state: &AppState,
+    id: i64,
+    old_status: &str,
+    new_status: &str,
+    changed_by: &str,
+) {
     if let Some(ref url) = state.config.moderation_webhook_url {
         let client = state.http_client.clone();
         let url = url.clone();
@@ -379,7 +389,9 @@ fn fire_status_webhook(state: &AppState, id: i64, old_status: &str, new_status: 
                 .send()
                 .await;
             match resp {
-                Ok(r) => tracing::debug!(id, new_status = %new, webhook_status = %r.status(), "status change webhook sent"),
+                Ok(r) => {
+                    tracing::debug!(id, new_status = %new, webhook_status = %r.status(), "status change webhook sent")
+                }
                 Err(e) => tracing::warn!(id, err = %e, "status change webhook failed"),
             }
         });
@@ -387,11 +399,7 @@ fn fire_status_webhook(state: &AppState, id: i64, old_status: &str, new_status: 
 }
 
 /// Moderate a single comment. Returns the new status on success.
-async fn moderate_single(
-    state: &AppState,
-    id: i64,
-    action: &str,
-) -> Result<String, AppError> {
+async fn moderate_single(state: &AppState, id: i64, action: &str) -> Result<String, AppError> {
     if action != "approved" && action != "spam" && action != "deleted" && action != "pending" {
         return Err(AppError::BadRequest(format!(
             "invalid action '{action}', must be one of: approved, spam, deleted, pending"
@@ -481,7 +489,9 @@ pub async fn url_lookup(
         }
         return Ok(Json(serde_json::json!({"urls": results, "domain": domain})));
     }
-    Err(AppError::BadRequest("provide url_hash or domain".to_string()))
+    Err(AppError::BadRequest(
+        "provide url_hash or domain".to_string(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -534,14 +544,19 @@ pub async fn bulk_context(
 
         if body.include_parents.unwrap_or(false) {
             if let Ok(Some((_, chain))) = state.repo.get_comment_chain(cid).await {
-                entry["parents"] = serde_json::json!(chain.iter().map(|p| {
-                    serde_json::json!({
-                        "id": p.id,
-                        "author_name": p.author_name,
-                        "depth": p.depth,
-                        "created_at": p.created_at,
-                    })
-                }).collect::<Vec<_>>());
+                entry["parents"] = serde_json::json!(
+                    chain
+                        .iter()
+                        .map(|p| {
+                            serde_json::json!({
+                                "id": p.id,
+                                "author_name": p.author_name,
+                                "depth": p.depth,
+                                "created_at": p.created_at,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                );
             }
         }
 
@@ -605,16 +620,23 @@ pub async fn moderate(
     Json(body): Json<ModerateRequest>,
 ) -> Result<Json<ModerateResponse>, AppError> {
     // Validate action first (before any DB calls) for consistent error messages.
-    if body.action != "approved" && body.action != "spam" && body.action != "deleted" && body.action != "pending" {
+    if body.action != "approved"
+        && body.action != "spam"
+        && body.action != "deleted"
+        && body.action != "pending"
+    {
         return Err(AppError::BadRequest(format!(
             "invalid action '{}', must be one of: approved, spam, deleted, pending",
             body.action
         )));
     }
     // Fetch the current status for the webhook notification.
-    let old_status = state.repo.get_comment(body.id).await?.ok_or_else(|| {
-        AppError::NotFound(format!("comment {} not found", body.id))
-    })?.status;
+    let old_status = state
+        .repo
+        .get_comment(body.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("comment {} not found", body.id)))?
+        .status;
 
     state.repo.update_status(body.id, &body.action).await?;
     fire_status_webhook(&state, body.id, &old_status, &body.action, "admin");
@@ -653,8 +675,10 @@ mod tests {
         );
         req.headers_mut()
             .insert(header::CONTENT_LENGTH, body.len().into());
-        req.headers_mut()
-            .insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer test"));
+        req.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test"),
+        );
         req
     }
 
@@ -716,12 +740,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "moderate me".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -759,12 +783,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "a".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -778,12 +802,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "b".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -821,12 +845,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "approve".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -854,12 +878,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "buy now".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -922,12 +946,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "x".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -1019,7 +1043,10 @@ mod tests {
         let set_cookie = resp.headers().get(header::SET_COOKIE);
         assert!(set_cookie.is_some(), "login must set Set-Cookie header");
         let cookie = set_cookie.unwrap().to_str().unwrap();
-        assert!(cookie.contains("admin_token=test"), "cookie has correct value");
+        assert!(
+            cookie.contains("admin_token=test"),
+            "cookie has correct value"
+        );
         assert!(cookie.contains("HttpOnly"), "cookie is HttpOnly");
         assert!(cookie.contains("Max-Age="), "cookie has max age");
     }
@@ -1043,11 +1070,7 @@ mod tests {
         let (state, _dir) = helpers::test_state();
         let app = build_app(state);
 
-        let req = json_request(
-            axum::http::Method::POST,
-            "/api/admin/logout",
-            r#"{}"#,
-        );
+        let req = json_request(axum::http::Method::POST, "/api/admin/logout", r#"{}"#);
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
 
@@ -1071,12 +1094,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "approved one".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -1090,12 +1113,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "spam one".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();

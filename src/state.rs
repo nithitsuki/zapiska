@@ -35,6 +35,12 @@ pub struct Limiter {
     counts: Mutex<HashMap<String, u32>>,
 }
 
+impl Default for Limiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Limiter {
     pub fn new() -> Self {
         Self {
@@ -100,8 +106,8 @@ fn yesterday_key() -> String {
 fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     // Algorithm from http://howardhinnant.github.io/date_algorithms.html
     let z = days + 719468;
-    let era = (z / 146097) as u64;
-    let doe = (z % 146097) as u64;
+    let era = z / 146097;
+    let doe = z % 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);

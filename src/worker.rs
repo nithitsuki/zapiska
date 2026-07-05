@@ -7,7 +7,7 @@ use url::Url;
 use crate::db::repo::{CommentsRepo, NewComment, NewWebmentionSeen};
 use crate::github::{GitHubLookup, Profile};
 use crate::http::reqwest_client::{FetchError, fetch_url};
-use crate::mf2::{has_backlink, ParsedMention, parse_h_entry};
+use crate::mf2::{ParsedMention, has_backlink, parse_h_entry};
 use crate::sanitize;
 use crate::ssrf::registrable_domain;
 
@@ -65,7 +65,13 @@ pub fn spawn_worker_for_state(
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
             if let Err(e) = process_job(
-                &job, &repo, &client, &github, &target_origin, max_content_len, false,
+                &job,
+                &repo,
+                &client,
+                &github,
+                &target_origin,
+                max_content_len,
+                false,
             )
             .await
             {
@@ -92,9 +98,7 @@ pub async fn process_job(
     let target_path = derive_target_path(&job.target, target_origin)?;
 
     // 1. Check idempotency: if previously gone, delete the comment.
-    let seen = repo
-        .get_webmention_seen(&job.source, &job.target)
-        .await?;
+    let seen = repo.get_webmention_seen(&job.source, &job.target).await?;
 
     if seen.as_ref().is_some_and(|s| s.last_status == "gone")
         && let Ok(Some(comment)) = repo.get_comment_by_source(&job.source).await
@@ -198,13 +202,18 @@ fn resolve_author_info(
                 .author_url
                 .as_ref()
                 .and_then(|u| Url::parse(u).ok())
-                .and_then(|u| u.host_str().map(|h| format!("https://api.dicebear.com/7.x/notionists/svg?seed={h}")))
+                .and_then(|u| {
+                    u.host_str()
+                        .map(|h| format!("https://api.dicebear.com/7.x/notionists/svg?seed={h}"))
+                })
         });
 
         (name, entry.author_url.clone(), avatar)
     } else {
         let domain = domain_fallback(source_url);
-        let avatar = Some(format!("https://api.dicebear.com/7.x/notionists/svg?seed={domain}"));
+        let avatar = Some(format!(
+            "https://api.dicebear.com/7.x/notionists/svg?seed={domain}"
+        ));
         (domain, Some(source_url.to_string()), avatar)
     }
 }
@@ -250,15 +259,18 @@ fn extract_github_username(url: &str) -> Option<String> {
 /// Extract the path portion from a target URL, validated against the configured origin.
 fn derive_target_path(target: &str, target_origin: &str) -> Result<String, WorkerError> {
     let parsed = Url::parse(target).map_err(|_| WorkerError::InvalidTarget(target.to_string()))?;
-    let origin_url =
-        Url::parse(target_origin).expect("target_origin validated at startup");
+    let origin_url = Url::parse(target_origin).expect("target_origin validated at startup");
 
     if parsed.origin() != origin_url.origin() {
         return Err(WorkerError::OriginMismatch(target_origin.to_string()));
     }
 
     let path = parsed.path().to_string();
-    Ok(if path.is_empty() { "/".to_string() } else { path })
+    Ok(if path.is_empty() {
+        "/".to_string()
+    } else {
+        path
+    })
 }
 
 /// Handle a 410 Gone source: mark as gone in webmention_seen and delete the comment.

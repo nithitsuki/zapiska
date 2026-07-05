@@ -16,12 +16,13 @@ pub fn content_hash(raw_content: &str) -> String {
     // Strip HTML tags via simple regex
     let no_tags = raw_content
         .chars()
-        .fold((String::new(), false), |(mut acc, in_tag), c| {
-            match c {
-                '<' => (acc, true),
-                '>' => (acc, false),
-                _ if in_tag => (acc, true),
-                _ => { acc.push(c); (acc, false) }
+        .fold((String::new(), false), |(mut acc, in_tag), c| match c {
+            '<' => (acc, true),
+            '>' => (acc, false),
+            _ if in_tag => (acc, true),
+            _ => {
+                acc.push(c);
+                (acc, false)
             }
         })
         .0;

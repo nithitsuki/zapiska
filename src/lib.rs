@@ -1,10 +1,10 @@
+#[cfg(feature = "webmentions")]
+pub mod avatar;
 pub mod config;
 pub mod db;
 pub mod error;
 pub mod github;
 pub mod http;
-#[cfg(feature = "webmentions")]
-pub mod avatar;
 #[cfg(feature = "webmentions")]
 pub mod mf2;
 pub mod openapi;
@@ -12,6 +12,7 @@ pub mod sanitize;
 #[cfg(feature = "webmentions")]
 pub mod ssrf;
 pub mod state;
+pub mod turnstile;
 pub mod validate;
 #[cfg(feature = "webmentions")]
 pub mod worker;

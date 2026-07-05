@@ -40,6 +40,17 @@ Per-IP via `tower_governor` keyed on socket peer address:
 
 Keyed on TCP peer IP, not `X-Forwarded-For`, so spoofed headers can't reset the bucket.
 
+### Cloudflare Turnstile (optional)
+
+When `TURNSTILE_ENABLED=true`, native comment submissions must include a `cf-turnstile-response` token from the Cloudflare widget. zapiska:
+
+- Verifies the token against `TURNSTILE_VERIFY_URL` (default Cloudflare siteverify) on the server. **Never** calls siteverify from the browser; the widget secret is held by the backend only.
+- Forwards the submitter's IP as `remoteip` so Cloudflare can apply its own abuse signals.
+- **Fails closed**: if siteverify returns `success: false` (invalid/expired/replayed token), the comment is rejected with `400 { "code": "turnstile_failed" }` and **not stored**. If siteverify is unreachable (timeout, network error), zapiska returns `503` and the comment is also not stored.
+- Never logs the secret. The token itself is not logged (it's transient). The widget's public **sitekey** is safe to expose in HTML; the **secret** is loaded once at startup from `TURNSTILE_SECRET_KEY` and held in memory.
+
+The form field name (`cf-turnstile-response`) matches the widget's automatic hidden input, so no manual hidden input is required.
+
 ### Body size
 
 `RequestBodyLimitLayer` rejects bodies over `MAX_BODY_SIZE` (default 8192 bytes) with 413.

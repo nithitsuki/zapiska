@@ -70,9 +70,9 @@ pub fn webmention_governor() -> RateLimitConfig {
 }
 
 pub fn read_governor() -> RateLimitConfig {
-    governor_config(60, 60)   // 60 per 60s
+    governor_config(60, 60) // 60 per 60s
 }
 
 pub fn admin_moderate_governor() -> RateLimitConfig {
-    governor_config(60, 10)   // 10 per 60s, slows brute-force
+    governor_config(60, 10) // 10 per 60s, slows brute-force
 }

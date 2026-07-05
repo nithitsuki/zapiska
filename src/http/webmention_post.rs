@@ -5,7 +5,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use url::Url;
 
 use crate::error::AppError;
-use crate::state::{domain_hourly_key, AppState};
+use crate::state::{AppState, domain_hourly_key};
 use crate::worker::WebmentionJob;
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -44,7 +44,10 @@ pub async fn receive_webmention(
     if state.config.max_webmentions_per_domain_per_hour > 0 {
         if let Some(host) = source_url.host_str() {
             let key = domain_hourly_key(host);
-            if !state.limiter.check_and_increment(&key, state.config.max_webmentions_per_domain_per_hour) {
+            if !state
+                .limiter
+                .check_and_increment(&key, state.config.max_webmentions_per_domain_per_hour)
+            {
                 return Err(AppError::RateLimited {
                     retry_after_secs: 3600,
                     reason: format!(
@@ -188,14 +191,17 @@ mod tests {
                 fetch_timeout_ms: 4000,
                 worker_backlog: 1,
                 rust_log: "info".to_string(),
-            honeypot_field: "website".to_string(),
-            max_comments_per_ip_per_day: 50,
-            max_webmentions_per_domain_per_hour: 10,
-            store_ip_address: false,
-            moderation_webhook_url: None,
-            moderation_webhook_mode: "async".to_string(),
-            default_comment_status: "pending".to_string(),
-            max_thread_depth: 0,
+                honeypot_field: "website".to_string(),
+                max_comments_per_ip_per_day: 50,
+                max_webmentions_per_domain_per_hour: 10,
+                store_ip_address: false,
+                moderation_webhook_url: None,
+                moderation_webhook_mode: "async".to_string(),
+                default_comment_status: "pending".to_string(),
+                max_thread_depth: 0,
+                turnstile_enabled: false,
+                turnstile_secret_key: None,
+                turnstile_verify_url: crate::turnstile::default_verify_url().to_string(),
             },
             pool,
             repo,

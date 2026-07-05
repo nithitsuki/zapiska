@@ -58,10 +58,11 @@ Submit a native comment. Creates a `pending` (or `approved`, depending on `DEFAU
 | `github_username` | no | GitHub username for profile enrichment. |
 | `parent_id` | no | ID of the parent comment for threaded replies. Requires `MAX_THREAD_DEPTH > 0`. |
 | `website` | no | Honeypot field — if non-empty the comment is stored with `honeypot = 1`. |
+| `cf-turnstile-response` | conditional | Cloudflare Turnstile token. Required when `TURNSTILE_ENABLED=true`; ignored otherwise. Rendered automatically by the widget or by the explicit Turnstile script tag. |
 
 Response: 201 with `{ "delete_token": "a1b2c3d4e5f6g7h8" }`. The `delete_token` is a 16-char hex string for self-service deletion. When `MODERATION_WEBHOOK_MODE=sync`, the response also includes the final moderation status: `{ "delete_token": "...", "status": "approved" }`.
 
-Errors: 400 (validation), 429 (rate limited).
+Errors: 400 (validation, or Turnstile verification failure with `code: "turnstile_failed"`), 429 (rate limited), 503 (Turnstile siteverify endpoint unreachable — fail closed).
 
 Author resolution (priority order):
 1. `github_username` → GitHub API name + avatar (cached 30d)

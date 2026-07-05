@@ -33,6 +33,11 @@ pub struct CommentForm {
     /// When non-empty, the submission is stored with `honeypot = 1`.
     /// The moderation system decides what to do with flagged comments.
     pub website: Option<String>,
+    /// Cloudflare Turnstile token rendered by the widget in the browser.
+    /// Required when `TURNSTILE_ENABLED=true`; ignored otherwise.
+    /// Field name matches the widget's automatic hidden input.
+    #[serde(rename = "cf-turnstile-response")]
+    pub cf_turnstile_response: Option<String>,
 }
 
 #[utoipa::path(
@@ -41,8 +46,9 @@ pub struct CommentForm {
     request_body(content = CommentForm, content_type = "application/x-www-form-urlencoded"),
     responses(
         (status = 201, description = "Comment created (pending moderation)"),
-        (status = 400, description = "Validation error"),
+        (status = 400, description = "Validation error, or Turnstile verification failed when enabled"),
         (status = 429, description = "Rate limited"),
+        (status = 503, description = "Turnstile siteverify endpoint unreachable"),
     ),
     tag = "comments",
 )]
@@ -59,13 +65,65 @@ pub async fn create_comment(
         tracing::info!(ip = %addr.ip(), "honeypot triggered, comment flagged");
     }
 
+    // ── Turnstile verification (optional) ─────────────────────
+    // When disabled, the form field is ignored entirely and the comment
+    // proceeds as if Turnstile weren't configured.
+    if state.config.turnstile_enabled {
+        let token = form.cf_turnstile_response.as_deref().unwrap_or("").trim();
+        if token.is_empty() {
+            return Err(AppError::TurnstileFailed(
+                "turnstile token missing".to_string(),
+            ));
+        }
+        let secret = state.config.turnstile_secret_key.as_deref().expect(
+            "turnstile_enabled implies turnstile_secret_key is Some (enforced in Config::from_env)",
+        );
+        match crate::turnstile::verify(
+            &state.http_client,
+            &state.config.turnstile_verify_url,
+            secret,
+            token,
+            Some(&addr.ip()),
+        )
+        .await
+        {
+            Ok(result) if result.success => {
+                tracing::debug!(ip = %addr.ip(), "turnstile verification passed");
+            }
+            Ok(result) => {
+                tracing::info!(
+                    ip = %addr.ip(),
+                    codes = ?result.error_codes,
+                    "turnstile verification rejected token"
+                );
+                return Err(AppError::TurnstileFailed(
+                    "turnstile verification failed".to_string(),
+                ));
+            }
+            Err(e) => {
+                // Fail closed: if we can't reach Cloudflare, we reject rather
+                // than silently allow unverified comments through.
+                tracing::warn!(err = %e, "turnstile siteverify request failed");
+                return Err(AppError::ServiceUnavailable(
+                    "turnstile verification unavailable".to_string(),
+                ));
+            }
+        }
+    }
+
     // ── Per-IP daily cap ──────────────────────────────────────
     if state.config.max_comments_per_ip_per_day > 0 {
         let key = ip_daily_key(&addr.ip());
-        if !state.limiter.check_and_increment(&key, state.config.max_comments_per_ip_per_day) {
+        if !state
+            .limiter
+            .check_and_increment(&key, state.config.max_comments_per_ip_per_day)
+        {
             return Err(AppError::RateLimited {
                 retry_after_secs: 86400,
-                reason: format!("daily comment limit ({}) reached for this IP", state.config.max_comments_per_ip_per_day),
+                reason: format!(
+                    "daily comment limit ({}) reached for this IP",
+                    state.config.max_comments_per_ip_per_day
+                ),
             });
         }
     }
@@ -105,8 +163,13 @@ pub async fn create_comment(
     let content = sanitize::sanitize_html(&form.content, state.config.max_content_len);
 
     // 4. Resolve author info
-    let (resolved_name, resolved_url) =
-        resolve_author(author_url.as_deref(), github_username.as_deref(), author_name, &state.github).await;
+    let (resolved_name, resolved_url) = resolve_author(
+        author_url.as_deref(),
+        github_username.as_deref(),
+        author_name,
+        &state.github,
+    )
+    .await;
 
     // 4. Resolve avatar with best-effort approach
     let resolved_avatar = resolve_avatar(
@@ -187,8 +250,8 @@ pub async fn create_comment(
         } else {
             None
         };
-        let (total, approved, spam, pending, deleted, first_seen) = submitter_stats
-            .unwrap_or((0, 0, 0, 0, 0, None));
+        let (total, approved, spam, pending, deleted, first_seen) =
+            submitter_stats.unwrap_or((0, 0, 0, 0, 0, None));
         let parents = parent_chain.map(|(_, chain)| {
             chain.into_iter().map(|p| serde_json::json!({
                 "id": p.id, "author_name": p.author_name, "content": p.content, "depth": p.depth,
@@ -212,7 +275,13 @@ pub async fn create_comment(
 
         if is_sync {
             // Sync: wait for the webhook to respond with a decision.
-            match client.post(&url).json(&payload).timeout(std::time::Duration::from_secs(10)).send().await {
+            match client
+                .post(&url)
+                .json(&payload)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+            {
                 Ok(r) if r.status().is_success() => {
                     if let Ok(decision) = r.json::<serde_json::Value>().await {
                         if let Some(action) = decision["action"].as_str() {
@@ -223,14 +292,24 @@ pub async fn create_comment(
                         }
                     }
                 }
-                Ok(r) => tracing::warn!(webhook = %url, status = %r.status(), "sync webhook returned error"),
+                Ok(r) => {
+                    tracing::warn!(webhook = %url, status = %r.status(), "sync webhook returned error")
+                }
                 Err(e) => tracing::warn!(webhook = %url, err = %e, "sync webhook failed"),
             }
         } else {
             // Async: fire-and-forget.
             tokio::spawn(async move {
-                match client.post(&url).json(&payload).timeout(std::time::Duration::from_secs(10)).send().await {
-                    Ok(r) => tracing::debug!(webhook = %url, status = %r.status(), "moderation webhook notified"),
+                match client
+                    .post(&url)
+                    .json(&payload)
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await
+                {
+                    Ok(r) => {
+                        tracing::debug!(webhook = %url, status = %r.status(), "moderation webhook notified")
+                    }
                     Err(e) => tracing::warn!(webhook = %url, err = %e, "moderation webhook failed"),
                 }
             });
@@ -276,10 +355,7 @@ pub async fn delete_comment(
     axum::extract::Path(id): axum::extract::Path<i64>,
     Json(body): Json<DeleteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let deleted = state
-        .repo
-        .delete_by_token(id, &body.token)
-        .await?;
+    let deleted = state.repo.delete_by_token(id, &body.token).await?;
     if deleted {
         tracing::info!(id, "comment deleted via self-service token");
         Ok(Json(serde_json::json!({"success": true})))
@@ -422,7 +498,9 @@ async fn resolve_avatar(
     if let Some(url) = raw_author_url {
         if let Ok(parsed) = Url::parse(url) {
             if let Some(domain) = parsed.host_str() {
-                return Some(format!("https://api.dicebear.com/7.x/notionists/svg?seed={domain}"));
+                return Some(format!(
+                    "https://api.dicebear.com/7.x/notionists/svg?seed={domain}"
+                ));
             }
         }
     }
@@ -431,7 +509,9 @@ async fn resolve_avatar(
     if let Some(gh) = github_username {
         let gh = gh.trim();
         if !gh.is_empty() {
-            return Some(format!("https://api.dicebear.com/7.x/notionists/svg?seed={gh}"));
+            return Some(format!(
+                "https://api.dicebear.com/7.x/notionists/svg?seed={gh}"
+            ));
         }
     }
 
@@ -702,10 +782,9 @@ mod tests {
         let resp = app.oneshot(form_request(body)).await.unwrap();
         assert_eq!(resp.status(), 201);
 
-        let resp_body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1024).await.unwrap(),
-        )
-        .unwrap();
+        let resp_body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1024).await.unwrap())
+                .unwrap();
         assert!(
             resp_body["delete_token"].as_str().unwrap().len() >= 16,
             "delete_token must be present and at least 16 hex chars"
@@ -742,11 +821,12 @@ mod tests {
         assert_eq!(resp.status(), 201);
 
         // Response body must NOT echo user input — only delete_token.
-        let resp_body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1024).await.unwrap(),
-        )
-        .unwrap();
-        let token = resp_body["delete_token"].as_str().expect("delete_token present");
+        let resp_body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1024).await.unwrap())
+                .unwrap();
+        let token = resp_body["delete_token"]
+            .as_str()
+            .expect("delete_token present");
         assert!(!token.contains("alert"), "no script reflection in response");
         assert!(!token.contains("Bad"), "no author_name reflection");
 
@@ -757,5 +837,93 @@ mod tests {
         assert!(c.content.contains("<p>text</p>"), "safe text preserved");
         // author_name had a control char stripped
         assert_eq!(c.author_name, "BadGuy", "control char stripped from name");
+    }
+
+    // ── Turnstile tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn turnstile_disabled_ignores_missing_token() {
+        // Default test_state has turnstile disabled: no cf-turnstile-response
+        // field, comment goes straight through as 201.
+        let (state, _dir) = test_state();
+        let app = build_app(state.clone());
+        let body = "target_path=/ts&author_name=Bob&content=Hi";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(resp.status(), 201, "disabled turnstile should not block");
+    }
+
+    #[tokio::test]
+    async fn turnstile_enabled_rejects_missing_token() {
+        let server = wiremock::MockServer::start().await;
+        let (state, _dir) =
+            helpers::test_state_with_turnstile(format!("{}/siteverify", server.uri()));
+        let app = build_app(state);
+        let body = "target_path=/ts&author_name=Bob&content=Hi";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(resp.status(), 400, "missing token must be rejected");
+    }
+
+    #[tokio::test]
+    async fn turnstile_enabled_rejects_failed_verification() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"success": false, "error-codes": ["invalid-input-response"]}),
+            ))
+            .mount(&server)
+            .await;
+
+        let (state, _dir) =
+            helpers::test_state_with_turnstile(format!("{}/siteverify", server.uri()));
+        let app = build_app(state.clone());
+        let body = "target_path=/ts&author_name=Bob&content=Hi&cf-turnstile-response=stale";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(resp.status(), 400, "failed verification must be 400");
+
+        // No comment should have been stored.
+        let pending = state.repo.list_pending(10, None, None).await.unwrap();
+        assert!(pending.is_empty(), "rejected comment must not be persisted");
+    }
+
+    #[tokio::test]
+    async fn turnstile_enabled_accepts_successful_verification() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"success": true, "error-codes": []})),
+            )
+            .mount(&server)
+            .await;
+
+        let (state, _dir) =
+            helpers::test_state_with_turnstile(format!("{}/siteverify", server.uri()));
+        let app = build_app(state.clone());
+        let body = "target_path=/ts&author_name=Bob&content=Hi&cf-turnstile-response=good-token";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            201,
+            "passing verification should store comment"
+        );
+
+        let pending = state.repo.list_pending(10, None, None).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].target_path, "/ts");
+    }
+
+    #[tokio::test]
+    async fn turnstile_enabled_returns_503_when_siteverify_unreachable() {
+        // Point at a port that nobody listens on — connection refused.
+        let (state, _dir) =
+            helpers::test_state_with_turnstile("https://127.0.0.1:1/siteverify".to_string());
+        let app = build_app(state);
+        let body = "target_path=/ts&author_name=Bob&content=Hi&cf-turnstile-response=whatever";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            503,
+            "fail closed when siteverify is unreachable"
+        );
     }
 }

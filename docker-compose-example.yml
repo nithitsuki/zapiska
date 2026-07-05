@@ -2,13 +2,23 @@ services:
   zapiska:
     build: .
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
+      # Required
       ADMIN_TOKEN: "${ADMIN_TOKEN}"
-      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      # Identity — point these at YOUR site
       PUBLIC_TARGET_ORIGIN: "${PUBLIC_TARGET_ORIGIN:-https://nithitsuki.com}"
       ALLOWED_CORS_ORIGIN: "${ALLOWED_CORS_ORIGIN:-https://nithitsuki.com}"
-      DATABASE_PATH: /data/comments.db
+      # Optional
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      STORE_IP_ADDRESS: "${STORE_IP_ADDRESS:-false}"
+      DEFAULT_COMMENT_STATUS: "${DEFAULT_COMMENT_STATUS:-pending}"
+      MAX_THREAD_DEPTH: "${MAX_THREAD_DEPTH:-0}"
+      MODERATION_WEBHOOK_URL: "${MODERATION_WEBHOOK_URL:-}"
+      MODERATION_WEBHOOK_MODE: "${MODERATION_WEBHOOK_MODE:-async}"
+      TURNSTILE_ENABLED: "${TURNSTILE_ENABLED:-false}"
+      TURNSTILE_SECRET_KEY: "${TURNSTILE_SECRET_KEY:-}"
+      TURNSTILE_VERIFY_URL: "${TURNSTILE_VERIFY_URL:-https://challenges.cloudflare.com/turnstile/v0/siteverify}"
       RUST_LOG: "${RUST_LOG:-info}"
     volumes:
       - zapiska-data:/data

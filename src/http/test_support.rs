@@ -5,11 +5,11 @@ pub(crate) mod helpers {
     use tempfile::TempDir;
 
     use crate::config::Config;
-    use crate::state::Limiter;
     use crate::db::pool::{create_pool, run_migrations};
     use crate::db::repo::CommentsRepo;
     use crate::github::{GitHubLookup, StubGitHub};
     use crate::state::AppState;
+    use crate::state::Limiter;
     #[cfg(feature = "webmentions")]
     use crate::worker;
 
@@ -20,6 +20,30 @@ pub(crate) mod helpers {
 
     /// Like `test_state` but with a custom GitHubLookup implementation.
     pub fn test_state_with_github(github: Arc<dyn GitHubLookup>) -> (AppState, TempDir) {
+        build_state(github, false, None, default_verify_url())
+    }
+
+    /// Like `test_state` but with Turnstile verification enabled, pointing the
+    /// siteverify call at a custom URL (typically a wiremock server URI).
+    pub fn test_state_with_turnstile(verify_url: String) -> (AppState, TempDir) {
+        build_state(
+            Arc::new(StubGitHub),
+            true,
+            Some("test-secret".to_string()),
+            verify_url,
+        )
+    }
+
+    fn default_verify_url() -> String {
+        crate::turnstile::default_verify_url().to_string()
+    }
+
+    fn build_state(
+        github: Arc<dyn GitHubLookup>,
+        turnstile_enabled: bool,
+        turnstile_secret: Option<String>,
+        turnstile_verify_url: String,
+    ) -> (AppState, TempDir) {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("test.db");
         let pool = create_pool(&path.to_string_lossy()).expect("pool");
@@ -44,14 +68,17 @@ pub(crate) mod helpers {
                 fetch_timeout_ms: 4000,
                 worker_backlog: 64,
                 rust_log: "info".to_string(),
-            honeypot_field: "website".to_string(),
-            max_comments_per_ip_per_day: 50,
-            max_webmentions_per_domain_per_hour: 10,
-            store_ip_address: false,
-            moderation_webhook_url: None,
-            moderation_webhook_mode: "async".to_string(),
-            default_comment_status: "pending".to_string(),
-            max_thread_depth: 0,
+                honeypot_field: "website".to_string(),
+                max_comments_per_ip_per_day: 50,
+                max_webmentions_per_domain_per_hour: 10,
+                store_ip_address: false,
+                moderation_webhook_url: None,
+                moderation_webhook_mode: "async".to_string(),
+                default_comment_status: "pending".to_string(),
+                max_thread_depth: 0,
+                turnstile_enabled,
+                turnstile_secret_key: turnstile_secret,
+                turnstile_verify_url,
             },
             pool,
             repo,

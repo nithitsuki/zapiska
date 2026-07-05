@@ -189,12 +189,12 @@ mod tests {
                 author_url: Some("https://alice.blog".to_string()),
                 author_avatar: None,
                 content: "Great post!".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -216,12 +216,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "mentioned this".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -241,12 +241,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "first mention".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -266,12 +266,12 @@ mod tests {
                 author_url: None,
                 author_avatar: None,
                 content: "first mention".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -285,12 +285,12 @@ mod tests {
                 author_url: Some("https://charlie.blog".to_string()),
                 author_avatar: Some("https://charlie.blog/photo.jpg".to_string()),
                 content: "updated mention with richer data".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -308,14 +308,17 @@ mod tests {
             .insert_comment(NewComment {
                 target_path: "/page".to_string(),
                 comment_type: "native".to_string(),
-                source_url: None, author_name: "A".to_string(),
-                author_url: None, author_avatar: None, content: "one".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                source_url: None,
+                author_name: "A".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "one".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -323,14 +326,17 @@ mod tests {
             .insert_comment(NewComment {
                 target_path: "/page".to_string(),
                 comment_type: "native".to_string(),
-                source_url: None, author_name: "B".to_string(),
-                author_url: None, author_avatar: None, content: "two".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                source_url: None,
+                author_name: "B".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "two".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -338,14 +344,17 @@ mod tests {
             .insert_comment(NewComment {
                 target_path: "/page".to_string(),
                 comment_type: "native".to_string(),
-                source_url: None, author_name: "C".to_string(),
-                author_url: None, author_avatar: None, content: "three".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                source_url: None,
+                author_name: "C".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "three".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -365,14 +374,17 @@ mod tests {
                 .insert_comment(NewComment {
                     target_path: "/paginated".to_string(),
                     comment_type: "native".to_string(),
-                    source_url: None, author_name: format!("User{i}"),
-                    author_url: None, author_avatar: None, content: format!("comment {i}"),
-                parent_id: None,
-                depth: 0,
-                honeypot: false,
-                delete_token: None,
-                submitter_ip: None,
-                content_hash: None,
+                    source_url: None,
+                    author_name: format!("User{i}"),
+                    author_url: None,
+                    author_avatar: None,
+                    content: format!("comment {i}"),
+                    parent_id: None,
+                    depth: 0,
+                    honeypot: false,
+                    delete_token: None,
+                    submitter_ip: None,
+                    content_hash: None,
                 })
                 .await
                 .unwrap();
@@ -395,14 +407,17 @@ mod tests {
         repo.insert_comment(NewComment {
             target_path: "/count-test".to_string(),
             comment_type: "native".to_string(),
-            source_url: None, author_name: "A".to_string(),
-            author_url: None, author_avatar: None, content: "a".to_string(),
-        parent_id: None,
-        depth: 0,
-        honeypot: false,
-        delete_token: None,
-        submitter_ip: None,
-        content_hash: None,
+            source_url: None,
+            author_name: "A".to_string(),
+            author_url: None,
+            author_avatar: None,
+            content: "a".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
+            content_hash: None,
         })
         .await
         .unwrap();
@@ -410,14 +425,17 @@ mod tests {
             .insert_comment(NewComment {
                 target_path: "/count-test".to_string(),
                 comment_type: "native".to_string(),
-                source_url: None, author_name: "B".to_string(),
-                author_url: None, author_avatar: None, content: "b".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                source_url: None,
+                author_name: "B".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "b".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -432,14 +450,17 @@ mod tests {
             .insert_comment(NewComment {
                 target_path: "/mod".to_string(),
                 comment_type: "native".to_string(),
-                source_url: None, author_name: "First".to_string(),
-                author_url: None, author_avatar: None, content: "first".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                source_url: None,
+                author_name: "First".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "first".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -447,14 +468,17 @@ mod tests {
             .insert_comment(NewComment {
                 target_path: "/mod".to_string(),
                 comment_type: "native".to_string(),
-                source_url: None, author_name: "Second".to_string(),
-                author_url: None, author_avatar: None, content: "second".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                source_url: None,
+                author_name: "Second".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "second".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -471,23 +495,32 @@ mod tests {
             .insert_comment(NewComment {
                 target_path: "/m".to_string(),
                 comment_type: "native".to_string(),
-                source_url: None, author_name: "ModMe".to_string(),
-                author_url: None, author_avatar: None, content: "moderate me".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                source_url: None,
+                author_name: "ModMe".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "moderate me".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
         repo.update_status(id, "approved").await.unwrap();
-        assert_eq!(repo.get_comment(id).await.unwrap().unwrap().status, "approved");
+        assert_eq!(
+            repo.get_comment(id).await.unwrap().unwrap().status,
+            "approved"
+        );
         repo.update_status(id, "spam").await.unwrap();
         assert_eq!(repo.get_comment(id).await.unwrap().unwrap().status, "spam");
         repo.update_status(id, "deleted").await.unwrap();
-        assert_eq!(repo.get_comment(id).await.unwrap().unwrap().status, "deleted");
+        assert_eq!(
+            repo.get_comment(id).await.unwrap().unwrap().status,
+            "deleted"
+        );
     }
 
     #[tokio::test]
@@ -505,14 +538,17 @@ mod tests {
             .insert_comment(NewComment {
                 target_path: "/sqli-test".to_string(),
                 comment_type: "native".to_string(),
-                source_url: None, author_name: "Hacker".to_string(),
-                author_url: None, author_avatar: None, content: malicious_content.clone(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                source_url: None,
+                author_name: "Hacker".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: malicious_content.clone(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -522,14 +558,17 @@ mod tests {
             .insert_comment(NewComment {
                 target_path: "/sqli-test".to_string(),
                 comment_type: "native".to_string(),
-                source_url: None, author_name: "Survivor".to_string(),
-                author_url: None, author_avatar: None, content: "still alive".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            content_hash: None,
+                source_url: None,
+                author_name: "Survivor".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "still alive".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                content_hash: None,
             })
             .await
             .unwrap();
@@ -546,14 +585,17 @@ mod tests {
                 r.insert_comment(NewComment {
                     target_path: "/concurrent".to_string(),
                     comment_type: "native".to_string(),
-                    source_url: None, author_name: format!("Concurrent{i}"),
-                    author_url: None, author_avatar: None, content: "hello".to_string(),
-                parent_id: None,
-                depth: 0,
-                honeypot: false,
-                delete_token: None,
-                submitter_ip: None,
-                content_hash: None,
+                    source_url: None,
+                    author_name: format!("Concurrent{i}"),
+                    author_url: None,
+                    author_avatar: None,
+                    content: "hello".to_string(),
+                    parent_id: None,
+                    depth: 0,
+                    honeypot: false,
+                    delete_token: None,
+                    submitter_ip: None,
+                    content_hash: None,
                 })
                 .await
             }));
@@ -621,7 +663,11 @@ mod tests {
         })
         .await
         .unwrap();
-        let profile = repo.get_github_profile("alice").await.unwrap().expect("exists");
+        let profile = repo
+            .get_github_profile("alice")
+            .await
+            .unwrap()
+            .expect("exists");
         assert_eq!(profile.name, Some("Alice Green".to_string()));
         assert!(profile.valid);
         repo.upsert_github_profile(NewGithubProfile {

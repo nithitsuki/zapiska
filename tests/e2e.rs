@@ -31,14 +31,17 @@ async fn start_server() -> (String, AppState) {
         fetch_timeout_ms: 4000,
         worker_backlog: 64,
         rust_log: "info".to_string(),
-    honeypot_field: "website".to_string(),
-    max_comments_per_ip_per_day: 50,
-    max_webmentions_per_domain_per_hour: 10,
-    store_ip_address: false,
-    moderation_webhook_url: None,
-    moderation_webhook_mode: "async".to_string(),
-    default_comment_status: "pending".to_string(),
-    max_thread_depth: 0,
+        honeypot_field: "website".to_string(),
+        max_comments_per_ip_per_day: 50,
+        max_webmentions_per_domain_per_hour: 10,
+        store_ip_address: false,
+        moderation_webhook_url: None,
+        moderation_webhook_mode: "async".to_string(),
+        default_comment_status: "pending".to_string(),
+        max_thread_depth: 0,
+        turnstile_enabled: false,
+        turnstile_secret_key: None,
+        turnstile_verify_url: zapiska::turnstile::default_verify_url().to_string(),
     };
 
     let dir = tempdir().unwrap();
@@ -256,8 +259,7 @@ async fn e2e_webmention_full_lifecycle() {
         target: "https://nithitsuki.com/blog/e2e-wm".to_string(),
     };
     let http_client = reqwest::Client::builder().build().unwrap();
-    let github: Arc<dyn zapiska::github::GitHubLookup> =
-        Arc::new(zapiska::github::StubGitHub);
+    let github: Arc<dyn zapiska::github::GitHubLookup> = Arc::new(zapiska::github::StubGitHub);
     zapiska::worker::process_job(
         &job,
         &state.repo,
@@ -348,5 +350,9 @@ async fn e2e_rate_limit_blocks_flood_native() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 429, "rate limit should block request after burst");
+    assert_eq!(
+        resp.status(),
+        429,
+        "rate limit should block request after burst"
+    );
 }
