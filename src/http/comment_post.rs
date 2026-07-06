@@ -430,21 +430,25 @@ async fn resolve_author(
     cleaned_name: String,
     github: &Arc<dyn GitHubLookup>,
 ) -> (String, Option<String>) {
-    // Priority 1: author_url → use form name, keep the URL.
+    // Priority 1: user provided their own website — always use it.
     if let Some(url) = author_url {
         return (cleaned_name, Some(url.to_string()));
     }
 
-    // Priority 2: github_username → use GitHub name ONLY if form name is empty.
-    // GitHub is primarily used for the avatar (resolved separately in resolve_avatar).
+    // Priority 2: no author_url, but github_username given — derive URL.
     if let Some(gh) = github_username {
         let gh = gh.trim();
-        if !gh.is_empty() && cleaned_name.is_empty() {
-            if let Some(profile) = github.lookup(gh).await {
-                return (profile.name, None);
+        if !gh.is_empty() {
+            let github_url = Some(format!("https://github.com/{gh}"));
+            // If form name was empty, try to fetch from GitHub API first.
+            if cleaned_name.is_empty() {
+                if let Some(profile) = github.lookup(gh).await {
+                    return (profile.name, github_url);
+                }
+                return (gh.to_string(), github_url);
             }
-            // GitHub lookup failed but we still need a name — use the username.
-            return (gh.to_string(), None);
+            // Form name was provided — keep it, but attach the GitHub URL.
+            return (cleaned_name, github_url);
         }
     }
 
@@ -714,6 +718,11 @@ mod tests {
             "form name preserved, github is pfp-only"
         );
         assert_eq!(
+            c.author_url,
+            Some("https://github.com/alice".to_string()),
+            "author_url derived from github_username"
+        );
+        assert_eq!(
             c.author_avatar,
             Some("https://avatars.githubusercontent.com/u/1".to_string())
         );
@@ -723,7 +732,7 @@ mod tests {
     async fn github_unknown_username_falls_through() {
         let (state, _dir) = test_state();
         let app = build_app(state.clone());
-        let body = "target_path=/gh-unknown&author_name=Bob&content=hi&github_username=nobody";
+        let body = "target_path=/gh-unknown&author_name=Bob&content=hi&github_username=zzz-nonexistent-user-000";
         let resp = app.oneshot(form_request(body)).await.unwrap();
         assert_eq!(resp.status(), 201);
 
@@ -734,8 +743,13 @@ mod tests {
             .unwrap();
         assert_eq!(c.author_name, "Bob", "name stayed as form value");
         assert_eq!(
+            c.author_url,
+            Some("https://github.com/zzz-nonexistent-user-000".to_string()),
+            "author_url derived from github_username even when lookup fails"
+        );
+        assert_eq!(
             c.author_avatar.as_deref(),
-            Some("https://api.dicebear.com/7.x/notionists/svg?seed=nobody"),
+            Some("https://api.dicebear.com/7.x/notionists/svg?seed=zzz-nonexistent-user-000"),
             "DiceBear avatar from github_username when GitHub lookup fails"
         );
     }
@@ -762,6 +776,11 @@ mod tests {
             "name should come from GitHub when form name is empty"
         );
         assert_eq!(
+            c.author_url,
+            Some("https://github.com/alice".to_string()),
+            "author_url derived from github_username"
+        );
+        assert_eq!(
             c.author_avatar,
             Some("https://avatars.githubusercontent.com/u/1".to_string())
         );
@@ -771,7 +790,7 @@ mod tests {
     async fn github_unknown_fills_name_with_username_when_name_empty() {
         let (state, _dir) = test_state();
         let app = build_app(state.clone());
-        let body = "target_path=/gh-unknown-empty&author_name=&content=hi&github_username=nobody";
+        let body = "target_path=/gh-unknown-empty&author_name=&content=hi&github_username=zzz-nonexistent-user-000";
         let resp = app.oneshot(form_request(body)).await.unwrap();
         assert_eq!(
             resp.status(),
@@ -785,12 +804,17 @@ mod tests {
             .find(|c| c.target_path == "/gh-unknown-empty")
             .unwrap();
         assert_eq!(
-            c.author_name, "nobody",
+            c.author_name, "zzz-nonexistent-user-000",
             "fallback to github_username when name empty and GitHub lookup fails"
         );
         assert_eq!(
+            c.author_url,
+            Some("https://github.com/zzz-nonexistent-user-000".to_string()),
+            "author_url derived from github_username"
+        );
+        assert_eq!(
             c.author_avatar.as_deref(),
-            Some("https://api.dicebear.com/7.x/notionists/svg?seed=nobody"),
+            Some("https://api.dicebear.com/7.x/notionists/svg?seed=zzz-nonexistent-user-000"),
         );
     }
 

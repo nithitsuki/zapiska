@@ -19,11 +19,11 @@ use crate::openapi::ApiDoc;
 use crate::state::AppState;
 
 pub fn build_app(state: AppState) -> Router {
-    let native_governor = layers::native_comment_governor();
+    let native_governor = layers::native_comment_governor(&state.config);
     #[cfg(feature = "webmentions")]
-    let webmention_governor = layers::webmention_governor();
-    let read_governor = layers::read_governor();
-    let admin_moderate_governor = layers::admin_moderate_governor();
+    let webmention_governor = layers::webmention_governor(&state.config);
+    let read_governor = layers::read_governor(&state.config);
+    let admin_moderate_governor = layers::admin_moderate_governor(&state.config);
 
     let cors = layers::cors_layer(&state.config);
     let body_limit = layers::body_limit_layer(&state.config);

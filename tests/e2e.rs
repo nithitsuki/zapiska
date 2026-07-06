@@ -42,8 +42,15 @@ async fn start_server() -> (String, AppState) {
         turnstile_enabled: false,
         turnstile_secret_key: None,
         turnstile_verify_url: zapiska::turnstile::default_verify_url().to_string(),
+        rate_limit_native_burst: 50,
+        rate_limit_native_window_secs: 60,
+        rate_limit_webmention_burst: 30,
+        rate_limit_webmention_window_secs: 60,
+        rate_limit_read_burst: 60,
+        rate_limit_read_window_secs: 60,
+        rate_limit_admin_moderate_burst: 10,
+        rate_limit_admin_moderate_window_secs: 60,
     };
-
     let dir = tempdir().unwrap();
     let path = dir.path().join("e2e.db");
     let pool = create_pool(&path.to_string_lossy()).unwrap();

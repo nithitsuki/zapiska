@@ -29,11 +29,17 @@ pub fn cors_layer(config: &Config) -> CorsLayer {
     let origins: Vec<axum::http::HeaderValue> = config
         .allowed_cors_origin
         .split(',')
-        .map(|s| s.trim().parse::<axum::http::HeaderValue>().expect("ALLOWED_CORS_ORIGIN validated at config load"))
+        .map(|s| {
+            s.trim()
+                .parse::<axum::http::HeaderValue>()
+                .expect("ALLOWED_CORS_ORIGIN validated at config load")
+        })
         .collect();
 
     CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(move |o, _| origins.iter().any(|v| v == o)))
+        .allow_origin(AllowOrigin::predicate(move |o, _| {
+            origins.iter().any(|v| v == o)
+        }))
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
@@ -59,21 +65,31 @@ fn governor_config(per_seconds: u64, burst: u32) -> RateLimitConfig {
         .expect("valid governor config")
 }
 
-pub fn native_comment_governor() -> RateLimitConfig {
-    // Allow 50 per 60s for development / e2e testing.
-    // In production this should be lower (5 per 60s).
-    governor_config(60, 50)
+pub fn native_comment_governor(config: &Config) -> RateLimitConfig {
+    governor_config(
+        config.rate_limit_native_window_secs,
+        config.rate_limit_native_burst,
+    )
 }
 
 #[cfg(feature = "webmentions")]
-pub fn webmention_governor() -> RateLimitConfig {
-    governor_config(60, 30) // 30 per 60s
+pub fn webmention_governor(config: &Config) -> RateLimitConfig {
+    governor_config(
+        config.rate_limit_webmention_window_secs,
+        config.rate_limit_webmention_burst,
+    )
 }
 
-pub fn read_governor() -> RateLimitConfig {
-    governor_config(60, 60) // 60 per 60s
+pub fn read_governor(config: &Config) -> RateLimitConfig {
+    governor_config(
+        config.rate_limit_read_window_secs,
+        config.rate_limit_read_burst,
+    )
 }
 
-pub fn admin_moderate_governor() -> RateLimitConfig {
-    governor_config(60, 10) // 10 per 60s, slows brute-force
+pub fn admin_moderate_governor(config: &Config) -> RateLimitConfig {
+    governor_config(
+        config.rate_limit_admin_moderate_window_secs,
+        config.rate_limit_admin_moderate_burst,
+    )
 }

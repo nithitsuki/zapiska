@@ -54,6 +54,22 @@ pub struct Config {
     /// Override for the siteverify endpoint. Defaults to the public Cloudflare
     /// endpoint. Useful for tests or for routing through a proxy.
     pub turnstile_verify_url: String,
+    /// Rate-limit burst for native comment submission (/api/comment).
+    pub rate_limit_native_burst: u32,
+    /// Rate-limit window (seconds) for native comment submission.
+    pub rate_limit_native_window_secs: u64,
+    /// Rate-limit burst for webmention ingress (/api/webmention).
+    pub rate_limit_webmention_burst: u32,
+    /// Rate-limit window (seconds) for webmention ingress.
+    pub rate_limit_webmention_window_secs: u64,
+    /// Rate-limit burst for public read API (/api/comments).
+    pub rate_limit_read_burst: u32,
+    /// Rate-limit window (seconds) for public read API.
+    pub rate_limit_read_window_secs: u64,
+    /// Rate-limit burst for admin moderate (/api/admin/moderate).
+    pub rate_limit_admin_moderate_burst: u32,
+    /// Rate-limit window (seconds) for admin moderate.
+    pub rate_limit_admin_moderate_window_secs: u64,
 }
 
 #[derive(Debug, Error)]
@@ -78,6 +94,10 @@ pub enum ConfigError {
     TurnstileMissingSecret,
     #[error("TURNSTILE_VERIFY_URL must be an absolute https URL, got: {0}")]
     InvalidTurnstileVerifyUrl(String),
+    #[error("RATE_LIMIT_*_WINDOW must be a positive integer, got: {0}")]
+    InvalidRateLimitWindow(String),
+    #[error("RATE_LIMIT_*_BURST must be a positive integer, got: {0}")]
+    InvalidRateLimitBurst(String),
 }
 
 fn env_or_default(key: &str, default: &str) -> String {
@@ -212,6 +232,39 @@ impl Config {
             return Err(ConfigError::InvalidTurnstileVerifyUrl(turnstile_verify_url));
         }
 
+        fn rate_limit_burst(key: &str, default: u32) -> Result<u32, ConfigError> {
+            let raw = env_or_default(key, &default.to_string());
+            let val = raw
+                .parse::<u32>()
+                .map_err(|_| ConfigError::InvalidRateLimitBurst(raw))?;
+            if val == 0 {
+                return Err(ConfigError::InvalidRateLimitBurst("0".to_string()));
+            }
+            Ok(val)
+        }
+
+        fn rate_limit_window(key: &str, default: u64) -> Result<u64, ConfigError> {
+            let raw = env_or_default(key, &default.to_string());
+            let val = raw
+                .parse::<u64>()
+                .map_err(|_| ConfigError::InvalidRateLimitWindow(raw))?;
+            if val == 0 {
+                return Err(ConfigError::InvalidRateLimitWindow("0".to_string()));
+            }
+            Ok(val)
+        }
+
+        let rate_limit_native_burst = rate_limit_burst("RATE_LIMIT_NATIVE", 50)?;
+        let rate_limit_native_window_secs = rate_limit_window("RATE_LIMIT_NATIVE_WINDOW", 60)?;
+        let rate_limit_webmention_burst = rate_limit_burst("RATE_LIMIT_WEBMENTION", 30)?;
+        let rate_limit_webmention_window_secs =
+            rate_limit_window("RATE_LIMIT_WEBMENTION_WINDOW", 60)?;
+        let rate_limit_read_burst = rate_limit_burst("RATE_LIMIT_READ", 60)?;
+        let rate_limit_read_window_secs = rate_limit_window("RATE_LIMIT_READ_WINDOW", 60)?;
+        let rate_limit_admin_moderate_burst = rate_limit_burst("RATE_LIMIT_ADMIN_MODERATE", 10)?;
+        let rate_limit_admin_moderate_window_secs =
+            rate_limit_window("RATE_LIMIT_ADMIN_MODERATE_WINDOW", 60)?;
+
         Ok(Config {
             bind_addr,
             public_target_origin,
@@ -236,6 +289,14 @@ impl Config {
             turnstile_enabled,
             turnstile_secret_key,
             turnstile_verify_url,
+            rate_limit_native_burst,
+            rate_limit_native_window_secs,
+            rate_limit_webmention_burst,
+            rate_limit_webmention_window_secs,
+            rate_limit_read_burst,
+            rate_limit_read_window_secs,
+            rate_limit_admin_moderate_burst,
+            rate_limit_admin_moderate_window_secs,
         })
     }
 
@@ -279,6 +340,14 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 turnstile_enabled: {}, \
                 turnstile_secret_key: {}, \
                 turnstile_verify_url: {}, \
+                rate_limit_native_burst: {}, \
+                rate_limit_native_window_secs: {}, \
+                rate_limit_webmention_burst: {}, \
+                rate_limit_webmention_window_secs: {}, \
+                rate_limit_read_burst: {}, \
+                rate_limit_read_window_secs: {}, \
+                rate_limit_admin_moderate_burst: {}, \
+                rate_limit_admin_moderate_window_secs: {}, \
                 rust_log: {} \
             }}",
             self.0.bind_addr,
@@ -309,6 +378,14 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 "(unset)"
             },
             self.0.turnstile_verify_url,
+            self.0.rate_limit_native_burst,
+            self.0.rate_limit_native_window_secs,
+            self.0.rate_limit_webmention_burst,
+            self.0.rate_limit_webmention_window_secs,
+            self.0.rate_limit_read_burst,
+            self.0.rate_limit_read_window_secs,
+            self.0.rate_limit_admin_moderate_burst,
+            self.0.rate_limit_admin_moderate_window_secs,
             self.0.rust_log,
         )
     }
@@ -350,6 +427,14 @@ mod tests {
                 "TURNSTILE_ENABLED",
                 "TURNSTILE_SECRET_KEY",
                 "TURNSTILE_VERIFY_URL",
+                "RATE_LIMIT_NATIVE",
+                "RATE_LIMIT_NATIVE_WINDOW",
+                "RATE_LIMIT_WEBMENTION",
+                "RATE_LIMIT_WEBMENTION_WINDOW",
+                "RATE_LIMIT_READ",
+                "RATE_LIMIT_READ_WINDOW",
+                "RATE_LIMIT_ADMIN_MODERATE",
+                "RATE_LIMIT_ADMIN_MODERATE_WINDOW",
             ];
             for var in vars {
                 // SAFETY: held ENV_LOCK prevents concurrent env mutation.
@@ -463,7 +548,10 @@ mod tests {
         with_env(
             &[
                 ("ADMIN_TOKEN", "test"),
-                ("ALLOWED_CORS_ORIGIN", "http://localhost:1313,https://nithitsuki.com"),
+                (
+                    "ALLOWED_CORS_ORIGIN",
+                    "http://localhost:1313,https://nithitsuki.com",
+                ),
             ],
             || {
                 let config = Config::from_env().unwrap();
@@ -621,6 +709,14 @@ mod tests {
             turnstile_secret_key: Some("0x4AAAAAAAsecret".to_string()),
             turnstile_verify_url: "https://challenges.cloudflare.com/turnstile/v0/siteverify"
                 .to_string(),
+            rate_limit_native_burst: 50,
+            rate_limit_native_window_secs: 60,
+            rate_limit_webmention_burst: 30,
+            rate_limit_webmention_window_secs: 60,
+            rate_limit_read_burst: 60,
+            rate_limit_read_window_secs: 60,
+            rate_limit_admin_moderate_burst: 10,
+            rate_limit_admin_moderate_window_secs: 60,
         };
         let rendered = format!("{}", config.redacted_display());
         assert!(

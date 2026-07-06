@@ -92,7 +92,7 @@ See `migrations/schema.sql` for the full schema.
 Outer to inner:
 1. `RequestBodyLimitLayer` — rejects bodies over `MAX_BODY_SIZE` (413).
 2. `CorsLayer` — single allowed origin, GET/POST/OPTIONS, 10-min preflight cache.
-3. `tower_governor` rate limiting per route:
+3. `tower_governor` rate limiting per route (all configurable via env vars — see [`deployment.md`](deployment.md)):
    - Native comments: 5 req / 60s
    - Webmentions: 30 req / 60s
    - Public read: 60 req / 60s

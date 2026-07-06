@@ -31,14 +31,14 @@ All admin endpoints require either an `Authorization: Bearer <token>` header or 
 
 Per-IP via `tower_governor` keyed on socket peer address:
 
-| Route | Limit | Burst |
+| Route | Limit (env vars) | Default |
 |---|---|---|
-| POST /api/comment | 5 / 60s | 5 |
-| POST /api/webmention | 30 / 60s | 30 |
-| GET /api/comments | 60 / 60s | 60 |
-| Admin | unlimited | (auth-gated) |
+| POST /api/comment | `RATE_LIMIT_NATIVE` / `RATE_LIMIT_NATIVE_WINDOW` | 50 per 60s |
+| POST /api/webmention | `RATE_LIMIT_WEBMENTION` / `RATE_LIMIT_WEBMENTION_WINDOW` | 30 per 60s |
+| GET /api/comments | `RATE_LIMIT_READ` / `RATE_LIMIT_READ_WINDOW` | 60 per 60s |
+| Admin | `RATE_LIMIT_ADMIN_MODERATE` / `RATE_LIMIT_ADMIN_MODERATE_WINDOW` | 10 per 60s |
 
-Keyed on TCP peer IP, not `X-Forwarded-For`, so spoofed headers can't reset the bucket.
+Keyed on TCP peer IP, not `X-Forwarded-For`, so spoofed headers can't reset the bucket. Burst and window are configurable through environment variables.
 
 ### Cloudflare Turnstile (optional)
 

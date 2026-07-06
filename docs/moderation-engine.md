@@ -394,7 +394,7 @@ if __name__ == "__main__":
 
 ### Rate limiting
 
-zapiska rate-limits the admin API by IP (60 req / 60s). Design your engine to batch decisions rather than making one API call per comment. Use `POST /api/admin/moderate/batch` instead of looping over individual `POST /api/admin/moderate` calls. Cache IP lookups locally.
+zapiska rate-limits the admin API by IP (default 10 req / 60s, configurable via `RATE_LIMIT_ADMIN_MODERATE` and `RATE_LIMIT_ADMIN_MODERATE_WINDOW`). Design your engine to batch decisions rather than making one API call per comment. Use `POST /api/admin/moderate/batch` instead of looping over individual `POST /api/admin/moderate` calls. Cache IP lookups locally.
 
 ### Error handling
 
