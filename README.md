@@ -23,20 +23,20 @@
 </p>
 
 
-#### Style it all you want
-Zapiska is backend only. Use the included JS widget, build your own frontend, or pipe comments into a static site. The API gives you the data; how it looks is up to you.
+### Style it all you want
+Zapiska is backend only. Use the [configurable widget](embed/README.md), or build your [own widget](embed/README.md#building-a-custom-frontend). Indie Web is all about expressing yourself
 
-#### Bring your own moderation (BYOM)
-Hook in an LLM, a rules engine, a community blocklist, or the built-in dashboard. Zapiska doesn't decide what spam means—it's your call. Community moderation tools plug in via the admin API.
+### Bring your own moderation (BYOM)
+Hook in an LLM, a rules engine, a community blocklist, or the built-in dashboard. Zapiska doesn't decide what spam means-it's your call. Community moderation tools plug in via the admin API.
 
-#### Threaded replies
+### Threaded replies
 Nested conversations supported, oldest-first within each thread. Prefer flat? Set depth to 0.
 
-#### Webmention support
+### Webmention support
 Accepts W3C webmentions, auto-fetches source pages, parses author profiles, and pulls in avatars.
 
-#### Built-in spam protection
-Rate limiting, per-IP daily caps, per-domain caps, honeypot fields, content-hash dedup, and URL cross-referencing. All configurable — you decide what to block.
+### Built-in spam protection
+Rate limiting, per-IP daily caps, per-domain caps, honeypot fields, content-hash dedup, and URL cross-referencing. Cloudflare turnstile is also supported for extra protection.
 
-#### One binary, zero dependencies
+### One binary, zero dependencies
 Rust and SQLite only. No Postgres, no Redis, no JS runtime. ~10MB, runs on a $5 VPS or a Raspberry Pi.

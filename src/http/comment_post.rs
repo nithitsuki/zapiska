@@ -709,7 +709,10 @@ mod tests {
 
         let pending = state.repo.list_pending(10, None, None).await.unwrap();
         let c = pending.iter().find(|c| c.target_path == "/gh").unwrap();
-        assert_eq!(c.author_name, "Alice", "form name preserved, github is pfp-only");
+        assert_eq!(
+            c.author_name, "Alice",
+            "form name preserved, github is pfp-only"
+        );
         assert_eq!(
             c.author_avatar,
             Some("https://avatars.githubusercontent.com/u/1".to_string())
@@ -743,7 +746,11 @@ mod tests {
         let app = build_app(state.clone());
         let body = "target_path=/gh-name&author_name=&content=hi&github_username=alice";
         let resp = app.oneshot(form_request(body)).await.unwrap();
-        assert_eq!(resp.status(), 201, "empty name with github_username must succeed");
+        assert_eq!(
+            resp.status(),
+            201,
+            "empty name with github_username must succeed"
+        );
 
         let pending = state.repo.list_pending(10, None, None).await.unwrap();
         let c = pending
@@ -764,10 +771,13 @@ mod tests {
     async fn github_unknown_fills_name_with_username_when_name_empty() {
         let (state, _dir) = test_state();
         let app = build_app(state.clone());
-        let body =
-            "target_path=/gh-unknown-empty&author_name=&content=hi&github_username=nobody";
+        let body = "target_path=/gh-unknown-empty&author_name=&content=hi&github_username=nobody";
         let resp = app.oneshot(form_request(body)).await.unwrap();
-        assert_eq!(resp.status(), 201, "empty name with github_username must not 400");
+        assert_eq!(
+            resp.status(),
+            201,
+            "empty name with github_username must not 400"
+        );
 
         let pending = state.repo.list_pending(10, None, None).await.unwrap();
         let c = pending

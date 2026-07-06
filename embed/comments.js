@@ -1,77 +1,146 @@
 /**
  * comments.js — Embeddable comment widget for zapiska
  *
- * Renders nested (threaded) comments with inline reply forms.
+ * Renders threaded comments with an inline reply form.
  *
- * Usage:
- *   <script
- *     id="nc-comments"
- *     src="https://webmention.nithitsuki.com/embed/comments.js"
- *     data-path="/blog/hello-world"
- *     data-limit="50"
- *   ></script>
+ * Usage (minimal):
+ *   <script id="nc-comments"
+ *     src="/embed/comments.js"
+ *     data-path="/blog/hello-world"></script>
  *
- * The script fetches approved comments from the API and renders them
- * into an element with id "nc-comments" (or a sibling inserted element).
- * Threaded replies are indented, and each comment has a "Reply" button
- * that opens an inline form.
+ * All data-* attributes are optional — see embed/README.md for the full list.
+ *
+ * To build your own frontend, just use the JSON API directly:
+ *   GET  /api/comments?path=...   — fetch approved comments
+ *   POST /api/comment              — submit a comment
  */
-
 (function () {
   'use strict';
 
-  var script = document.querySelector('script#nc-comments') || document.getElementById('nc-comments');
+  var script = document.querySelector('script#nc-comments') ||
+               document.getElementById('nc-comments');
   if (!script) return;
 
-  var apiOrigin = script.getAttribute('data-api-origin');
-  if (!apiOrigin) {
+  // ── Helpers ────────────────────────────────────────────────
+
+  function attr(name, fallback) {
+    var v = script.getAttribute(name);
+    return v !== null && v !== '' ? v : fallback;
+  }
+
+  function boolAttr(name, fallback) {
+    var v = script.getAttribute(name);
+    if (v === null) return fallback;
+    return v === 'true' || v === '1' || v === 'yes';
+  }
+
+  function intAttr(name, fallback) {
+    var v = script.getAttribute(name);
+    if (v === null) return fallback;
+    var n = parseInt(v, 10);
+    return isNaN(n) ? fallback : n;
+  }
+
+  // ── Configuration (all driven by data-* attributes) ────────
+
+  var origin;
+  var srcOrigin = attr('data-api-origin');
+  if (srcOrigin) {
+    origin = srcOrigin;
+  } else {
     var src = script.getAttribute('src');
     if (src) {
       var m = src.match(/^(https?:\/\/[^\/]+)/);
-      if (m) apiOrigin = m[1];
+      if (m) origin = m[1];
     }
   }
-  if (!apiOrigin) apiOrigin = window.location.origin;
-  var path = script.getAttribute('data-path') || '/';
-  var limit = parseInt(script.getAttribute('data-limit'), 10) || 50;
+  if (!origin) origin = window.location.origin;
+
+  var path          = attr('data-path', '/');
+  var limit         = intAttr('data-limit', 50);
+
+  // Overridable text
+  var headingText   = attr('data-heading-text', 'Comments (%d)');
+  var emptyText     = attr('data-empty-text', 'No comments yet.');
+  var errorText     = attr('data-error-text', 'Comments could not be loaded.');
+  var replyText     = attr('data-reply-text', 'Reply');
+  var submitText    = attr('data-submit-text', 'Submit');
+  var cancelText    = attr('data-cancel-text', 'Cancel');
+  var namePH        = attr('data-name-placeholder', 'Your name');
+  var websitePH     = attr('data-website-placeholder', 'Website (optional)');
+  var replyPH       = attr('data-reply-placeholder', 'Write your reply...');
+  var pendingText   = attr('data-pending-text', 'Reply submitted (pending approval).');
+
+  // Behavior flags
+  var hideReplies   = boolAttr('data-hide-replies', false);
+  var hideHeading   = boolAttr('data-hide-heading', false);
+  var noStyles      = boolAttr('data-nostyles', false);
+  var linkTarget    = attr('data-link-target', '_blank');
+
+  // Turnstile
+  var tsSitekey     = attr('data-turnstile-sitekey', '');
+
+  // Avatar size (px)
+  var avatarSize    = intAttr('data-avatar-size', 24);
+
   var target = document.getElementById('nc-comments');
   if (!target) target = document.body;
 
-  var apiUrl = apiOrigin + '/api/comments?path=' + encodeURIComponent(path) + '&limit=' + limit;
+  var apiUrl = origin + '/api/comments?path=' +
+               encodeURIComponent(path) + '&limit=' + limit;
 
-  // ── Minimal embedded styles for thread layout ───────────────
-  // These are injected once to style the threaded comment tree.
-  (function injectStyles() {
-    if (document.getElementById('nc-thread-styles')) return;
-    var css = document.createElement('style');
-    css.id = 'nc-thread-styles';
-    css.textContent =
-      '.nc-comment { margin-bottom: 0; }' +
-      '.nc-thread { margin-left: 32px; border-left: 1px solid #ccc; padding-left: 12px; }' +
-      '.nc-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 13px; }' +
-      '.nc-avatar { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }' +
-      '.nc-author { font-weight: 600; text-decoration: none; color: #333; }' +
-      '.nc-author:hover { text-decoration: underline; }' +
-      '.nc-date { font-size: 12px; color: #888; }' +
-      '.nc-body { font-size: 14px; line-height: 1.5; margin-bottom: 6px; }' +
-      '.nc-body p { margin-bottom: 4px; }' +
-      '.nc-body p:last-child { margin-bottom: 0; }' +
-      '.nc-reply-btn { font-size: 12px; color: #555; cursor: pointer; border: none; background: none; padding: 0; font-family: inherit; }' +
-      '.nc-reply-btn:hover { color: #000; text-decoration: underline; }' +
-      '.nc-reply-form { margin: 8px 0 8px 32px; padding: 10px; border: 1px solid #ddd; background: #f9f9f9; }' +
-      '.nc-reply-form input, .nc-reply-form textarea { display: block; width: 100%; margin-bottom: 6px; padding: 6px 8px; border: 1px solid #ccc; font: inherit; font-size: 13px; box-sizing: border-box; }' +
-      '.nc-reply-form textarea { min-height: 60px; resize: vertical; }' +
-      '.nc-reply-form .nc-form-actions { display: flex; gap: 6px; }' +
-      '.nc-reply-form button { font: inherit; font-size: 12px; padding: 5px 12px; border: 1px solid #ccc; background: #fff; cursor: pointer; }' +
-      '.nc-reply-form button:hover { background: #f0f0f0; }' +
-      '.nc-reply-form .nc-submit { background: #333; color: #fff; border-color: #333; }' +
-      '.nc-reply-form .nc-submit:hover { background: #555; }' +
-      '.nc-reply-form .nc-submit:disabled { opacity: .5; cursor: default; }' +
-      '.nc-error { color: #c00; }';
-    document.head.appendChild(css);
-  })();
+  // ── Turnstile API loader (one-shot) ────────────────────────
 
-  // ── HTML sanitizer (defence-in-depth) ───────────────────────
+  var turnstileLoaded = false;
+
+  function ensureTurnstile(callback) {
+    if (typeof turnstile !== 'undefined') { callback(); return; }
+    if (turnstileLoaded) { setTimeout(callback, 500); return; }
+    turnstileLoaded = true;
+    var s = document.createElement('script');
+    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+    s.async = true;
+    s.defer = true;
+    s.onload = callback;
+    document.head.appendChild(s);
+  }
+
+  // ── Styles (optional — suppressed with data-nostyles) ──────
+
+  if (!noStyles) {
+    (function injectStyles() {
+      if (document.getElementById('nc-thread-styles')) return;
+      var css = document.createElement('style');
+      css.id = 'nc-thread-styles';
+      css.textContent =
+        '.nc-comment { margin-bottom: 0; }' +
+        '.nc-thread { margin-left: 32px; border-left: 1px solid #ccc; padding-left: 12px; }' +
+        '.nc-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 13px; }' +
+        '.nc-avatar { border-radius: 50%; object-fit: cover; flex-shrink: 0; }' +
+        '.nc-author { font-weight: 600; text-decoration: none; color: #333; }' +
+        '.nc-author:hover { text-decoration: underline; }' +
+        '.nc-date { font-size: 12px; color: #888; }' +
+        '.nc-body { font-size: 14px; line-height: 1.5; margin-bottom: 6px; }' +
+        '.nc-body p { margin-bottom: 4px; }' +
+        '.nc-body p:last-child { margin-bottom: 0; }' +
+        '.nc-reply-btn { font-size: 12px; color: #555; cursor: pointer; border: none; background: none; padding: 0; font-family: inherit; }' +
+        '.nc-reply-btn:hover { color: #000; text-decoration: underline; }' +
+        '.nc-reply-form { margin: 8px 0 8px 32px; padding: 10px; border: 1px solid #ddd; background: #f9f9f9; }' +
+        '.nc-reply-form input, .nc-reply-form textarea { display: block; width: 100%; margin-bottom: 6px; padding: 6px 8px; border: 1px solid #ccc; font: inherit; font-size: 13px; box-sizing: border-box; }' +
+        '.nc-reply-form textarea { min-height: 60px; resize: vertical; }' +
+        '.nc-reply-form .nc-form-actions { display: flex; gap: 6px; }' +
+        '.nc-reply-form button { font: inherit; font-size: 12px; padding: 5px 12px; border: 1px solid #ccc; background: #fff; cursor: pointer; }' +
+        '.nc-reply-form button:hover { background: #f0f0f0; }' +
+        '.nc-reply-form .nc-submit { background: #333; color: #fff; border-color: #333; }' +
+        '.nc-reply-form .nc-submit:hover { background: #555; }' +
+        '.nc-reply-form .nc-submit:disabled { opacity: .5; cursor: default; }' +
+        '.nc-error { color: #c00; }';
+      document.head.appendChild(css);
+    })();
+  }
+
+  // ── HTML sanitizer ─────────────────────────────────────────
+
   function sanitizeHtml(html) {
     if (typeof DOMPurify !== 'undefined' && DOMPurify.sanitize) {
       return DOMPurify.sanitize(html, {
@@ -99,12 +168,6 @@
 
   // ── Tree building ──────────────────────────────────────────
 
-  /**
-   * Build a nested tree from a flat comment list.
-   * Each node: { comment: {...}, children: [node, ...] }
-   * Top-level comments (parent_id = null) are roots.
-   * Replies are sorted oldest-first within their parent.
-   */
   function buildTree(comments) {
     var byId = {};
     var roots = [];
@@ -122,7 +185,6 @@
       }
     });
 
-    // Sort roots newest-first, replies oldest-first within each parent.
     roots.sort(function (a, b) { return b.comment.id - a.comment.id; });
     Object.keys(byId).forEach(function (id) {
       byId[id].children.sort(function (a, b) { return a.comment.id - b.comment.id; });
@@ -133,10 +195,6 @@
 
   // ── Rendering ──────────────────────────────────────────────
 
-  /**
-   * Render a single comment element (without children).
-   * Sets data-id for later DOM lookups.
-   */
   function renderCommentEl(c) {
     var name = escapeHtml(c.author_name);
     var url = c.author_url ? escapeHtml(c.author_url) : null;
@@ -149,7 +207,6 @@
     el.dataset.id = c.id;
     el.dataset.depth = c.depth;
 
-    // Meta row: avatar, author, date
     var meta = document.createElement('div');
     meta.className = 'nc-meta';
 
@@ -158,8 +215,8 @@
       img.className = 'nc-avatar';
       img.src = avatar;
       img.alt = name;
-      img.width = 24;
-      img.height = 24;
+      img.width = avatarSize;
+      img.height = avatarSize;
       img.loading = 'lazy';
       meta.appendChild(img);
     }
@@ -168,7 +225,7 @@
       var a = document.createElement('a');
       a.className = 'nc-author';
       a.href = url;
-      a.target = '_blank';
+      a.target = linkTarget;
       a.rel = 'noopener noreferrer ugc';
       a.textContent = name;
       meta.appendChild(a);
@@ -186,26 +243,22 @@
 
     el.appendChild(meta);
 
-    // Body
     var body = document.createElement('div');
     body.className = 'nc-body';
     body.innerHTML = content;
     el.appendChild(body);
 
-    // Reply button
-    var replyBtn = document.createElement('button');
-    replyBtn.className = 'nc-reply-btn';
-    replyBtn.textContent = 'Reply';
-    replyBtn.onclick = function () { toggleReplyForm(el, c.id, c.depth); };
-    el.appendChild(replyBtn);
+    if (!hideReplies) {
+      var replyBtn = document.createElement('button');
+      replyBtn.className = 'nc-reply-btn';
+      replyBtn.textContent = replyText;
+      replyBtn.onclick = function () { toggleReplyForm(el, c.id, c.depth); };
+      el.appendChild(replyBtn);
+    }
 
     return el;
   }
 
-  /**
-   * Recursively render a comment node and its children.
-   * Children are wrapped in a .nc-thread container for indentation.
-   */
   function renderNode(node) {
     var el = renderCommentEl(node.comment);
 
@@ -221,18 +274,10 @@
     return el;
   }
 
-  /**
-   * Toggle an inline reply form below a comment.
-   * Only one form can be open at a time (closes any existing one).
-   */
   function toggleReplyForm(commentEl, parentId, parentDepth) {
     var existing = commentEl.querySelector('.nc-reply-form');
-    if (existing) {
-      existing.remove();
-      return;
-    }
+    if (existing) { existing.remove(); return; }
 
-    // Close any other open reply forms
     document.querySelectorAll('.nc-reply-form').forEach(function (f) { f.remove(); });
 
     var form = document.createElement('div');
@@ -240,15 +285,13 @@
 
     var nameInput = document.createElement('input');
     nameInput.type = 'text';
-    nameInput.placeholder = 'Your name';
+    nameInput.placeholder = namePH;
     nameInput.required = true;
 
     var urlInput = document.createElement('input');
     urlInput.type = 'url';
-    urlInput.placeholder = 'Website (optional)';
+    urlInput.placeholder = websitePH;
 
-    // Honeypot field — hidden from humans, auto-filled by bots.
-    // If non-empty, the server silently discards the submission.
     var honeypot = document.createElement('input');
     honeypot.type = 'text';
     honeypot.name = 'website';
@@ -257,19 +300,33 @@
     honeypot.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0';
 
     var bodyTextarea = document.createElement('textarea');
-    bodyTextarea.placeholder = 'Write your reply...';
+    bodyTextarea.placeholder = replyPH;
     bodyTextarea.required = true;
+
+    // Turnstile container (inserted before the actions)
+    var tsWidgetId = null;
+    var tsContainer = null;
+    if (tsSitekey) {
+      tsContainer = document.createElement('div');
+      tsContainer.className = 'cf-turnstile';
+      tsContainer.dataset.sitekey = tsSitekey;
+    }
 
     var actions = document.createElement('div');
     actions.className = 'nc-form-actions';
 
     var submitBtn = document.createElement('button');
     submitBtn.className = 'nc-submit';
-    submitBtn.textContent = 'Submit';
+    submitBtn.textContent = submitText;
 
     var cancelBtn = document.createElement('button');
-    cancelBtn.textContent = 'Cancel';
-    cancelBtn.onclick = function () { form.remove(); };
+    cancelBtn.textContent = cancelText;
+    cancelBtn.onclick = function () {
+      if (tsWidgetId !== null && typeof turnstile !== 'undefined') {
+        try { turnstile.remove(tsWidgetId); } catch (e) {}
+      }
+      form.remove();
+    };
 
     actions.appendChild(submitBtn);
     actions.appendChild(cancelBtn);
@@ -278,7 +335,22 @@
     form.appendChild(urlInput);
     form.appendChild(honeypot);
     form.appendChild(bodyTextarea);
+    if (tsContainer) form.appendChild(tsContainer);
     form.appendChild(actions);
+
+    commentEl.appendChild(form);
+    nameInput.focus();
+
+    // Render Turnstile widget into its container
+    if (tsContainer && tsSitekey) {
+      ensureTurnstile(function () {
+        if (typeof turnstile !== 'undefined' && turnstile.render) {
+          tsWidgetId = turnstile.render(tsContainer, {
+            sitekey: tsSitekey
+          });
+        }
+      });
+    }
 
     submitBtn.onclick = function () {
       var authorName = nameInput.value.trim();
@@ -294,7 +366,23 @@
         body += '&author_url=' + encodeURIComponent(urlInput.value.trim());
       }
 
-      fetch(apiOrigin + '/api/comment', {
+      // Include Turnstile response if enabled
+      if (tsSitekey) {
+        var tsToken = '';
+        if (tsWidgetId !== null && typeof turnstile !== 'undefined') {
+          try { tsToken = turnstile.getResponse(tsWidgetId); } catch (e) {}
+        }
+        if (!tsToken) {
+          // Fallback: look for the auto-rendered hidden input
+          var tsInput = document.querySelector('input[name="cf-turnstile-response"]');
+          if (tsInput) tsToken = tsInput.value;
+        }
+        if (tsToken) {
+          body += '&cf-turnstile-response=' + encodeURIComponent(tsToken);
+        }
+      }
+
+      fetch(origin + '/api/comment', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: body
@@ -304,39 +392,30 @@
         return r.json().catch(function () { return {}; });
       })
       .then(function (data) {
-        // Clear form
+        if (tsWidgetId !== null && typeof turnstile !== 'undefined') {
+          try { turnstile.remove(tsWidgetId); } catch (e) {}
+        }
         form.remove();
-        // Show pending message with optional self-delete link
         var pending = document.createElement('div');
         pending.style.cssText = 'font-size:12px;color:#888;padding:4px 0;margin-left:32px';
-        pending.textContent = 'Reply submitted (pending approval).';
+        pending.textContent = pendingText;
         commentEl.appendChild(pending);
 
-        // If a delete token was returned, show a delete link
         var token = data && data.delete_token;
         if (token && window.localStorage) {
-          // Store token for potential later use
           var key = 'zapiska_del_' + parentId + '_' + token.slice(0, 8);
           try { localStorage.setItem(key, token); } catch (e) {}
         }
 
-        // Re-fetch the full list to get the new comment in the tree
         refreshComments();
       })
       .catch(function () {
         submitBtn.disabled = false;
-        alert('Failed to submit reply. Please try again.');
+        alert(submitText + ' failed. Please try again.');
       });
     };
-
-    commentEl.appendChild(form);
-    nameInput.focus();
   }
 
-  /**
-   * Re-fetch all comments and re-render the full tree.
-   * This is called after a new reply is submitted so it appears in the thread.
-   */
   function refreshComments() {
     fetch(apiUrl)
       .then(function (r) {
@@ -349,9 +428,6 @@
       .catch(function () {});
   }
 
-  /**
-   * Render the full comment tree into the target element.
-   */
   function renderTree(comments, total) {
     target.innerHTML = '';
 
@@ -360,10 +436,12 @@
       return;
     }
 
-    var heading = document.createElement('h2');
-    heading.className = 'nc-heading';
-    heading.textContent = 'Comments (' + (total || comments.length) + ')';
-    target.appendChild(heading);
+    if (!hideHeading) {
+      var heading = document.createElement('h2');
+      heading.className = 'nc-heading';
+      heading.textContent = headingText.replace('%d', total || comments.length);
+      target.appendChild(heading);
+    }
 
     var roots = buildTree(comments);
     roots.forEach(function (node) {
@@ -374,18 +452,18 @@
   function renderEmpty() {
     var el = document.createElement('p');
     el.className = 'nc-empty';
-    el.textContent = 'No comments yet.';
+    el.textContent = emptyText;
     return el;
   }
 
   function renderError() {
     var el = document.createElement('p');
     el.className = 'nc-error';
-    el.textContent = 'Comments could not be loaded.';
+    el.textContent = errorText;
     return el;
   }
 
-  // ── Fetch and render ───────────────────────────────────────
+  // ── Bootstrap ──────────────────────────────────────────────
 
   fetch(apiUrl)
     .then(function (r) {

@@ -17,6 +17,8 @@
 !tests/**
 !docs/
 !docs/**
+!.skills/
+!.skills/**
 !Dockerfile
 !docker-compose-example.yml
 !.dockerignore

@@ -2,6 +2,8 @@
 
 This guide assumes you already know how to self-host a website: you have a server with a public IP, can put a service behind a reverse proxy, can get a TLS cert, and are comfortable with the shell.
 
+> **Prefer an AI agent?** Copy the prompt in [`docs/ai-agent-setup.md`](ai-agent-setup.md) into your coding assistant and it will read the skills in `.skills/` and set everything up for you.
+
 By the end you'll have zapiska running on `https://comments.your-site.example`, serving comments for `https://your-site.example`.
 
 > Time: ~15 minutes if you've got Rust or Docker handy.
@@ -223,6 +225,10 @@ Drop this where you want the thread to appear:
 `data-path` must match the path on your main site (the stuff after `PUBLIC_TARGET_ORIGIN`). For `https://your-site.example/blog/hello-world` it's `/blog/hello-world`.
 
 The widget fetches `GET /api/comments?path=...&limit=50` and renders approved comments. `content` is ammonia-cleaned server-side and still re-sanitised client-side; author fields are inserted as text, never `innerHTML`.
+
+Every text string, behavior flag, and style in the widget is overridable — see the [full attribute reference](../embed/README.md#all-data--attributes). You can also suppress the built-in styles entirely with `data-nostyles="true"` and provide your own.
+
+> Want to build your own frontend? The [embed README](../embed/README.md#building-a-custom-frontend) has a complete code example using just `fetch()`. zapiska is backend-only — how comments look is entirely up to you.
 
 ### Accept new comments
 
