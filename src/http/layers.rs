@@ -26,13 +26,14 @@ pub fn cors_layer(config: &Config) -> CorsLayer {
             ]);
     }
 
-    let origin = config
+    let origins: Vec<axum::http::HeaderValue> = config
         .allowed_cors_origin
-        .parse::<axum::http::HeaderValue>()
-        .expect("ALLOWED_CORS_ORIGIN validated at config load");
+        .split(',')
+        .map(|s| s.trim().parse::<axum::http::HeaderValue>().expect("ALLOWED_CORS_ORIGIN validated at config load"))
+        .collect();
 
     CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(move |o, _| o == origin))
+        .allow_origin(AllowOrigin::predicate(move |o, _| origins.iter().any(|v| v == o)))
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,

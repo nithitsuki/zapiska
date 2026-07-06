@@ -415,4 +415,15 @@ Returns 200 with body `ok`.
 
 ## CORS
 
-Public endpoints (`/api/comment`, `/api/webmention`, `/api/comments`) return `Access-Control-Allow-Origin` only for the configured `ALLOWED_CORS_ORIGIN`. Admin endpoints don't advertise CORS.
+Public endpoints (`/api/comment`, `/api/webmention`, `/api/comments`) return
+`Access-Control-Allow-Origin` matching the request's `Origin` when it appears
+in `ALLOWED_CORS_ORIGIN`. Multiple origins can be given as a comma-separated
+list — useful for local development alongside production:
+
+```env
+ALLOWED_CORS_ORIGIN=http://localhost:1313,https://your-site.example
+```
+
+The special value `*` allows any origin (use only during development/testing).
+
+Admin endpoints don't advertise CORS.

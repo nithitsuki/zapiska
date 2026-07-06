@@ -57,7 +57,9 @@ The form field name (`cf-turnstile-response`) matches the widget's automatic hid
 
 ### CORS
 
-Single origin (`ALLOWED_CORS_ORIGIN`, default `https://nithitsuki.com`). `Access-Control-Allow-Origin` only present when request's `Origin` matches. Admin routes not advertised in preflight.
+`ALLOWED_CORS_ORIGIN` accepts a single origin, comma-separated list, or `*`.
+`Access-Control-Allow-Origin` is set when the request's `Origin` matches any
+entry in the list. Admin routes not advertised in preflight.
 
 ### SQL injection
 

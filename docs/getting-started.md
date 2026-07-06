@@ -99,7 +99,7 @@ Everything is configured through environment variables. The ones you must set fo
 |---|---|---|
 | `ADMIN_TOKEN` | (output of `openssl rand -base64 32`) | Authenticates the admin API. **Required.** |
 | `PUBLIC_TARGET_ORIGIN` | `https://your-site.example` | The site you accept comments/webmentions for. `target` URLs must start with this. |
-| `ALLOWED_CORS_ORIGIN` | `https://your-site.example` | The single origin your browser will fetch the read API from. CORS is rejected for anything else. |
+| `ALLOWED_CORS_ORIGIN` | `https://your-site.example` | Origin(s) the browser may fetch the read API from. Single origin, comma-separated list (e.g. `http://localhost:1313,https://your-site.example`), or `*`. CORS is rejected for anything else. |
 | `DATABASE_PATH` | `/opt/zapiska/comments.db` (or `/data/comments.db` in Docker) | Where the SQLite file lives. Back this path up. |
 | `BIND_ADDR` | `127.0.0.1:3000` (default) | Listen address. Keep localhost-only if you're behind a reverse proxy. |
 
@@ -356,7 +356,7 @@ Schema migrations run automatically on startup — they're idempotent.
 ## 8. Troubleshooting
 
 - **`failed to load configuration: ADMIN_TOKEN is required but not set`** — your `.env` isn't on the path or the var is empty. zapiska loads `.env` from the working directory automatically (via `dotenvy`); under systemd set `EnvironmentFile=/opt/zapiska/.env` on the unit.
-- **Browser fetch to `/api/comments` is blocked by CORS.** — `ALLOWED_CORS_ORIGIN` does not match your main site's exact origin (including scheme). Fix the env var and restart.
+- **Browser fetch to `/api/comments` is blocked by CORS.** — `ALLOWED_CORS_ORIGIN` doesn't include your main site's exact origin (scheme + host + port). For local dev with a static site generator, add the dev server origin too: `ALLOWED_CORS_ORIGIN=http://localhost:1313,https://your-site.example`. Fix the env var and restart.
 - **Webmention returns `400 invalid target`.** — the `target` URL you received doesn't start with `PUBLIC_TARGET_ORIGIN`. Either fix the sender or correct the env var.
 - **`503 Service Unavailable` from `POST /api/webmention`.** — the worker backlog is full (`WORKER_BACKLOG`, default 64). Raise it or investigate a fetch storm.
 - **Comments are accepted but my site shows nothing.** — they're still `pending`. Approve them via the admin API, or set `DEFAULT_COMMENT_STATUS=approved` if you prefer immediate posts.

@@ -110,11 +110,11 @@ impl Config {
         let public_target_origin = env_or_default("PUBLIC_TARGET_ORIGIN", "https://nithitsuki.com");
 
         let allowed_cors_origin = env_or_default("ALLOWED_CORS_ORIGIN", "https://nithitsuki.com");
-        if allowed_cors_origin != "*"
-            && !allowed_cors_origin.starts_with("http://")
-            && !allowed_cors_origin.starts_with("https://")
-        {
-            return Err(ConfigError::CorsOriginInvalid(allowed_cors_origin));
+        for part in allowed_cors_origin.split(',') {
+            let part = part.trim();
+            if part != "*" && !part.starts_with("http://") && !part.starts_with("https://") {
+                return Err(ConfigError::CorsOriginInvalid(allowed_cors_origin));
+            }
         }
 
         let database_path = env_or_default("DATABASE_PATH", "./comments.db");
@@ -459,7 +459,21 @@ mod tests {
                 assert_eq!(config.allowed_cors_origin, "*");
             },
         );
-        // ftp:// is rejected
+        // comma-separated origins are valid
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("ALLOWED_CORS_ORIGIN", "http://localhost:1313,https://nithitsuki.com"),
+            ],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(
+                    config.allowed_cors_origin,
+                    "http://localhost:1313,https://nithitsuki.com"
+                );
+            },
+        );
+        // ftp:// is rejected even in multi-origin
         with_env(
             &[
                 ("ADMIN_TOKEN", "test"),
