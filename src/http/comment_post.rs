@@ -139,9 +139,9 @@ pub async fn create_comment(
 
     let mut author_name = validate::strip_control_chars(&form.author_name);
     author_name = author_name.trim().to_string();
-    if author_name.is_empty() {
+    if author_name.is_empty() && github_username.is_none() {
         return Err(AppError::BadRequest(
-            "author_name must not be empty".to_string(),
+            "author_name must not be empty (or provide github_username)".to_string(),
         ));
     }
     if author_name.chars().count() > state.config.max_author_len {
@@ -430,19 +430,22 @@ async fn resolve_author(
     cleaned_name: String,
     github: &Arc<dyn GitHubLookup>,
 ) -> (String, Option<String>) {
-    // Priority 1: GitHub username → use the API name.
-    if let Some(gh) = github_username {
-        let gh = gh.trim();
-        if !gh.is_empty()
-            && let Some(profile) = github.lookup(gh).await
-        {
-            return (profile.name, None);
-        }
-    }
-
-    // Priority 2: author_url → use form name, keep the URL.
+    // Priority 1: author_url → use form name, keep the URL.
     if let Some(url) = author_url {
         return (cleaned_name, Some(url.to_string()));
+    }
+
+    // Priority 2: github_username → use GitHub name ONLY if form name is empty.
+    // GitHub is primarily used for the avatar (resolved separately in resolve_avatar).
+    if let Some(gh) = github_username {
+        let gh = gh.trim();
+        if !gh.is_empty() && cleaned_name.is_empty() {
+            if let Some(profile) = github.lookup(gh).await {
+                return (profile.name, None);
+            }
+            // GitHub lookup failed but we still need a name — use the username.
+            return (gh.to_string(), None);
+        }
     }
 
     // Priority 3: name only, no enrichment.
@@ -706,7 +709,7 @@ mod tests {
 
         let pending = state.repo.list_pending(10, None, None).await.unwrap();
         let c = pending.iter().find(|c| c.target_path == "/gh").unwrap();
-        assert_eq!(c.author_name, "Alice Green", "name came from GitHub");
+        assert_eq!(c.author_name, "Alice", "form name preserved, github is pfp-only");
         assert_eq!(
             c.author_avatar,
             Some("https://avatars.githubusercontent.com/u/1".to_string())
@@ -731,6 +734,53 @@ mod tests {
             c.author_avatar.as_deref(),
             Some("https://api.dicebear.com/7.x/notionists/svg?seed=nobody"),
             "DiceBear avatar from github_username when GitHub lookup fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn github_fills_name_when_form_name_empty() {
+        let (state, _dir) = test_state();
+        let app = build_app(state.clone());
+        let body = "target_path=/gh-name&author_name=&content=hi&github_username=alice";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(resp.status(), 201, "empty name with github_username must succeed");
+
+        let pending = state.repo.list_pending(10, None, None).await.unwrap();
+        let c = pending
+            .iter()
+            .find(|c| c.target_path == "/gh-name")
+            .unwrap();
+        assert_eq!(
+            c.author_name, "Alice Green",
+            "name should come from GitHub when form name is empty"
+        );
+        assert_eq!(
+            c.author_avatar,
+            Some("https://avatars.githubusercontent.com/u/1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn github_unknown_fills_name_with_username_when_name_empty() {
+        let (state, _dir) = test_state();
+        let app = build_app(state.clone());
+        let body =
+            "target_path=/gh-unknown-empty&author_name=&content=hi&github_username=nobody";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(resp.status(), 201, "empty name with github_username must not 400");
+
+        let pending = state.repo.list_pending(10, None, None).await.unwrap();
+        let c = pending
+            .iter()
+            .find(|c| c.target_path == "/gh-unknown-empty")
+            .unwrap();
+        assert_eq!(
+            c.author_name, "nobody",
+            "fallback to github_username when name empty and GitHub lookup fails"
+        );
+        assert_eq!(
+            c.author_avatar.as_deref(),
+            Some("https://api.dicebear.com/7.x/notionists/svg?seed=nobody"),
         );
     }
 
