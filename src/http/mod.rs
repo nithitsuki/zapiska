@@ -81,6 +81,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/healthz", axum::routing::get(healthz))
         .route("/admin", axum::routing::get(admin_dashboard))
         .route("/embed/comments.js", axum::routing::get(comments_js))
+        .route("/embed/win95.css", axum::routing::get(win95_css))
         .route("/api/admin/login", axum::routing::post(admin::login))
         .route("/api/admin/logout", axum::routing::post(admin::logout))
         .route(
@@ -131,6 +132,21 @@ async fn comments_js() -> (
             ("cache-control", "public, max-age=3600"),
         ],
         include_str!("../../embed/comments.js"),
+    )
+}
+
+async fn win95_css() -> (
+    axum::http::StatusCode,
+    [(&'static str, &'static str); 2],
+    &'static str,
+) {
+    (
+        axum::http::StatusCode::OK,
+        [
+            ("content-type", "text/css"),
+            ("cache-control", "public, max-age=3600"),
+        ],
+        include_str!("../../embed/win95.css/assets/win95.css"),
     )
 }
 

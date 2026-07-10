@@ -3,403 +3,574 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zapiska admin</title>
+<title>zapiska control v1.0</title>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: system-ui, -apple-system, sans-serif; background: #fff; color: #000; font-size: 14px; line-height: 1.5; padding: 20px; }
-  a { color: #0066cc; }
-  input, button, select, textarea { font: inherit; }
-  input, select { border: 1px solid #ccc; padding: 5px 8px; border-radius: 4px; }
-  input:focus, select:focus { outline: 2px solid #0066cc; outline-offset: -1px; }
-  button { padding: 5px 12px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
-  button:hover { background: #f0f0f0; }
-  button:disabled { opacity: .35; cursor: default; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  td, th { padding: 5px 8px; border: 1px solid #ddd; text-align: left; vertical-align: top; }
-  th { background: #f5f5f5; font-weight: 600; font-size: 12px; white-space: nowrap; }
-  tr:nth-child(even) td { background: #fafafa; }
-  tr:hover td { background: #f0f5ff; }
-  .w-full { width: 100%; }
-  .flex { display: flex; }
-  .flex-wrap { flex-wrap: wrap; }
-  .items-center { align-items: center; }
-  .justify-between { justify-content: space-between; }
-  .gap { gap: 8px; }
-  .mb { margin-bottom: 8px; }
-  .mt { margin-top: 8px; }
-  .hidden { display: none !important; }
-  .text-mono { font-family: "SF Mono", "Menlo", "Consolas", monospace; font-size: 12px; }
-  .text-sm { font-size: 12px; color: #666; }
-  .overflow { max-height: 80px; overflow-y: auto; word-break: break-word; }
-  .nowrap { white-space: nowrap; }
+/* ===== Base ===== */
+body { margin: 0; background: #008080; font-family: 'MS Sans Serif', 'Segoe UI', Tahoma, Verdana, sans-serif; font-size: 11px; color: #fff; }
+input, select, button, textarea { font-family: 'Courier New', 'Consolas', monospace; font-size: 11px; }
+button { border: 2px outset #fff; background: #c0c0c0; color: #000; padding: 2px 12px; cursor: pointer; border-radius: 0; font-family: 'MS Sans Serif', 'Segoe UI', Tahoma, sans-serif; font-size: 11px; }
+button:active { border: 2px inset #fff; }
+button:disabled { opacity: .4; }
+input, select { background: #fff; border: 2px inset #fff; padding: 2px 4px; color: #000; font-family: 'Courier New', 'Consolas', monospace; font-size: 11px; }
+a { color: #000080; text-decoration: underline; cursor: pointer; }
+a:hover { color: #800000; }
 
-  .login-box { max-width: 380px; margin: 100px auto; padding: 24px; border: 1px solid #ccc; border-radius: 8px; }
-  .login-box h1 { font-size: 22px; margin-bottom: 4px; }
-  .login-box .sub { font-size: 13px; color: #666; margin-bottom: 16px; }
-  .login-box label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
-  .login-box input { width: 100%; margin-bottom: 10px; }
-  .login-box .btn-l { width: 100%; padding: 8px; background: #0066cc; color: #fff; border: none; border-radius: 4px; }
-  .login-box .btn-l:hover { background: #0052a3; }
-  .login-error { display: none; font-size: 13px; color: #c00; margin-bottom: 8px; }
+/* ===== Windows / chrome ===== */
+.win { background: #c0c0c0; color: #000; box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #808080, 1px 1px 0 #000; }
+.win-title { background: #000080; color: #fff; font-weight: 700; font-size: 10px; padding: 1px 4px; display: flex; align-items: center; justify-content: space-between; min-height: 0; }
+.win-body { padding: 4px; }
 
-  .stats { display: flex; gap: 4px; margin-bottom: 12px; }
-  .stat { flex: 1; border: 1px solid #ddd; border-radius: 4px; padding: 8px 12px; text-align: center; cursor: pointer; }
-  .stat:hover { background: #f5f5f5; }
-  .stat.active { border-color: #0066cc; background: #f0f5ff; }
-  .stat .num { font-size: 18px; font-weight: 700; }
-  .stat .lbl { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: .04em; }
+/* ===== Buttons ===== */
+.btn { background: #c0c0c0; color: #000; border: 2px outset #fff; padding: 2px 12px; cursor: pointer; border-radius: 0; font-family: 'MS Sans Serif', 'Segoe UI', Tahoma, sans-serif; font-size: 11px; }
+.btn:active { border: 2px inset #fff; }
+.btn:disabled { opacity: .4; }
+.btn-primary { background: #000080; color: #fff; border: 2px outset #fff; }
 
-  .tabs { display: flex; gap: 2px; }
-  .tab { padding: 5px 14px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; background: #fff; font-size: 13px; }
-  .tab:hover { background: #f5f5f5; }
-  .tab.active { background: #0066cc; color: #fff; border-color: #0066cc; }
+/* ===== Badges ===== */
+.badge { display: inline-block; padding: 0 4px; font-weight: 700; font-size: 10px; text-transform: uppercase; }
+.badge-p { background: #ffff00; color: #000; }
+.badge-a { background: #00aa00; color: #fff; }
+.badge-s { background: #ff0000; color: #fff; }
+.badge-d { background: #808080; color: #fff; }
+.badge-w { background: #000080; color: #fff; }
+.badge-h { background: #ff8000; color: #fff; }
 
-  .path-list { border: 1px solid #ddd; border-radius: 4px; overflow: hidden; }
-  .path-row { padding: 6px 10px; border-bottom: 1px solid #eee; cursor: pointer; display: flex; align-items: center; gap: 6px; }
-  .path-row:last-child { border-bottom: none; }
-  .path-row:hover { background: #f5f5ff; }
-  .path-row.active { background: #e8f0fe; }
-  .path-row .pname { font-family: "SF Mono", "Menlo", "Consolas", monospace; font-size: 13px; flex: 1; word-break: break-all; }
-  .path-row .pcount { font-weight: 700; min-width: 24px; text-align: right; }
-  .path-row .pmeta { font-size: 11px; color: #888; }
+/* ===== Tabs ===== */
+.tab { background: #c0c0c0; color: #000; border: 2px outset #fff; padding: 2px 10px; cursor: pointer; font-family: 'MS Sans Serif', Tahoma, sans-serif; font-size: 10px; text-transform: uppercase; }
+.tab:hover { background: #d4d0c8; }
+.tab.sel { background: #000080; color: #fff; border: 2px outset #fff; }
 
-  .clear-filter { font-size: 11px; color: #c00; cursor: pointer; text-decoration: none; }
-  .clear-filter:hover { text-decoration: underline; }
-  .filter-active { background: #fff7e6; border-color: #b8860b; }
+/* ===== Stats ===== */
+.stat { background: #d4d0c8; color: #000; padding: 2px 8px; text-align: center; box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #808080; }
+.stat .n { font-size: 14px; font-weight: 700; }
+.stat .l { font-size: 9px; text-transform: uppercase; letter-spacing: .5px; }
 
-  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; }
-  .badge-approved { background: #e6f7e6; color: #1a7d1a; }
-  .badge-pending { background: #fff7e6; color: #b8860b; }
-  .badge-spam { background: #ffe6e6; color: #c00; }
-  .badge-deleted { background: #f0f0f0; color: #888; }
-  .badge-wm { background: #e6f0ff; color: #0066cc; }
+/* ===== Path rows ===== */
+.prow { padding: 1px 6px; border-bottom: 1px solid #808080; cursor: pointer; display: flex; align-items: center; gap: 4px; color: #000; }
+.prow:hover { background: #e0e0d0; }
+.prow.sel { background: #000080; color: #fff; }
+.prow .pn { font-family: 'Courier New', 'Consolas', monospace; font-size: 11px; flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.prow .pc { font-weight: 700; min-width: 20px; text-align: right; }
+.prow .pm { font-size: 9px; color: #666; }
+.prow.sel .pm { color: #aac; }
 
-  .toast-container { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 100; }
-  .toast { background: #333; color: #fff; padding: 8px 16px; border-radius: 6px; font-size: 13px; margin-top: 4px; }
-  .spinner { width: 16px; height: 16px; border: 2px solid #ddd; border-top-color: #0066cc; border-radius: 50%; animation: spin .5s linear infinite; margin: 24px auto; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .empty-state { text-align: center; padding: 32px; color: #999; }
+/* ===== Toasts ===== */
+.toast-c { position: fixed; bottom: 4px; left: 50%; transform: translateX(-50%); z-index: 999; display: flex; flex-direction: column; gap: 2px; }
+.toast { background: #000080; color: #fff; padding: 3px 12px; font-family: 'Courier New', 'Consolas', monospace; font-size: 11px; display: flex; align-items: center; gap: 8px; }
+.toast a { color: #ffff00; font-weight: 700; cursor: pointer; }
+
+/* ===== Spinner / empty ===== */
+.spin { width: 12px; height: 12px; border: 2px solid #808080; border-top-color: #000080; border-radius: 50%; animation: s .5s linear infinite; margin: 12px auto; }
+@keyframes s { to { transform: rotate(360deg); } }
+.empty { text-align: center; padding: 16px; color: #808080; font-style: italic; }
+
+/* ===== Bulk bar ===== */
+.bulk { background: #000080; color: #fff; padding: 2px 6px; font-size: 10px; display: flex; align-items: center; gap: 4px; }
+
+/* ===== Detail panel ===== */
+.detail { background: #d4d0c8; color: #000; padding: 8px; font-size: 11px; }
+.detail .lbl { font-size: 9px; color: #666; text-transform: uppercase; letter-spacing: .5px; }
+.detail .val { font-family: 'Courier New', 'Consolas', monospace; }
+
+/* ===== Header / toolbar ===== */
+.hdr { background: #000080; color: #fff; padding: 1px 6px; display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+
+/* ===== Status bar ===== */
+.raised-bar { border-top: 2px outset #fff; background: #c0c0c0; padding: 2px 4px; display: flex; justify-content: space-between; font-size: 10px; color: #000; }
+
+/* ===== Column menu ===== */
+.col-menu { position: absolute; top: 100%; right: 0; z-index: 50; min-width: 120px; }
+.col-menu .cm-item { display: flex; align-items: center; gap: 4px; padding: 1px 6px; font-size: 10px; text-transform: uppercase; cursor: pointer; }
+.col-menu .cm-item:hover { background: #000080; color: #fff; }
+
+/* ===== Comment card (base — applies at every size) ===== */
+.cc { background: #d4d0c8; border: 2px outset #fff; margin-bottom: 18px; padding: 5px 7px; position: relative; overflow: hidden; user-select: none; }
+.cc:hover { background: #e0e0d0; border-color: #000080; }
+.cc-meta { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }
+.cc-avatar { width: 20px; min-width: 20px; max-width: 20px; height: 20px; border-radius: 2px; object-fit: cover; flex-shrink: 0; }
+.cc-name { font-weight: 700; font-size: 11px; color: #000; }
+.cc-name a { color: #000080; text-decoration: none; }
+.cc-name a:hover { text-decoration: underline; }
+.cc-badges { display: flex; gap: 2px; margin-left: auto; flex-shrink: 0; }
+.cc-date { font-size: 10px; color: #808080; white-space: nowrap; }
+.cc-body { font-size: 11px; line-height: 1.4; color: #000; margin-bottom: 3px; word-break: break-word; }
+.cc-body p { margin-bottom: 4px; }
+.cc-body p:last-child { margin-bottom: 0; }
+.cc-actions { display: flex; gap: 2px; flex-wrap: wrap; }
+.cc-actions .btn { font-size: 9px; padding: 1px 6px; }
+
+/* ===== Swipe hint overlays (mobile gesture) ===== */
+.swipe-hint { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; padding: 0 16px; font-weight: 700; font-size: 12px; text-transform: uppercase; pointer-events: none; transition: opacity .15s; z-index: 5; }
+.swipe-left-hint { right: 0; background: #ff0000; color: #fff; }
+.swipe-right-hint { left: 0; background: #00aa00; color: #fff; }
+
+/* ===== Responsive overrides ===== */
+
+/* Tablet / phone ≤768px */
+@media (max-width: 768px) {
+  .hdr { flex-wrap: wrap; padding: 4px 6px; }
+  body { font-size: 14px; padding: 6px; }
+  .hide-m { display: none !important; }
+  .show-m { display: revert; }
+  .prow .pm { display: none; }
+  .prow { padding: 6px 10px; }
+  .stat { padding: 6px 10px; }
+  .stat .n { font-size: 16px; }
+  .stat .l { font-size: 10px; }
+  button { padding: 6px 16px; }
+  .btn { padding: 6px 16px; font-size: 12px; }
+  .tab { padding: 6px 14px; font-size: 12px; }
+  .win-title { padding: 6px 8px; font-size: 13px; }
+  .win-body { padding: 8px; }
+  .cc { padding: 10px 12px; margin-bottom: 10px; }
+  .cc-meta { gap: 8px; margin-bottom: 6px; }
+  .cc-avatar { width: 32px; min-width: 32px; max-width: 32px; height: 32px; }
+  .cc-name { font-size: 14px; }
+  .cc-body { font-size: 14px; line-height: 1.45; }
+  .cc-actions { gap: 6px; margin-top: 6px; }
+  .cc-actions .btn { font-size: 12px; padding: 4px 14px; }
+}
+
+/* Desktop ≥769px — hide mobile-only controls */
+@media (min-width: 769px) {
+  .show-m { display: none !important; }
+}
+
+/* Wider desktop ≥900px */
+@media (min-width: 900px) {
+  .win-body { padding: 4px 6px; }
+  .cc { padding: 7px 10px; margin-bottom: 18px; }
+  .cc-meta { gap: 6px; margin-bottom: 4px; }
+  .cc-body { font-size: 12px; line-height: 1.45; }
+  .cc-actions { gap: 3px; }
+  .cc-actions .btn { font-size: 10px; padding: 1px 8px; }
+}
+
+/* Phone ≤480px */
+@media (max-width: 480px) {
+  .hide-p { display: none !important; }
+  .cc { padding: 12px 14px; }
+  .cc-meta { gap: 10px; }
+  .cc-avatar { width: 36px; min-width: 36px; max-width: 36px; height: 36px; }
+  .cc-body { font-size: 15px; }
+  .cc-actions .btn { font-size: 13px; padding: 6px 18px; }
+}
 </style>
 </head>
 <body>
+<div x-data="app()" x-init="init">
 
-<div id="lv" class="login-box">
-  <h1>zapiska</h1>
-  <div class="sub">moderation</div>
-  <label for="ti">admin token</label>
-  <input type="password" id="ti" autocomplete="off" autofocus>
-  <div class="login-error" id="le">invalid token</div>
-  <button class="btn-l" id="lb" onclick="login()">sign in</button>
+<!-- Title bar -->
+<div class="win" style="margin:4px">
+  <div class="win-title"><span>zapiska control v1.0</span></div>
 </div>
 
-<div id="dv" class="hidden">
-  <div class="flex items-center justify-between mb">
-    <div class="flex items-center gap">
-      <strong style="font-size:18px">zapiska</strong>
-      <span class="text-sm">admin</span>
+<!-- Login -->
+<div x-show="!authenticated" class="win" style="max-width:360px;margin:80px auto">
+  <div class="win-title"><span>authentication</span></div>
+  <div class="win-body">
+    <div style="margin-bottom:4px;font-size:10px">admin token required</div>
+    <input type="password" x-model="token" @keydown.enter="login" style="width:100%;margin-bottom:4px" autofocus>
+    <div x-show="loginError" style="color:#ff0000;font-weight:700;margin-bottom:4px">ACCESS DENIED</div>
+    <button class="btn btn-primary" @click="login" :disabled="!token" style="width:100%">SIGN IN</button>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div x-show="authenticated" style="margin:4px">
+
+  <!-- Toolbar -->
+  <div class="hdr">
+    <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+      <template x-for="t in tabItems" :key="t.key">
+        <button class="tab" :class="{ sel: status === t.key }" @click="switchTab(t.key)" x-text="t.label"></button>
+      </template>
+      <span class="hide-m" style="color:#808080;margin-left:4px">|</span>
+      <button class="tab hide-m" @click="showPaths = !showPaths" x-text="showPaths ? 'HIDE PATHS' : 'PATHS'" style="font-size:10px"></button>
+      <span class="hide-m" style="color:#808080">|</span>
+      <button class="tab hide-m" @click="showColMenu = !showColMenu" style="font-size:10px;position:relative">
+        COLUMNS
+        <div x-show="showColMenu" class="win col-menu" @click.outside="showColMenu = false">
+          <template x-for="(v,k) in colDefs" :key="k">
+            <div class="cm-item" @click="toggleCol(k)">
+              <span x-text="col[k] ? '☑' : '☐'"></span>
+              <span x-text="k.toUpperCase()"></span>
+            </div>
+          </template>
+        </div>
+      </button>
     </div>
-    <button onclick="logout()">sign out</button>
+    <div style="display:flex;align-items:center;gap:4px">
+      <span style="font-size:9px;color:#808080" class="hide-p">R:REF B:BULK</span>
+      <button class="btn" @click="refreshAll" style="font-size:10px">REFR</button>
+      <button class="btn show-m" @click="showColMenu = !showColMenu" style="font-size:10px;position:relative">
+        COLS
+        <div x-show="showColMenu" class="win col-menu" @click.outside="showColMenu = false" style="right:auto;left:0">
+          <template x-for="(v,k) in colDefs" :key="k">
+            <div class="cm-item" @click="toggleCol(k)">
+              <span x-text="col[k] ? '☑' : '☐'"></span>
+              <span x-text="k.toUpperCase()"></span>
+            </div>
+          </template>
+        </div>
+      </button>
+      <button class="btn" @click="logout" style="font-size:10px">EXIT</button>
+    </div>
   </div>
 
-  <div class="stats" id="sb"></div>
-
-  <div class="flex gap" style="align-items:flex-start">
-    <div style="width:280px;flex-shrink:0">
-      <div class="flex items-center justify-between mb">
-        <span class="text-sm"><strong>paths</strong></span>
-        <span class="text-sm" id="path-count"></span>
+  <!-- Stats row -->
+  <div style="display:flex;gap:2px;margin:3px 0">
+    <template x-for="s in statItems" :key="s.key">
+      <div class="stat" style="flex:1">
+        <div class="n" x-text="stats[s.key] ?? '-'"></div>
+        <div class="l" x-text="'(' + s.label + ')'"></div>
       </div>
-      <div class="path-list" id="path-list" style="max-height:70vh;overflow-y:auto"></div>
+    </template>
+  </div>
+
+  <!-- Main area -->
+  <div style="display:flex;gap:3px;align-items:flex-start">
+
+    <!-- Paths sidebar -->
+    <div x-show="showPaths" class="hide-m" style="width:240px;flex-shrink:0">
+      <div class="win">
+        <div class="win-title"><span>PATHS</span><span style="font-size:9px;font-weight:400" x-text="paths.length"></span></div>
+        <div class="win-body" style="padding:2px;max-height:60vh;overflow-y:auto">
+          <template x-for="p in paths" :key="p.path">
+            <div class="prow" :class="{ sel: selectedPath === p.path }" @click="selectPath(p.path)">
+              <span class="pc" x-text="p.total"></span>
+              <span class="pn" x-text="p.path"></span>
+              <span class="pm" x-text="'a' + p.approved + ' p' + p.pending + ' s' + p.spam"></span>
+            </div>
+          </template>
+          <div x-show="paths.length === 0" class="empty">NO PATHS</div>
+        </div>
+      </div>
     </div>
 
+    <!-- Comments panel -->
     <div style="flex:1;min-width:0">
-      <div class="flex flex-wrap items-center gap mb">
-        <div class="tabs" id="tabs">
-          <button class="tab" data-s="all">all</button>
-          <button class="tab" data-s="pending">pending</button>
-          <button class="tab" data-s="approved">approved</button>
-          <button class="tab" data-s="spam">spam</button>
-          <button class="tab" data-s="deleted">deleted</button>
+      <div class="win">
+        <div class="win-title">
+          <span>COMMENTS <span style="font-weight:400;font-size:10px" x-text="comments.length + (selectedPath ? ' ON ' + selectedPath : '')"></span></span>
+          <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+            <select x-model="selectedPath" class="show-m" style="width:100%;font-size:12px;padding:4px 6px;margin-bottom:2px" @change="selectPathMobile(selectedPath)">
+              <option value="">ALL PATHS</option>
+              <template x-for="p in paths" :key="p.path">
+                <option :value="p.path" x-text="p.path + ' (' + p.total + ')'"></option>
+              </template>
+            </select>
+            <input type="text" x-model="pathFilter" placeholder="PATH" style="width:100px;font-size:11px;padding:2px 4px">
+            <input type="text" x-model="ipFilter" placeholder="IP" style="width:80px;font-size:11px;padding:2px 4px" class="hide-p">
+            <select x-model="sortBy" style="font-size:11px;padding:2px 4px">
+              <option value="desc">NEW</option>
+              <option value="asc">OLD</option>
+              <option value="path">PATH</option>
+            </select>
+            <label style="font-size:11px;color:#fff;display:flex;align-items:center;gap:2px;cursor:pointer">
+              <input type="checkbox" x-model="bulkMode"> BULK
+            </label>
+          </div>
         </div>
-        <div style="display:flex;align-items:center;gap:4px;flex:1;min-width:120px">
-          <input type="text" id="pf" placeholder="path filter (e.g. /blog/*)" style="flex:1;border:1px solid #ddd;border-radius:4px;padding:5px 8px">
-          <a class="clear-filter hidden" id="clear-pf" onclick="clearPathFilter()" title="clear path filter">clear</a>
+        <div class="win-body" style="padding:2px">
+
+          <!-- Bulk bar -->
+          <div x-show="bulkMode && selected.length > 0" class="bulk">
+            <span x-text="selected.length"></span>
+            <button class="btn" @click="bulkAction('approved')" style="font-size:9px">APPR</button>
+            <button class="btn" @click="bulkAction('spam')" style="font-size:9px">SPAM</button>
+            <button class="btn" @click="bulkAction('deleted')" style="font-size:9px">DEL</button>
+            <button class="btn" @click="bulkAction('pending')" style="font-size:9px">PEND</button>
+            <a @click="selected = []" style="color:#ffff00;margin-left:auto;font-size:9px">CLR</a>
+          </div>
+
+          <!-- Detail -->
+          <template x-if="detailComment">
+          <div class="detail" style="margin-bottom:3px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+              <strong>COMMENT #<span x-text="detailComment.id"></span></strong>
+              <a @click="detailComment = null" style="font-weight:700">X</a>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <div><span class="lbl">AUTHOR</span><div class="val"><template x-if="detailComment.author_url"><a :href="detailComment.author_url" target="_blank" x-text="detailComment.author_name"></a></template><template x-if="!detailComment.author_url"><span x-text="detailComment.author_name"></span></template></div></div>
+              <div><span class="lbl">PATH</span><div class="val" x-text="detailComment.target_path"></div></div>
+              <div><span class="lbl">TYPE</span><div class="val" x-text="detailComment.comment_type"></div></div>
+              <div><span class="lbl">DEPTH</span><div class="val" x-text="detailComment.depth"></div></div>
+              <div x-show="detailComment.parent_id"><span class="lbl">PARENT</span><div class="val" x-text="detailComment.parent_id"></div></div>
+              <div x-show="detailComment.submitter_ip"><span class="lbl">IP</span><div class="val" x-text="detailComment.submitter_ip"></div></div>
+              <div><span class="lbl">HONEY</span><div class="val" x-text="detailComment.honeypot ? 'YES' : 'NO'"></div></div>
+              <div x-show="detailComment.source_url"><span class="lbl">SOURCE</span><div class="val" style="font-size:10px;word-break:break-all" x-text="detailComment.source_url"></div></div>
+              <div><span class="lbl">CREATED</span><div class="val" x-text="detailComment.created_at"></div></div>
+              <div x-show="detailComment.updated_at && detailComment.updated_at !== detailComment.created_at"><span class="lbl">UPDATED</span><div class="val" x-text="detailComment.updated_at"></div></div>
+            </div>
+            <div style="margin-top:4px"><span class="lbl">CONTENT</span><div class="val win-sun" style="padding:4px;margin-top:2px;background:#fff" x-html="detailComment.content || '(empty)'"></div></div>
+          </div>
+          </template>
+
+          <!-- Comment cards -->
+          <div x-show="loading && comments.length === 0"><div class="spin"></div></div>
+          <div x-show="!loading && comments.length === 0"><div class="empty">NO COMMENTS</div></div>
+          <div x-show="comments.length > 0">
+            <template x-for="c in sortedComments" :key="c.id">
+              <div class="cc"
+                   @touchstart="swipeStart($event, c.id)"
+                   @touchmove="swipeMove($event, c.id)"
+                   @touchend="swipeEnd($event, c.id)"
+                   :style="'transform:translateX(' + (swipeX[c.id] || 0) + 'px)'">
+                <!-- Swipe hint overlays (mobile only) -->
+                <template x-if="isMobile">
+                <div class="swipe-hint swipe-left-hint" :style="'opacity:' + Math.min(1, Math.max(0, (swipeX[c.id] || 0) / 120))">SPAM</div>
+                </template>
+                <template x-if="isMobile">
+                <div class="swipe-hint swipe-right-hint" :style="'opacity:' + Math.min(1, Math.max(0, -(swipeX[c.id] || 0) / 120))">APPR</div>
+                </template>
+
+                <!-- Bulk checkbox -->
+                <div x-show="bulkMode" style="margin-bottom:4px">
+                  <input type="checkbox" :checked="selected.includes(c.id)" @change="toggleSelect(c.id)" style="margin:0">
+                </div>
+
+                <!-- Meta row -->
+                  <div class="cc-meta">
+                  <img x-show="c.author_avatar" :src="c.author_avatar" class="cc-avatar" alt="" width="20" height="20">
+                  <span class="cc-name">
+                    <template x-if="c.author_url"><a :href="c.author_url" target="_blank" x-text="c.author_name"></a></template>
+                    <template x-if="!c.author_url"><span x-text="c.author_name"></span></template>
+                  </span>
+                  <span class="cc-badges">
+                    <span class="badge" :class="'badge-' + c.status[0]" x-text="c.status.toUpperCase().slice(0,4)"></span>
+                    <span x-show="c.comment_type === 'webmention'" class="badge badge-w">WM</span>
+                    <span x-show="c.honeypot" class="badge badge-h">H</span>
+                  </span>
+                  <span class="cc-date" x-text="c.created_at ? c.created_at.slice(0,10) : ''"></span>
+                </div>
+
+                <!-- Content -->
+                <div class="cc-body" @click="showDetail(c)" x-html="c.content || ''"></div>
+
+                <!-- Path -->
+                <div x-show="col.path" style="font-size:9px;color:#808080;margin-bottom:2px">
+                  <span x-text="c.target_path"></span>
+                  <span x-show="c.depth > 0" x-text="' · depth ' + c.depth"></span>
+                </div>
+
+                <!-- Actions: desktop only -->
+                <div class="cc-actions hide-m">
+                  <button class="btn" @click="moderate(c.id, 'approved')" :disabled="moderating.has(c.id)" style="background:#00aa00;color:#fff;border-color:#008800" x-show="c.status !== 'approved'">APPR</button>
+                  <button class="btn" @click="moderate(c.id, 'spam')" :disabled="moderating.has(c.id)" x-show="c.status !== 'spam'">SPAM</button>
+                  <button class="btn" @click="moderate(c.id, 'pending')" :disabled="moderating.has(c.id)" x-show="c.status === 'approved' || c.status === 'spam'" style="font-size:10px">UN</button>
+                  <div style="position:relative;display:inline-block">
+                    <button class="btn" @click="toggleMore(c.id)" style="font-size:10px;padding:1px 6px">⋯</button>
+                    <div x-show="moreOpen.has(c.id)" class="win col-menu" @click.outside="moreOpen.delete(c.id)" style="right:auto;left:0;top:100%;min-width:100px">
+                      <div class="cm-item" @click="showDetail(c)">DETAIL</div>
+                      <div class="cm-item" @click="moderate(c.id, 'deleted'); moreOpen.delete(c.id)" x-show="c.status !== 'deleted'" style="color:#c00">DELETE</div>
+                      <div class="cm-item" @click="moderate(c.id, 'approved'); moreOpen.delete(c.id)" x-show="c.status === 'deleted'">RESTORE</div>
+                      <div class="cm-item" @click="moderate(c.id, 'pending'); moreOpen.delete(c.id)" x-show="c.status === 'deleted'">UNDELETE</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <!-- Load more -->
+          <div x-show="hasMore" style="margin-top:3px">
+            <button class="btn" @click="loadMore" :disabled="loading" style="width:100%;padding:4px;text-align:center;font-size:10px" x-text="loading ? 'LOADING...' : 'LOAD MORE'"></button>
+          </div>
         </div>
-        <input type="text" id="ipf" placeholder="ip filter" style="width:130px;border:1px solid #ddd;border-radius:4px;padding:5px 8px">
-        <select id="sort-select" style="border:1px solid #ddd;border-radius:4px;padding:5px 8px">
-          <option value="desc">newest</option>
-          <option value="asc">oldest</option>
-          <option value="path">by path</option>
-        </select>
       </div>
-      <div class="flex items-center justify-between mb">
-        <span class="text-sm" id="rc"></span>
-      </div>
-      <div id="cl"></div>
-      <div id="lm" class="hidden mt"><button class="w-full" onclick="lm()" style="padding:8px">load more</button></div>
     </div>
   </div>
 </div>
 
-<div class="toast-container" id="tc"></div>
+<!-- Toasts -->
+<div class="toast-c">
+  <template x-for="(t, i) in toasts" :key="i">
+    <div class="toast" x-html="t.html"></div>
+  </template>
+</div>
+
+<!-- Status bar -->
+<div class="win" style="margin:4px;margin-top:8px">
+  <div class="raised-bar">
+    <span x-text="'ZAPISKA v1.0  |  ' + comments.length + ' LOADED  |  ' + paths.length + ' PATHS'"></span>
+    <span x-text="new Date().toISOString().slice(0,16).replace('T',' ')" x-init="setInterval(() => $el.textContent = new Date().toISOString().slice(0,16).replace('T',' '), 10000)"></span>
+  </div>
+</div>
+
+</div>
 
 <script>
-let cs = 'all', bf = null, ld = false, sc = {}, sv = 'desc', selPath = '';
-const A = new URLSearchParams(window.location.search).get('api') || window.location.origin;
-function ap(p) { return A + p; }
+function app() {
+  return {
+    authenticated: false, token: '', loginError: false,
+    status: 'all', pathFilter: '', ipFilter: '', sortBy: 'desc', selectedPath: '',
+    stats: { all: 0, pending: 0, approved: 0, spam: 0, deleted: 0 },
+    paths: [], comments: [], before: null, loading: false, hasMore: false,
+    moderating: new Set(), detailComment: null,
+    bulkMode: false, selected: [],
+    showPaths: true, showColMenu: false, toasts: [],
+    expanded: new Set(), swipeX: {}, moreOpen: new Set(),
+    isMobile: window.innerWidth < 769,
+    _refreshTimer: null, _debounceTimer: null,
+    apiOrigin: new URLSearchParams(window.location.search).get('api') || window.location.origin,
 
-// ── Login/out ──
-function login() {
-  const t = document.getElementById('ti').value;
-  if (!t) return;
-  document.getElementById('lb').disabled = true;
-  fetch(ap('/api/admin/login'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: t }) })
-  .then(r => {
-    document.getElementById('lb').disabled = false;
-    if (r.status === 401) { document.getElementById('le').style.display = 'block'; return Promise.reject(); }
-    if (!r.ok) return Promise.reject();
-    document.getElementById('lv').style.display = 'none';
-    document.getElementById('dv').classList.remove('hidden');
-    refreshAll();
-  })
-  .catch(() => { document.getElementById('lb').disabled = false; });
+    colDefs: { path: 1 },
+    col: { path: true },
+
+    get statItems() { return [
+      { key: 'pending', label: 'PENDING' }, { key: 'approved', label: 'APPROVED' },
+      { key: 'spam', label: 'SPAM' }, { key: 'deleted', label: 'DELETED' }, { key: 'all', label: 'TOTAL' },
+    ];},
+    get tabItems() { return [
+      { key: 'all', label: 'ALL' }, { key: 'pending', label: 'PEND' }, { key: 'approved', label: 'APPR' },
+      { key: 'spam', label: 'SPAM' }, { key: 'deleted', label: 'DEL' },
+    ];},
+    get sortedComments() {
+      const c = [...this.comments];
+      if (this.sortBy === 'asc') return c.sort((a, b) => a.id - b.id);
+      if (this.sortBy === 'path') return c.sort((a, b) => a.target_path.localeCompare(b.target_path) || b.id - a.id);
+      return c;
+    },
+
+    init() {
+      document.addEventListener('keydown', e => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+        if (e.key === 'r' || e.key === 'R') { this.refreshAll(); this.toast('REFRESHED'); }
+        if (e.key === 'b' || e.key === 'B') { this.bulkMode = !this.bulkMode; }
+        if (e.key >= '1' && e.key <= '5') this.switchTab(this.tabItems[parseInt(e.key)-1].key);
+      });
+      this.api('/api/admin/comments?status=all&limit=1').then(d => {
+        if (d) { this.authenticated = true; this.refreshAll(); this.startAutoRefresh(); }
+      });
+      this.$watch('pathFilter', () => { this.selectedPath = ''; clearTimeout(this._debounceTimer); this._debounceTimer = setTimeout(() => { this.before = null; this.fetchComments(); }, 300); });
+      this.$watch('ipFilter', () => { clearTimeout(this._debounceTimer); this._debounceTimer = setTimeout(() => { this.before = null; this.fetchComments(); }, 300); });
+      this.$watch('sortBy', () => { this.before = null; this.fetchComments(); });
+      this.$watch('bulkMode', v => { if (!v) this.selected = []; });
+    },
+
+    async api(url, opts) {
+      try { const r = await fetch(this.apiOrigin + url, { credentials: 'include', ...opts });
+        if (r.status === 401) { this.authenticated = false; return null; } return r.json().catch(() => null);
+      } catch { return null; }
+    },
+
+    async login() {
+      if (!this.token) return; this.loginError = false;
+      const r = await fetch(this.apiOrigin + '/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: this.token }) });
+      if (r.status === 401) { this.loginError = true; return; } if (!r.ok) return;
+      this.authenticated = true; this.token = ''; this.refreshAll(); this.startAutoRefresh();
+    },
+
+    logout() {
+      this.api('/api/admin/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      this.stopAutoRefresh(); this.authenticated = false; this.comments = []; this.paths = []; this.detailComment = null; this.selected = [];
+    },
+
+    async fetchStats() {
+      const results = await Promise.all(['pending','approved','spam','deleted'].map(st =>
+        this.api('/api/admin/comments?status=' + st + '&limit=1').then(d => ({ status: st, count: d && d.comments ? d.comments.length : 0 }))
+      ));
+      const stats = { all: 0 }; results.forEach(x => { stats[x.status] = x.count; stats.all += x.count; }); this.stats = stats;
+    },
+
+    async fetchPaths() { const d = await this.api('/api/admin/paths'); if (d) this.paths = d.paths || []; },
+
+    buildUrl(append) {
+      let url = '/api/admin/comments?status=' + this.status + '&limit=50';
+      if (this.selectedPath) url += '&path=' + encodeURIComponent(this.selectedPath);
+      const p = this.pathFilter;
+      if (p && !this.selectedPath) url += '&path=' + encodeURIComponent(p.endsWith('/*') ? p.slice(0,-1) + '%' : p);
+      if (this.ipFilter) url += '&ip=' + encodeURIComponent(this.ipFilter);
+      if (this.before && append) url += '&before=' + this.before;
+      return url;
+    },
+
+    async fetchComments(append) {
+      if (this.loading) return; this.loading = true;
+      const d = await this.api(this.buildUrl(append)); this.loading = false;
+      if (!d) return; const raw = d.comments || [];
+      if (append) { this.comments.push(...raw); } else { this.comments = raw; }
+      this.before = raw.length > 0 ? raw[raw.length - 1].id : null; this.hasMore = raw.length > 0;
+    },
+
+    loadMore() { this.fetchComments(true); },
+    async refreshAll() { await Promise.all([this.fetchStats(), this.fetchPaths(), this.fetchComments()]); },
+
+    startAutoRefresh() {
+      this.stopAutoRefresh();
+      this._refreshTimer = setInterval(() => {
+        if (this.status === 'pending' || this.status === 'all') { this.fetchStats(); this.fetchPaths(); this.fetchComments(); }
+      }, 10000);
+    },
+    stopAutoRefresh() { if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; } },
+
+    switchTab(status) { this.status = status; this.before = null; this.fetchComments(); this.fetchStats(); },
+    selectPath(path) { this.selectedPath = this.selectedPath === path ? '' : path; this.pathFilter = ''; this.before = null; this.fetchComments(); },
+    selectPathMobile(path) { this.selectedPath = path; this.pathFilter = ''; this.before = null; this.fetchComments(); },
+    toggleCol(k) { this.col[k] = !this.col[k]; },
+    toggleMore(id) { if (this.moreOpen.has(id)) this.moreOpen.delete(id); else this.moreOpen.add(id); },
+    showDetail(c) { this.detailComment = c; this.moreOpen.delete(c.id); },
+
+    async moderate(id, action) {
+      this.moderating.add(id);
+      const d = await this.api('/api/admin/moderate', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ id, action }) });
+      this.moderating.delete(id);
+      if (!d) return;
+      this.toast(action + ' <a @click="undo(' + id + ')">UNDO</a>');
+      this.fetchStats(); this.fetchPaths();
+      if (this.status !== 'all' && this.status !== action) { this.comments = this.comments.filter(c => c.id !== id); }
+      else { const c = this.comments.find(c => c.id === id); if (c) c.status = action; }
+      this.$nextTick(() => { this.swipeX[id] = 0; });
+    },
+
+    async undo(id) {
+      const d = await this.api('/api/admin/moderate', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ id, action:'pending' }) });
+      if (!d) return; this.toast('UNDONE'); this.fetchComments(); this.fetchStats(); this.fetchPaths();
+    },
+
+    toggleSelect(id) { const i = this.selected.indexOf(id); if (i >= 0) this.selected.splice(i, 1); else this.selected.push(id); },
+
+    async bulkAction(action) {
+      if (this.selected.length === 0) return;
+      const d = await this.api('/api/admin/moderate/batch', { method: 'POST', headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ actions: this.selected.map(id => ({ id, action })) }) });
+      if (!d) return; this.toast('BATCH ' + action + ': ' + this.selected.length);
+      this.selected = []; this.fetchComments(); this.fetchStats(); this.fetchPaths();
+    },
+
+    toast(html) { this.toasts.push({ html }); setTimeout(() => { this.toasts.shift(); }, 4000); },
+
+    // Swipe gestures
+    swipeStart(e, id) {
+      this._swipe = { id, startX: e.touches[0].clientX, currentX: e.touches[0].clientX };
+    },
+    swipeMove(e, id) {
+      if (!this._swipe || this._swipe.id !== id) return;
+      this._swipe.currentX = e.touches[0].clientX;
+      const dx = this._swipe.currentX - this._swipe.startX;
+      // Clamp: max 160px right, max -160px left
+      const clamped = Math.max(-160, Math.min(160, dx));
+      this.swipeX[id] = clamped;
+    },
+    swipeEnd(e, id) {
+      if (!this._swipe || this._swipe.id !== id) return;
+      const dx = this._swipe.currentX - this._swipe.startX;
+      const threshold = 80;
+      if (dx > threshold) {
+        // Swipe right → approve
+        this.moderate(id, 'approved');
+      } else if (dx < -threshold) {
+        // Swipe left → spam
+        this.moderate(id, 'spam');
+      }
+      // Always snap back
+      this.swipeX[id] = 0;
+      this._swipe = null;
+    },
+  };
 }
-
-function logout() {
-  fetch(ap('/api/admin/logout'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(()=>{});
-  bf = null; document.getElementById('lv').style.display = 'block'; document.getElementById('dv').classList.add('hidden');
-  document.getElementById('ti').value = ''; document.getElementById('cl').innerHTML = '';
-}
-
-document.addEventListener('DOMContentLoaded', function() {
-  document.getElementById('ti').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
-  fetch(ap('/api/admin/comments?status=all&limit=1'))
-    .then(r => { if (r.ok) { document.getElementById('lv').style.display = 'none'; document.getElementById('dv').classList.remove('hidden'); refreshAll(); } })
-    .catch(()=>{});
-});
-
-function refreshAll() { ls(); lp(); lc(); }
-
-// ── Tab clicks ──
-document.getElementById('tabs').addEventListener('click', function(e) {
-  const tab = e.target.closest('.tab');
-  if (tab) switchTab(tab.dataset.s);
-});
-
-// ── Path browser ──
-function lp() {
-  fetch(ap('/api/admin/paths')).then(r => r.json()).then(d => {
-    const paths = d.paths || [];
-    document.getElementById('path-count').textContent = paths.length + ' total';
-    document.getElementById('path-list').innerHTML = paths.map(p =>
-      '<div class="path-row' + (selPath === p.path ? ' active' : '') + '" onclick="selectPath(\'' + ea(p.path) + '\')">' +
-        '<div class="flex items-center gap"><span class="pcount">' + p.total + '</span><span class="pname">' + eh(p.path) + '</span></div>' +
-        '<div class="pmeta">' + p.approved + ' approved / ' + p.pending + ' pending / ' + p.spam + ' spam</div>' +
-      '</div>'
-    ).join('');
-  }).catch(()=>{});
-}
-
-function selectPath(path) {
-  selPath = selPath === path ? '' : path;
-  document.querySelectorAll('.path-row').forEach(r => r.classList.toggle('active', r.querySelector('.pname')?.textContent === selPath));
-  document.getElementById('pf').value = selPath;
-  bf = null; updateFilterUI(); lc();
-}
-
-function clearPathFilter() {
-  selPath = '';
-  document.getElementById('pf').value = '';
-  document.querySelectorAll('.path-row').forEach(r => r.classList.remove('active'));
-  bf = null; updateFilterUI(); lc();
-}
-
-function updateFilterUI() {
-  const pf = document.getElementById('pf');
-  const clearBtn = document.getElementById('clear-pf');
-  const hasFilter = pf.value.trim().length > 0;
-  clearBtn.classList.toggle('hidden', !hasFilter);
-  pf.classList.toggle('filter-active', hasFilter);
-}
-
-// ── Comments API ──
-function bu(a) {
-  let url = '/api/admin/comments?status=' + cs + '&limit=50';
-  const p = document.getElementById('pf').value.trim();
-  if (p) {
-    // /blog/* → LIKE '/blog/%' for prefix matching
-    const pathVal = p.endsWith('/*') ? p.slice(0, -1) + '%' : p;
-    url += '&path=' + encodeURIComponent(pathVal);
-  }
-  const ip = document.getElementById('ipf').value.trim();
-  if (ip) url += '&ip=' + encodeURIComponent(ip);
-  if (bf && a) url += '&before=' + bf;
-  return url;
-}
-
-function sortComments(c) {
-  if (sv === 'asc') return c.sort((a, b) => a.id - b.id);
-  if (sv === 'path') return c.sort((a, b) => a.target_path.localeCompare(b.target_path) || b.id - a.id);
-  return c; // desc already default from API
-}
-
-function lc(a) {
-  if (ld) return; ld = true;
-  const l = document.getElementById('cl');
-  if (!a) l.innerHTML = '<div class="spinner"></div>';
-  fetch(ap(bu(a)))
-  .then(r => { if (r.status === 401) { logout(); return null; } return r.json(); })
-  .then(d => {
-    ld = false; if (!d) return;
-    const raw = d.comments || [];
-    const comments = sortComments([...raw]);
-    if (!a) l.innerHTML = '';
-    if (comments.length === 0 && !a) {
-      l.innerHTML = '<div class="empty-state">no comments</div>';
-      document.getElementById('lm').classList.add('hidden');
-      document.getElementById('rc').textContent = '0';
-      return;
-    }
-    if (!a) l.innerHTML =
-      '<table><thead><tr><th>id</th><th>author</th><th>status</th><th>type</th><th>path</th><th>content</th><th>date</th><th>ip</th><th style="width:140px">actions</th></tr></thead><tbody></tbody></table>';
-    const tbody = l.querySelector('tbody');
-    comments.forEach(c => {
-      const tr = document.createElement('tr');
-      tr.dataset.id = c.id;
-      const au = c.author_url ? '<a href="' + ea(c.author_url) + '" target="_blank">' + eh(c.author_name) + '</a>' : eh(c.author_name);
-      const sb = '<span class="badge badge-' + eh(c.status) + '">' + eh(c.status) + '</span>';
-      const tb = c.comment_type === 'webmention' ? ' <span class="badge badge-wm">WM</span>' : '';
-      const dt = c.created_at ? c.created_at.slice(0, 10) : '';
-      const ip = c.submitter_ip || '';
-      tr.innerHTML =
-        '<td class="text-mono">' + c.id + '</td>' +
-        '<td>' + au + '</td>' +
-        '<td>' + sb + '</td>' +
-        '<td style="white-space:nowrap">' + tb + (c.depth > 0 ? ' d' + c.depth : '') + (c.honeypot ? ' <span style="color:#c00;font-size:11px">honeypot</span>' : '') + '</td>' +
-        '<td class="text-mono" style="font-size:12px;word-break:break-all">' + eh(c.target_path) + '</td>' +
-        '<td class="overflow" style="max-width:250px;font-size:13px">' + (c.content || '') + '</td>' +
-        '<td class="nowrap text-sm">' + dt + '</td>' +
-        '<td class="text-mono text-sm" style="word-break:break-all">' + ip + '</td>' +
-        '<td class="nowrap">' + actButtons(c.id, c.status) + '</td>';
-      tbody.appendChild(tr);
-    });
-    if (raw.length > 0) { bf = raw[raw.length - 1].id; document.getElementById('lm').classList.remove('hidden'); }
-    else { document.getElementById('lm').classList.add('hidden'); }
-    document.getElementById('rc').textContent = comments.length + (selPath ? ' on ' + selPath : '');
-  })
-  .catch(() => { ld = false; });
-}
-
-function lm() { lc(true); }
-let dt;
-function dl() { clearTimeout(dt); dt = setTimeout(() => { bf = null; lc(); }, 300); }
-document.getElementById('pf').addEventListener('input', function() {
-  selPath = '';
-  document.querySelectorAll('.path-row').forEach(r => r.classList.remove('active'));
-  updateFilterUI(); dl();
-});
-document.getElementById('ipf').addEventListener('input', dl);
-document.getElementById('sort-select').addEventListener('change', function() { sv = this.value; bf = null; lc(); });
-
-// ── Stats ──
-function ls() {
-  Promise.all(['pending','approved','spam','deleted'].map(st =>
-    fetch(ap('/api/admin/comments?status=' + st + '&limit=1'))
-      .then(r => r.json()).then(d => ({ status: st, count: d.comments ? d.comments.length : 0 }))
-      .catch(() => ({ status: st, count: 0 }))
-  )).then(r => {
-    sc = {}; let t = 0;
-    r.forEach(x => { sc[x.status] = x.count; t += x.count; });
-    sc.all = t;
-    document.getElementById('sb').innerHTML =
-      [['pending','pending'],['approved','approved'],['spam','spam'],['deleted','deleted'],['all','total']]
-      .map(x => '<div class="stat' + (cs === x[0] ? ' active' : '') + '" onclick="switchTab(\'' + x[0] + '\')"><div class="num">' + (sc[x[0]] ?? '-') + '</div><div class="lbl">' + x[1] + '</div></div>').join('');
-  });
-}
-
-// ── Tab switching ──
-function switchTab(status) {
-  cs = status; bf = null;
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.s === cs));
-  document.querySelectorAll('.stat').forEach(el => el.classList.remove('active'));
-  document.querySelectorAll('.stat').forEach(el => {
-    const lbl = el.querySelector('.lbl');
-    if (lbl && (lbl.textContent.toLowerCase() === cs || (cs === 'all' && lbl.textContent.toLowerCase() === 'total'))) {
-      el.classList.add('active');
-    }
-  });
-  lc(); ls();
-}
-
-// ── Action buttons ──
-function actButtons(id, status) {
-  const m = (a) => ' onclick="m(' + id + ',\'' + a + '\')"';
-  switch (status) {
-    case 'pending': return '<button' + m('approved') + '>approve</button><button' + m('spam') + '>spam</button><button' + m('deleted') + '>delete</button>';
-    case 'approved': return '<button' + m('pending') + '>unapprove</button><button' + m('spam') + '>spam</button><button' + m('deleted') + '>delete</button>';
-    case 'spam': return '<button' + m('approved') + '>approve</button><button' + m('pending') + '>unspam</button><button' + m('deleted') + '>delete</button>';
-    case 'deleted': return '<button' + m('approved') + '>restore</button><button' + m('pending') + '>undelete</button><button' + m('spam') + '>spam</button>';
-    default: return '<button' + m('approved') + '>approve</button><button' + m('spam') + '>spam</button><button' + m('deleted') + '>delete</button>';
-  }
-}
-
-function m(id, action) {
-  const el = document.querySelector('[data-id="' + id + '"]');
-  if (el) el.querySelectorAll('button').forEach(b => b.disabled = true);
-
-  // Grab the current status from the badge before it disappears
-  let oldStatus = '';
-  if (el) {
-    const badge = el.querySelector('.badge');
-    if (badge) oldStatus = badge.textContent.trim();
-  }
-
-  fetch(ap('/api/admin/moderate'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action }) })
-  .then(r => { if (r.status === 401) { logout(); return null; } return r.json(); })
-  .then(d => {
-    if (!d) return;
-    const el = document.querySelector('[data-id="' + id + '"]');
-    if (el) el.remove();
-    undoableToast(action, id, oldStatus);
-    if (document.querySelectorAll('[data-id]').length === 0) { bf = null; lc(); }
-    ls(); lp();
-  })
-  .catch(() => { if (el) el.querySelectorAll('button').forEach(b => b.disabled = false); });
-}
-
-function undoableToast(action, id, oldStatus) {
-  const c = document.getElementById('tc'), e = document.createElement('div');
-  e.className = 'toast';
-  e.innerHTML = '<span>' + action + '</span> <a href="#" style="color:#fff;font-weight:700;margin-left:12px;text-decoration:underline" onclick="undoModerate(' + id + ',\'' + oldStatus + '\',this);return false">undo</a>';
-  c.appendChild(e);
-  setTimeout(() => { if (e.parentNode) e.remove(); }, 4000);
-}
-
-function undoModerate(id, oldStatus, link) {
-  if (!oldStatus) return;
-  link.textContent = '...';
-  fetch(ap('/api/admin/moderate'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: oldStatus }) })
-  .then(r => r.json())
-  .then(d => {
-    if (!d) return;
-    const toast = link.closest('.toast');
-    if (toast) toast.remove();
-    toast('undone');
-    // Reload current view to show the restored comment
-    bf = null; lc(); ls(); lp();
-  })
-  .catch(() => { link.textContent = 'failed'; });
-}
-
-function toast(m) {
-  const c = document.getElementById('tc'), e = document.createElement('div');
-  e.className = 'toast'; e.textContent = m;
-  c.appendChild(e);
-  setTimeout(() => e.remove(), 1500);
-}
-
-function eh(s) { if (!s) return ''; return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function ea(s) { if (!s) return ''; return s.replace(/"/g,'&quot;').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 </script>
 </body>
 </html>

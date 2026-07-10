@@ -65,14 +65,14 @@ Response: 201 with `{ "delete_token": "a1b2c3d4e5f6g7h8" }`. The `delete_token` 
 Errors: 400 (validation, or Turnstile verification failure with `code: "turnstile_failed"`), 429 (rate limited), 503 (Turnstile siteverify endpoint unreachable — fail closed).
 
 Author resolution (priority order):
-1. `github_username` → GitHub API name + avatar (cached 30d)
-2. `author_url` → name from form, URL kept as-is
+1. `author_url` → form name kept, URL stored as-is
+2. `github_username` (without `author_url`) → form name kept; `author_url` set to `https://github.com/<username>`. If form name was empty, the GitHub API name is used instead.
 
 Avatar resolution (priority order, independent of name):
-1. `author_url` is a github.com URL → GitHub API avatar
-2. (webmentions feature) Fetch author's page → h-card photo → favicon
-3. `github_username` → GitHub API avatar
-4. `author_url` domain → DiceBear generated avatar (consistent per domain)
+1. Resolved `author_url` is a github.com URL → GitHub API avatar (cached 30d)
+2. (webmentions feature) Fetch resolved `author_url` page → h-card photo → favicon
+3. Raw `github_username` form field → GitHub API avatar
+4. Raw `author_url` domain → DiceBear generated avatar (consistent per domain)
 5. `github_username` → DiceBear generated avatar (consistent per user)
 6. DiceBear from a generic seed (anonymous fallback)
 

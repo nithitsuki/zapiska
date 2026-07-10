@@ -54,7 +54,7 @@ Module visibility is feature-gated: `mf2`, `ssrf`, `worker`, `webmention_post`, 
 1. POST form data to `/api/comment`.
 2. Validates fields (target_path, author_url, content length, parent_id if present).
 3. Content sanitized with ammonia.
-4. Author resolved: GitHub API (if `github_username`), h-card/favicon/DiceBear (if `author_url`), or plain name.
+4. Author resolved: form name kept; URL set to user-provided website or derived from GitHub username. Avatar resolved separately: GitHub API, h-card, favicon, DiceBear.
 5. If `parent_id` provided: parent must exist, be approved, on the same path, and depth < 4. Child depth = parent depth + 1.
 6. Row inserted with `status = 'pending'`.
 7. Admin approves/spams/deletes via `/api/admin/*`.
