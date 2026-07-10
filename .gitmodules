@@ -1,0 +1,3 @@
+[submodule "embed/win95.css"]
+	path = embed/win95.css
+	url = https://github.com/AlexBSoft/win95.css.git
