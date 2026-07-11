@@ -60,14 +60,15 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error
     let _ = conn.execute("ALTER TABLE comments ADD COLUMN submitter_ip TEXT", []);
     // Migration 5: content hash for dedup detection.
     let _ = conn.execute("ALTER TABLE comments ADD COLUMN content_hash TEXT", []);
-    // Migration 7: hash existing raw IPs stored before hashing was introduced.
+    // Migration 7: add submitter_ip_hash column and populate from existing IPs.
+    let _ = conn.execute("ALTER TABLE comments ADD COLUMN submitter_ip_hash TEXT", []);
     {
         use sha2::{Digest, Sha256};
         let secret = std::env::var("IP_HASH_SECRET")
             .ok()
             .filter(|s| !s.is_empty());
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, submitter_ip FROM comments WHERE submitter_ip IS NOT NULL AND submitter_ip NOT LIKE 'h:%'",
+            "SELECT id, submitter_ip FROM comments WHERE submitter_ip IS NOT NULL AND submitter_ip_hash IS NULL",
         ) {
             if let Ok(rows) = stmt.query_map([], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
@@ -83,7 +84,7 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error
                         let hex: String =
                             h.finalize().iter().map(|b| format!("{:02x}", b)).collect();
                         let _ = conn.execute(
-                            "UPDATE comments SET submitter_ip = ?1 WHERE id = ?2",
+                            "UPDATE comments SET submitter_ip_hash = ?1 WHERE id = ?2",
                             rusqlite::params![format!("h:{hex}"), id],
                         );
                     }

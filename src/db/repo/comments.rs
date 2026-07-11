@@ -7,8 +7,8 @@ impl CommentsRepo {
     pub async fn insert_comment(&self, input: NewComment) -> RepoResult<i64> {
         self.spawn(move |conn| {
             conn.execute(
-                "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     input.target_path,
                     input.comment_type,
@@ -23,6 +23,7 @@ impl CommentsRepo {
                     input.delete_token,
                     input.submitter_ip,
                     input.content_hash,
+                    input.submitter_ip_hash,
                 ],
             )
             .map_err(|e| RepoError::Internal(e.to_string()))?;
@@ -34,8 +35,8 @@ impl CommentsRepo {
     pub async fn upsert_by_source(&self, input: NewComment) -> RepoResult<i64> {
         self.spawn(move |conn| {
             conn.execute(
-                "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(source_url, target_path)
                  WHERE source_url IS NOT NULL
                  DO UPDATE SET
@@ -58,6 +59,7 @@ impl CommentsRepo {
                     input.delete_token,
                     input.submitter_ip,
                     input.content_hash,
+                    input.submitter_ip_hash,
                 ],
             )
             .map_err(|e| RepoError::Internal(e.to_string()))?;
@@ -76,7 +78,7 @@ impl CommentsRepo {
         self.spawn(move |conn| {
             let mut stmt = if let Some(_cursor) = before {
                 conn.prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
                      FROM comments
                      WHERE target_path = ?1 AND status = 'approved' AND id < ?2
                      ORDER BY id DESC
@@ -85,7 +87,7 @@ impl CommentsRepo {
                 .map_err(|e| RepoError::Internal(e.to_string()))?
             } else {
                 conn.prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
                      FROM comments
                      WHERE target_path = ?1 AND status = 'approved'
                      ORDER BY id DESC
@@ -171,7 +173,7 @@ impl CommentsRepo {
         self.spawn(move |conn| {
             let (sql, has_path, has_cursor) = match (&path, before) {
                 (Some(_), Some(_)) => (
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
                      FROM comments
                      WHERE status = 'pending' AND target_path = ?1 AND id < ?2
                      ORDER BY id DESC
@@ -179,7 +181,7 @@ impl CommentsRepo {
                     true, true,
                 ),
                 (Some(_), None) => (
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
                      FROM comments
                      WHERE status = 'pending' AND target_path = ?1
                      ORDER BY id DESC
@@ -187,7 +189,7 @@ impl CommentsRepo {
                     true, false,
                 ),
                 (None, Some(_)) => (
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
                      FROM comments
                      WHERE status = 'pending' AND id < ?1
                      ORDER BY id DESC
@@ -195,7 +197,7 @@ impl CommentsRepo {
                     false, true,
                 ),
                 (None, None) => (
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
                      FROM comments
                      WHERE status = 'pending'
                      ORDER BY id DESC
@@ -261,7 +263,7 @@ impl CommentsRepo {
             // Otherwise exact match (or empty = no filter).
             let mut stmt = if path_val.contains('%') {
                 conn.prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
                      FROM comments
                      WHERE (?1 = '' OR ?1 = 'all' OR status = ?1)
                        AND (?2 = '' OR target_path LIKE ?2)
@@ -273,7 +275,7 @@ impl CommentsRepo {
                 ).map_err(|e| RepoError::Internal(e.to_string()))?
             } else {
                 conn.prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
                      FROM comments
                      WHERE (?1 = '' OR ?1 = 'all' OR status = ?1)
                        AND (?2 = '' OR target_path = ?2)
@@ -373,7 +375,7 @@ impl CommentsRepo {
     pub async fn get_comment(&self, id: i64) -> RepoResult<Option<Comment>> {
         self.spawn(move |conn| {
             conn.query_row(
-                "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
                  FROM comments WHERE id = ?1",
                 params![id],
                 row_to_comment,
@@ -515,7 +517,7 @@ impl CommentsRepo {
         let source_url = source_url.to_string();
         self.spawn(move |conn| {
             conn.query_row(
-                "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash
+                "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
                  FROM comments WHERE source_url = ?1",
                 params![source_url],
                 row_to_comment,

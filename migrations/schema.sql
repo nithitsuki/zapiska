@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS comments (
     depth           INTEGER NOT NULL DEFAULT 0,
     honeypot        INTEGER NOT NULL DEFAULT 0,
     delete_token    TEXT,
-    submitter_ip    TEXT,
+    submitter_ip        TEXT,
+    submitter_ip_hash   TEXT,
     content_hash    TEXT
 );
 

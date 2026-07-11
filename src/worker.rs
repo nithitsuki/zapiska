@@ -167,6 +167,7 @@ pub async fn process_job(
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            submitter_ip_hash: None,
             content_hash: None,
         })
         .await?;

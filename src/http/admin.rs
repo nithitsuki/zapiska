@@ -150,6 +150,8 @@ pub struct PendingComment {
     pub delete_token: Option<String>,
     /// Submitter IP address (only available when STORE_IP_ADDRESS is enabled).
     pub submitter_ip: Option<String>,
+    /// SHA-256 hash of submitter IP (only available when STORE_IP_ADDRESS is enabled).
+    pub submitter_ip_hash: Option<String>,
     /// Content hash for duplicate detection.
     pub content_hash: Option<String>,
 }
@@ -191,6 +193,7 @@ pub async fn list_pending(
             honeypot: c.honeypot,
             delete_token: c.delete_token,
             submitter_ip: c.submitter_ip,
+            submitter_ip_hash: c.submitter_ip_hash,
             content_hash: c.content_hash,
             created_at: c.created_at,
         })
@@ -231,18 +234,12 @@ pub async fn list_comments(
     let status = query.status.as_deref();
     let before = query.before;
     let path = query.path.as_deref();
-    let ip = query
-        .ip
-        .as_deref()
-        .map(|raw| match raw.parse::<std::net::IpAddr>() {
-            Ok(parsed) => crate::ip_hash::hash_ip(&parsed, state.config.ip_hash_secret.as_deref()),
-            Err(_) => raw.to_string(),
-        });
+    let ip = query.ip.as_deref();
     let content_hash = query.content_hash.as_deref();
 
     let comments = state
         .repo
-        .list_comments(status, limit, before, path, ip.as_deref(), content_hash)
+        .list_comments(status, limit, before, path, ip, content_hash)
         .await?;
 
     let comments: Vec<PendingComment> = comments
@@ -262,6 +259,7 @@ pub async fn list_comments(
             honeypot: c.honeypot,
             delete_token: c.delete_token,
             submitter_ip: c.submitter_ip,
+            submitter_ip_hash: c.submitter_ip_hash,
             content_hash: c.content_hash,
             created_at: c.created_at,
         })
@@ -305,6 +303,7 @@ pub async fn get_comment(
         honeypot: c.honeypot,
         delete_token: c.delete_token,
         submitter_ip: c.submitter_ip,
+        submitter_ip_hash: c.submitter_ip_hash,
         content_hash: c.content_hash,
         created_at: c.created_at,
     };
@@ -431,17 +430,10 @@ pub async fn author_lookup(
     Query(query): Query<AuthorLookupQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let combine = query.combine.unwrap_or(false);
-    let ip = query
-        .ip
-        .as_ref()
-        .map(|raw| match raw.parse::<std::net::IpAddr>() {
-            Ok(parsed) => crate::ip_hash::hash_ip(&parsed, state.config.ip_hash_secret.as_deref()),
-            Err(_) => raw.clone(),
-        });
     let result = state
         .repo
         .lookup_author(
-            ip.as_deref(),
+            query.ip.as_deref(),
             query.author_name.as_deref(),
             query.author_url.as_deref(),
             combine,
@@ -758,6 +750,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -801,6 +794,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -820,6 +814,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -863,6 +858,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -896,6 +892,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -964,6 +961,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -1112,6 +1110,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -1131,6 +1130,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await

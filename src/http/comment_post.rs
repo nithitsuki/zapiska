@@ -188,14 +188,13 @@ pub async fn create_comment(
     let delete_token = generate_delete_token(&addr);
     let delete_token_str = delete_token.clone();
 
-    // 6. Optionally store submitter IP hash for spam analysis.
-    let submitter_ip = if state.config.store_ip_address {
-        Some(crate::ip_hash::hash_ip(
-            &addr.ip(),
-            state.config.ip_hash_secret.as_deref(),
-        ))
+    // 6. Optionally store submitter IP and hash for spam analysis.
+    let (submitter_ip, submitter_ip_hash) = if state.config.store_ip_address {
+        let raw = addr.ip().to_string();
+        let hash = crate::ip_hash::hash_ip(&addr.ip(), state.config.ip_hash_secret.as_deref());
+        (Some(raw), Some(hash))
     } else {
-        None
+        (None, None)
     };
 
     // 7. Store. Clone values needed for the webhook payload later.
@@ -220,6 +219,7 @@ pub async fn create_comment(
             honeypot: is_honeypot,
             delete_token: Some(delete_token),
             submitter_ip,
+            submitter_ip_hash,
             content_hash,
         })
         .await?;

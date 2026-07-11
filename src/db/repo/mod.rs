@@ -29,6 +29,8 @@ pub struct Comment {
     pub delete_token: Option<String>,
     /// Submitter IP address (only stored when STORE_IP_ADDRESS is enabled).
     pub submitter_ip: Option<String>,
+    /// SHA-256 hash of submitter IP (only stored when STORE_IP_ADDRESS is enabled).
+    pub submitter_ip_hash: Option<String>,
     /// SHA-256 hash of normalized content (for duplicate/spam detection).
     pub content_hash: Option<String>,
 }
@@ -52,6 +54,8 @@ pub struct NewComment {
     pub delete_token: Option<String>,
     /// Submitter IP address (only stored when STORE_IP_ADDRESS is enabled).
     pub submitter_ip: Option<String>,
+    /// SHA-256 hash of submitter IP (only stored when STORE_IP_ADDRESS is enabled).
+    pub submitter_ip_hash: Option<String>,
     /// SHA-256 hash of normalized content (for duplicate/spam detection).
     pub content_hash: Option<String>,
 }
@@ -135,7 +139,7 @@ mod webmentions;
 /// Map a SQLite row to a Comment. The SELECT column order must be:
 ///   id, target_path, comment_type, source_url, author_name, author_url,
 ///   author_avatar, content, status, created_at, updated_at, parent_id, depth,
-///   honeypot, delete_token, submitter_ip, content_hash
+///   honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
 fn row_to_comment(row: &rusqlite::Row) -> rusqlite::Result<Comment> {
     Ok(Comment {
         id: row.get(0)?,
@@ -155,6 +159,7 @@ fn row_to_comment(row: &rusqlite::Row) -> rusqlite::Result<Comment> {
         delete_token: row.get(14)?,
         submitter_ip: row.get(15)?,
         content_hash: row.get(16)?,
+        submitter_ip_hash: row.get(17)?,
     })
 }
 
@@ -194,6 +199,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -221,6 +227,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -246,6 +253,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -271,6 +279,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -290,6 +299,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -318,6 +328,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -336,6 +347,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -354,6 +366,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -384,6 +397,7 @@ mod tests {
                     honeypot: false,
                     delete_token: None,
                     submitter_ip: None,
+                    submitter_ip_hash: None,
                     content_hash: None,
                 })
                 .await
@@ -417,6 +431,7 @@ mod tests {
             honeypot: false,
             delete_token: None,
             submitter_ip: None,
+            submitter_ip_hash: None,
             content_hash: None,
         })
         .await
@@ -435,6 +450,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -460,6 +476,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -478,6 +495,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -505,6 +523,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -548,6 +567,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -568,6 +588,7 @@ mod tests {
                 honeypot: false,
                 delete_token: None,
                 submitter_ip: None,
+                submitter_ip_hash: None,
                 content_hash: None,
             })
             .await
@@ -595,6 +616,7 @@ mod tests {
                     honeypot: false,
                     delete_token: None,
                     submitter_ip: None,
+                    submitter_ip_hash: None,
                     content_hash: None,
                 })
                 .await
