@@ -20,7 +20,7 @@ ipnet = { version = "2.12", optional = true }
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.34.0"
 reqwest = { version = "0.13.4", features = ["json", "form"] }
-rusqlite = "0.39"
+rusqlite = { version = "0.39", features = ["bundled"] }
 scraper = { version = "0.27.0", optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
