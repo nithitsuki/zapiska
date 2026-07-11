@@ -143,7 +143,7 @@ Response (200): `Set-Cookie: admin_token=; Path=/; Max-Age=0` + `{ "success": tr
 
 ## Admin
 
-All admin endpoints return comment objects with these fields: `id`, `target_path`, `comment_type`, `source_url`, `author_name`, `author_url`, `author_avatar`, `content`, `status`, `parent_id`, `depth`, `honeypot`, `delete_token`, `submitter_ip`, `content_hash`, `created_at`.
+All admin endpoints return comment objects with these fields: `id`, `target_path`, `comment_type`, `source_url`, `author_name`, `author_url`, `author_avatar`, `content`, `status`, `parent_id`, `depth`, `honeypot`, `delete_token`, `submitter_ip` (SHA-256 hash, prefix `h:`), `content_hash`, `created_at`.
 
 ### GET /api/admin/pending
 
@@ -174,7 +174,7 @@ Response (200):
       "depth": 0,
       "honeypot": false,
       "delete_token": null,
-      "submitter_ip": "192.168.1.1",
+       "submitter_ip": "h:ab12cd34ef56...",
       "created_at": "2026-07-03T17:00:00"
     }
   ]
@@ -195,7 +195,7 @@ List comments by status, with optional path and IP filters.
 | `limit` | int | 50 | Max results (clamped 1-100). |
 | `before` | int | — | Cursor. |
 | `path` | string | — | Filter by target_path. |
-| `ip` | string | — | Filter by submitter IP address (requires `STORE_IP_ADDRESS=true`). |
+| `ip` | string | — | Filter by submitter IP address (requires `STORE_IP_ADDRESS=true`). Enter the raw IP — it is SHA-256 hashed before the DB lookup. |
 | `content_hash` | string | — | Filter by content hash (for duplicate detection). |
 
 Response (200): Same shape as `/api/admin/pending`. Each comment includes all fields plus `content_hash`.

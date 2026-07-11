@@ -29,6 +29,10 @@ pub struct Config {
     /// Disabled by default for privacy. Set to "true" to enable IP-based
     /// spam analysis in moderation scripts.
     pub store_ip_address: bool,
+    /// Secret salt used when hashing IP addresses with SHA-256.
+    /// When set, the salt is mixed into the hash to prevent rainbow table
+    /// attacks. Only used when `store_ip_address` is also enabled.
+    pub ip_hash_secret: Option<String>,
     /// Optional URL of an external moderation webhook. When set, zapiska
     /// POSTs the full comment data to this URL after every submission.
     /// The external service can use the admin API for additional context
@@ -206,6 +210,7 @@ impl Config {
                 .unwrap_or(10);
 
         let store_ip_address = env_or_default("STORE_IP_ADDRESS", "false") == "true";
+        let ip_hash_secret = env::var("IP_HASH_SECRET").ok().filter(|s| !s.is_empty());
 
         let moderation_webhook_url = env::var("MODERATION_WEBHOOK_URL")
             .ok()
@@ -282,6 +287,7 @@ impl Config {
             max_comments_per_ip_per_day,
             max_webmentions_per_domain_per_hour,
             store_ip_address,
+            ip_hash_secret,
             moderation_webhook_url,
             moderation_webhook_mode,
             default_comment_status,
@@ -333,6 +339,7 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 max_comments_per_ip_per_day: {}, \
                 max_webmentions_per_domain_per_hour: {}, \
                 store_ip_address: {}, \
+                ip_hash_secret: {}, \
                 moderation_webhook_url: {}, \
                 moderation_webhook_mode: {}, \
                 default_comment_status: {}, \
@@ -364,6 +371,11 @@ impl std::fmt::Display for RedactedConfig<'_> {
             self.0.max_comments_per_ip_per_day,
             self.0.max_webmentions_per_domain_per_hour,
             self.0.store_ip_address,
+            if self.0.ip_hash_secret.is_some() {
+                "***"
+            } else {
+                "(unset)"
+            },
             self.0
                 .moderation_webhook_url
                 .as_deref()
@@ -420,6 +432,7 @@ mod tests {
                 "MAX_COMMENTS_PER_IP_PER_DAY",
                 "MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR",
                 "STORE_IP_ADDRESS",
+                "IP_HASH_SECRET",
                 "MODERATION_WEBHOOK_URL",
                 "MODERATION_WEBHOOK_MODE",
                 "DEFAULT_COMMENT_STATUS",
@@ -701,6 +714,7 @@ mod tests {
             max_comments_per_ip_per_day: 50,
             max_webmentions_per_domain_per_hour: 10,
             store_ip_address: false,
+            ip_hash_secret: None,
             moderation_webhook_url: None,
             moderation_webhook_mode: "async".to_string(),
             default_comment_status: "pending".to_string(),

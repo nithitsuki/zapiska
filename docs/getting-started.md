@@ -108,7 +108,7 @@ Recommended but optional:
 | Variable | Why |
 |---|---|
 | `GITHUB_TOKEN` | Raises the GitHub API rate limit from 60/hr to 5000/hr when commenters supply a `github_username`. No scopes needed. |
-| `STORE_IP_ADDRESS=true` | Lets your moderation logic do IP-based reputation. Off by default for privacy. |
+| `STORE_IP_ADDRESS=true` | Lets your moderation logic do IP-based reputation. Off by default for privacy. IPs are SHA-256 hashed before storage — raw IPs never touch disk. |
 | `DEFAULT_COMMENT_STATUS` | `pending` (safe, manual review) or `approved` (immediate, your engine reverts spam later). |
 
 Full list: [deployment.md](deployment.md). The `.env.example` file is the canonical commented reference.

@@ -5,6 +5,7 @@
 !.github/
 !.github/**
 !README.md
+!SPEC.md
 !Cargo.toml
 !Cargo.lock
 !src/

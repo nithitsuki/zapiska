@@ -35,6 +35,7 @@ async fn start_server() -> (String, AppState) {
         max_comments_per_ip_per_day: 50,
         max_webmentions_per_domain_per_hour: 10,
         store_ip_address: false,
+        ip_hash_secret: None,
         moderation_webhook_url: None,
         moderation_webhook_mode: "async".to_string(),
         default_comment_status: "pending".to_string(),

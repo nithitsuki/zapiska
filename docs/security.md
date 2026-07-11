@@ -55,6 +55,14 @@ The form field name (`cf-turnstile-response`) matches the widget's automatic hid
 
 `RequestBodyLimitLayer` rejects bodies over `MAX_BODY_SIZE` (default 8192 bytes) with 413.
 
+### Submitter IP privacy
+
+When `STORE_IP_ADDRESS=true`, submitter IPs are **SHA-256 hashed** before they're written to the SQLite database — the raw IP never touches disk. The hash is deterministic (same IP always produces the same hash), so it can still be used for spam reputation, but the original address cannot be recovered from the stored data.
+
+An optional `IP_HASH_SECRET` salt can be set to prevent rainbow table attacks. When set, the salt is mixed into the hash — even if the secret is later compromised, previously stored hashes cannot be reversed.
+
+The in-memory rate limiter (`tower_governor` and per-IP daily caps) still operates on raw IPs, which are only held in RAM and are never persisted.
+
 ### CORS
 
 `ALLOWED_CORS_ORIGIN` accepts a single origin, comma-separated list, or `*`.

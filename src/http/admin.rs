@@ -231,12 +231,18 @@ pub async fn list_comments(
     let status = query.status.as_deref();
     let before = query.before;
     let path = query.path.as_deref();
-    let ip = query.ip.as_deref();
+    let ip = query
+        .ip
+        .as_deref()
+        .map(|raw| match raw.parse::<std::net::IpAddr>() {
+            Ok(parsed) => crate::ip_hash::hash_ip(&parsed, state.config.ip_hash_secret.as_deref()),
+            Err(_) => raw.to_string(),
+        });
     let content_hash = query.content_hash.as_deref();
 
     let comments = state
         .repo
-        .list_comments(status, limit, before, path, ip, content_hash)
+        .list_comments(status, limit, before, path, ip.as_deref(), content_hash)
         .await?;
 
     let comments: Vec<PendingComment> = comments
@@ -425,10 +431,17 @@ pub async fn author_lookup(
     Query(query): Query<AuthorLookupQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let combine = query.combine.unwrap_or(false);
+    let ip = query
+        .ip
+        .as_ref()
+        .map(|raw| match raw.parse::<std::net::IpAddr>() {
+            Ok(parsed) => crate::ip_hash::hash_ip(&parsed, state.config.ip_hash_secret.as_deref()),
+            Err(_) => raw.clone(),
+        });
     let result = state
         .repo
         .lookup_author(
-            query.ip.as_deref(),
+            ip.as_deref(),
             query.author_name.as_deref(),
             query.author_url.as_deref(),
             combine,

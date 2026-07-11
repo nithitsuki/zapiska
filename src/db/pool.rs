@@ -60,6 +60,38 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error
     let _ = conn.execute("ALTER TABLE comments ADD COLUMN submitter_ip TEXT", []);
     // Migration 5: content hash for dedup detection.
     let _ = conn.execute("ALTER TABLE comments ADD COLUMN content_hash TEXT", []);
+    // Migration 7: hash existing raw IPs stored before hashing was introduced.
+    {
+        use sha2::{Digest, Sha256};
+        let secret = std::env::var("IP_HASH_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id, submitter_ip FROM comments WHERE submitter_ip IS NOT NULL AND submitter_ip NOT LIKE 'h:%'",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    let (id, raw) = row;
+                    if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+                        let mut h = Sha256::new();
+                        h.update(ip.to_string().as_bytes());
+                        if let Some(ref s) = secret {
+                            h.update(s.as_bytes());
+                        }
+                        let hex: String =
+                            h.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+                        let _ = conn.execute(
+                            "UPDATE comments SET submitter_ip = ?1 WHERE id = ?2",
+                            rusqlite::params![format!("h:{hex}"), id],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Migration 6: extracted URLs for cross-comment tracking.
     let _ = conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS comment_urls (

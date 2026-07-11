@@ -5,6 +5,7 @@ pub mod db;
 pub mod error;
 pub mod github;
 pub mod http;
+pub mod ip_hash;
 #[cfg(feature = "webmentions")]
 pub mod mf2;
 pub mod openapi;

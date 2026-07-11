@@ -188,9 +188,12 @@ pub async fn create_comment(
     let delete_token = generate_delete_token(&addr);
     let delete_token_str = delete_token.clone();
 
-    // 6. Optionally store submitter IP for spam analysis.
+    // 6. Optionally store submitter IP hash for spam analysis.
     let submitter_ip = if state.config.store_ip_address {
-        Some(addr.ip().to_string())
+        Some(crate::ip_hash::hash_ip(
+            &addr.ip(),
+            state.config.ip_hash_secret.as_deref(),
+        ))
     } else {
         None
     };

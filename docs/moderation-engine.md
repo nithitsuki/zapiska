@@ -37,8 +37,11 @@ ADMIN_TOKEN="your-secret-token"
 # Notify your engine when new comments arrive
 MODERATION_WEBHOOK_URL="http://localhost:9000/webhook"
 
-# Enable IP storage for spam analysis
+# Enable IP storage for spam analysis (SHA-256 hashed before storage — raw IP never touches disk)
 STORE_IP_ADDRESS=true
+
+# Optional: salt the IP hash to prevent rainbow table attacks
+# IP_HASH_SECRET=your-random-secret
 
 # Default status for new comments
 # "pending" = manual review required (safe default)
@@ -62,7 +65,7 @@ When a comment is submitted and `MODERATION_WEBHOOK_URL` is configured, zapiska 
   "honeypot": false,
   "parent_id": null,
   "depth": 0,
-  "submitter_ip": "203.0.113.42",
+  "submitter_ip": "h:ab12cd34ef567890...",
   "delete_token": "a1b2c3d4e5f6g7h8",
   "admin_url": "/api/admin/comments/42"
 }
@@ -228,7 +231,8 @@ def moderate_comment(comment):
     if comment.get("honeypot"):
         return "spam"
 
-    # Rule: IP with history of spam → spam
+    # Rule: submitter with history of spam → spam
+    # (submitter_ip is a SHA-256 hash — the stored value is used directly for lookups)
     ip = comment.get("submitter_ip")
     if ip:
         resp = requests.get(
