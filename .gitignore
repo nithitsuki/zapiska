@@ -18,6 +18,8 @@
 !tests/**
 !docs/
 !docs/**
+!deploy/
+!deploy/**
 !.skills/
 !.skills/**
 !Dockerfile

@@ -90,9 +90,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Point bundled sqlite at the cross compiler (aarch64)
+      - name: Cross-compiler env for bundled sqlite (aarch64)
+        # CC_* drives C build scripts (sqlite); -Clinker bypasses rustc's
+        # host-lld shim, which can't link aarch64 objects. Verified locally
+        # with the resulting binary booting under qemu-aarch64.
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+        run: |
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Clinker=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
       - name: Package

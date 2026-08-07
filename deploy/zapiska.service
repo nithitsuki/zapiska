@@ -1,0 +1,48 @@
+# zapiska systemd service template (bare-metal, no container)
+#
+# Layout conventions (adjust paths to taste):
+#   binary:      /opt/zapiska/zapiska
+#   environment: /etc/zapiska/zapiska.env   (copy .env.example, fill in)
+#
+# Install:
+#   sudo useradd -r -d /opt/zapiska -s /usr/sbin/nologin zapiska
+#   sudo install -d -o zapiska -g zapiska /opt/zapiska /etc/zapiska
+#   sudo cp target/release/zapiska /opt/zapiska/
+#   sudo cp .env.example /etc/zapiska/zapiska.env
+#   sudo $EDITOR /etc/zapiska/zapiska.env      # set ADMIN_TOKEN, origins
+#   sudo cp deploy/zapiska.service /etc/systemd/system/zapiska.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now zapiska
+#
+# The server binds 127.0.0.1:3000 by default — put a reverse proxy
+# (nginx / Caddy / Traefik) in front of it for TLS.
+
+[Unit]
+Description=zapiska comment server
+Documentation=https://github.com/nithitsuki/zapiska
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zapiska
+Group=zapiska
+WorkingDirectory=/opt/zapiska
+EnvironmentFile=/etc/zapiska/zapiska.env
+
+ExecStart=/opt/zapiska/zapiska
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/zapiska
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

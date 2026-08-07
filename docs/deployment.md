@@ -60,27 +60,24 @@ server {
 }
 ```
 
-## systemd service
+## systemd service (bare-metal)
 
-```ini
-[Unit]
-Description=zapiska comment server
-After=network.target
+Ready-made template: [`deploy/zapiska.service`](../deploy/zapiska.service).
+Conventions: binary at `/opt/zapiska/zapiska`, env at `/etc/zapiska/zapiska.env`.
 
-[Service]
-Type=simple
-User=zapiska
-WorkingDirectory=/opt/zapiska
-EnvironmentFile=/opt/zapiska/.env
-ExecStart=/opt/zapiska/zapiska
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
+```sh
+sudo useradd -r -d /opt/zapiska -s /usr/sbin/nologin zapiska
+sudo install -d -o zapiska -g zapiska /opt/zapiska /etc/zapiska
+sudo cp target/release/zapiska /opt/zapiska/
+sudo cp .env.example /etc/zapiska/zapiska.env
+sudo $EDITOR /etc/zapiska/zapiska.env      # set ADMIN_TOKEN, origins
+sudo cp deploy/zapiska.service /etc/systemd/system/zapiska.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now zapiska
+sudo journalctl -u zapiska -f              # watch the logs
 ```
 
-Environment file (`/opt/zapiska/.env`) — see [.env.example](../.env.example) for the full list:
+Environment file (`/etc/zapiska/zapiska.env`) — see [.env.example](../.env.example) for the full list:
 
 ```
 ADMIN_TOKEN=your-secret-here
@@ -89,6 +86,23 @@ PUBLIC_TARGET_ORIGIN=https://your-site.example
 ALLOWED_CORS_ORIGIN=https://your-site.example
 DATABASE_PATH=/opt/zapiska/comments.db
 RUST_LOG=info
+```
+
+## OpenRC service (Alpine / Gentoo)
+
+Ready-made template: [`deploy/zapiska.openrc`](../deploy/zapiska.openrc).
+
+```sh
+adduser -S -h /opt/zapiska zapiska
+install -d -o zapiska -g zapiska /opt/zapiska /etc/zapiska
+cp target/release/zapiska /opt/zapiska/
+cp .env.example /etc/zapiska/zapiska.env
+vi /etc/zapiska/zapiska.env                # set ADMIN_TOKEN, origins
+cp deploy/zapiska.openrc /etc/init.d/zapiska
+chmod +x /etc/init.d/zapiska
+rc-update add zapiska default
+rc-service zapiska start
+rc-service zapiska status
 ```
 
 ## Docker (recommended)
@@ -132,6 +146,29 @@ Updating: `git pull && docker compose up -d --build`.
 The container runs as a non-root user (`appuser`), stores SQLite under
 `/data` (a named volume), and binds to `127.0.0.1:3000` on the host by
 default — put it behind a reverse proxy that handles TLS.
+
+### Pre-built images on GHCR
+
+On every `v*` tag, CI builds a multi-arch image (`linux/amd64`,
+`linux/arm64`) and pushes it to **GitHub Container Registry**:
+
+```
+ghcr.io/<owner>/zapiska:<version>     # e.g. ghcr.io/nithitsuki/zapiska:v0.1.0
+ghcr.io/<owner>/zapiska:<major>.<minor>
+ghcr.io/<owner>/zapiska:latest
+```
+
+Usage:
+
+```sh
+docker pull ghcr.io/nithitsuki/zapiska:v0.1.0
+docker run -d -p 3000:3000 -e ADMIN_TOKEN=your-secret \
+  -v zapiska-data:/data ghcr.io/nithitsuki/zapiska:v0.1.0
+```
+
+- For **public** repos the images are pullable anonymously — no login needed.
+- For **private** repos, log in first: `echo $GITHUB_TOKEN | docker login ghcr.io -u <user> --password-stdin`.
+- Images only exist **after a release tag is pushed** — `docker compose up` builds from source instead, which always works.
 
 ## SQLite
 
@@ -227,7 +264,19 @@ curl -b cookies.txt -X POST \
 ```sh
 git pull
 cargo build --release
+
+# systemd
 sudo systemctl restart zapiska
+
+# OpenRC
+sudo rc-service zapiska restart
+
+# Docker
+docker compose up -d --build
+
+# Pre-built image (tagged releases only)
+docker pull ghcr.io/<owner>/zapiska:latest
+docker compose up -d   # or: docker run with the image above
 ```
 
 Schema migrations are idempotent and run automatically on startup.

@@ -1,0 +1,40 @@
+#!/sbin/openrc-run
+# zapiska OpenRC init script template (Alpine / Gentoo / other OpenRC distros)
+#
+# Layout conventions (adjust paths to taste):
+#   binary:      /opt/zapiska/zapiska
+#   environment: /etc/zapiska/zapiska.env   (copy .env.example, fill in)
+#
+# Install:
+#   adduser -S -h /opt/zapiska zapiska
+#   install -d -o zapiska -g zapiska /opt/zapiska /etc/zapiska
+#   cp target/release/zapiska /opt/zapiska/
+#   cp .env.example /etc/zapiska/zapiska.env
+#   vi /etc/zapiska/zapiska.env                # set ADMIN_TOKEN, origins
+#   cp deploy/zapiska.openrc /etc/init.d/zapiska
+#   chmod +x /etc/init.d/zapiska
+#   rc-update add zapiska default
+#   rc-service zapiska start
+
+name="zapiska"
+description="zapiska comment server"
+
+command="/opt/zapiska/zapiska"
+command_user="zapiska:zapiska"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+# Source the environment file and export every variable it defines.
+# Override the location with ZAPISKA_ENV_FILE when starting the service:
+#   ZAPISKA_ENV_FILE=/custom/path.env rc-service zapiska start
+: "${ZAPISKA_ENV_FILE:=/etc/zapiska/zapiska.env}"
+if [ -f "$ZAPISKA_ENV_FILE" ]; then
+    set -a
+    . "$ZAPISKA_ENV_FILE"
+    set +a
+fi
+
+depend() {
+    need net
+    after firewall
+}
