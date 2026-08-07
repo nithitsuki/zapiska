@@ -53,6 +53,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [lint, test, test-comments-only]
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
     strategy:
