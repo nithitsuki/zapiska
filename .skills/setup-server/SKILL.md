@@ -1,217 +1,149 @@
-# Skill: Set up zapiska server
+# Skill: deploy the zapiska server
 
-Use this skill when the user wants to deploy and run a zapiska instance.
-zapiska is a Rust + SQLite self-hosted comment engine. This skill covers
-Docker, pre-built binary, or build-from-source deployment behind a reverse
-proxy with TLS.
+Use this skill when a user wants to deploy zapiska.
 
-## Before you start
+The skill covers Docker, a release binary, and a source build.
 
-Confirm (or ask for):
+## Ask before you start
 
-- The main site origin, e.g. `https://your-site.example`
-- The subdomain for zapiska, e.g. `https://comments.your-site.example`
-- Whether the user prefers Docker, a pre-built binary, or building from source
-- Whether the server has a public IP and a reverse proxy (nginx/Caddy/Traefik)
+Confirm these values:
 
-## Step 1: Prepare the host
+- Main site origin.
+- zapiska origin.
+- Deployment method.
+- Reverse proxy and TLS plan.
 
-Requirements:
+Do not ask for a secret in chat. Tell the user where to set it.
 
-- Linux server with a public IP (a $5 VPS is fine)
-- The subdomain A/AAAA record pointing at the server
-- A reverse proxy that can terminate TLS
-- Rust 1.85+ (if building from source) or Docker (if using containers)
+## Prepare the host
 
-Generate a strong admin token:
+The host needs:
+
+- Linux or a compatible container host.
+- A DNS record for the zapiska origin.
+- A TLS reverse proxy for a public deployment.
+- Rust 1.85 or later for a source build, or Docker.
+
+Create an admin token:
 
 ```sh
 openssl rand -base64 32
 ```
 
-## Step 2: Get the code
+## Docker path
 
-Clone the repository:
+Run these commands in the repository:
 
 ```sh
-git clone https://github.com/nithitsuki/zapiska.git
-cd zapiska
+cp .env.example .env
+$EDITOR .env
+docker compose up -d --build
+curl http://127.0.0.1:3000/healthz
 ```
 
-## Step 3: Choose and execute a deployment path
+Set at least:
 
-### Path A: Docker (recommended for most users)
+```env
+ADMIN_TOKEN=replace-this-value
+PUBLIC_TARGET_ORIGIN=https://your-site.example
+ALLOWED_CORS_ORIGIN=https://your-site.example
+```
 
-1. Copy the example files:
+The compose file sets the container listen address to `0.0.0.0:3000`.
+It stores the database in the `zapiska-data` volume.
 
-   ```sh
-   cp docker-compose-example.yml docker-compose.yml
-   cp .env.example .env
-   ```
+## Source path
 
-2. Edit `.env` and `docker-compose.yml`. Set at minimum:
+Build the default binary:
 
-   - `ADMIN_TOKEN` — the token generated in Step 1
-   - `PUBLIC_TARGET_ORIGIN=https://your-site.example`
-   - `ALLOWED_CORS_ORIGIN=https://your-site.example`
+```sh
+cargo build --release
+```
 
-3. Build and start:
+Build without webmention support:
 
-   ```sh
-   docker compose up -d --build
-   ```
+```sh
+cargo build --release --no-default-features --features comments
+```
 
-4. Verify the container is running and the health endpoint responds:
+Copy the binary to `/opt/zapiska/`.
+Create `/etc/zapiska/zapiska.env` from `.env.example`.
 
-   ```sh
-   curl http://127.0.0.1:3000/healthz
-   # -> ok
-   ```
+The bundled SQLite feature means that system SQLite headers are not required.
 
-### Path B: Build from source
+## Release binary path
 
-1. Install dependencies:
+Download the archive for the target platform from the GitHub release.
+Copy the binary to `/opt/zapiska/`.
+Create `/etc/zapiska/zapiska.env`.
 
-   ```sh
-   # Debian/Ubuntu
-   sudo apt-get install -y libsqlite3-dev pkg-config
-   ```
+## Reverse proxy
 
-2. Build:
-
-   ```sh
-   cargo build --release
-   ```
-
-3. Copy the binary to a permanent location (e.g. `/opt/zapiska/zapiska`) and
-   create an `.env` file with the required variables.
-
-4. Run manually for a quick check:
-
-   ```sh
-   ./target/release/zapiska
-   ```
-
-5. Stop the manual process and proceed to create a systemd service (Step 5).
-
-### Path C: Pre-built binary
-
-If a release binary is available for the target architecture, download it,
-place it in `/opt/zapiska/`, create an `.env` file, and continue with Step 5.
-
-## Step 4: Configure environment variables
-
-Required:
-
-| Variable | Example |
-|---|---|
-| `ADMIN_TOKEN` | output of `openssl rand -base64 32` |
-| `PUBLIC_TARGET_ORIGIN` | `https://your-site.example` |
-| `ALLOWED_CORS_ORIGIN` | `https://your-site.example` |
-| `DATABASE_PATH` | `/opt/zapiska/comments.db` (or `/data/comments.db` in Docker) |
-
-Recommended optional variables:
-
-- `GITHUB_TOKEN` — raises GitHub API rate limit for avatar lookup
-- `STORE_IP_ADDRESS=true` — enables IP-based moderation signals
-- `TURNSTILE_ENABLED=true` + `TURNSTILE_SECRET_KEY` — bot protection
-
-Full reference: `docs/deployment.md` and `.env.example`.
-
-## Step 5: Put it behind a reverse proxy
-
-The server listens on `127.0.0.1:3000` by default. It expects TLS to be
-terminated upstream.
-
-### nginx
+The bare-metal default is `127.0.0.1:3000`.
+Terminate TLS in the proxy.
 
 ```nginx
-server {
-    listen 443 ssl http2;
-    server_name comments.your-site.example;
-
-    ssl_certificate     /etc/letsencrypt/live/comments.your-site.example/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/comments.your-site.example/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-
-server {
-    listen 80;
-    server_name comments.your-site.example;
-    return 301 https://$host$request_uri;
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Real-IP $remote_addr;
 }
 ```
 
-### Caddy
+The rate limiter uses the TCP peer address. A proxy can make many visitors
+share one address.
 
-```caddy
-comments.your-site.example {
-    reverse_proxy 127.0.0.1:3000
-}
-```
+## systemd
 
-## Step 6: Systemd service (non-Docker deployments)
+Use `deploy/zapiska.service`.
+It expects:
 
-Create `/etc/systemd/system/zapiska.service`:
-
-```ini
-[Unit]
-Description=zapiska comment server
-After=network.target
-
-[Service]
-Type=simple
-User=zapiska
-WorkingDirectory=/opt/zapiska
-EnvironmentFile=/opt/zapiska/.env
-ExecStart=/opt/zapiska/zapiska
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then:
+- Binary at `/opt/zapiska/zapiska`.
+- Environment at `/etc/zapiska/zapiska.env`.
 
 ```sh
+sudo useradd -r -d /opt/zapiska -s /usr/sbin/nologin zapiska
+sudo install -d -o zapiska -g zapiska /opt/zapiska /etc/zapiska
+sudo cp target/release/zapiska /opt/zapiska/
+sudo cp .env.example /etc/zapiska/zapiska.env
+sudo cp deploy/zapiska.service /etc/systemd/system/zapiska.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now zapiska
-sudo journalctl -u zapiska -f
 ```
 
-## Step 7: Validate
+## OpenRC
 
-From any shell that can reach the server:
+Use `deploy/zapiska.openrc`.
 
 ```sh
-export ADMIN_TOKEN=your-token-here
-curl https://comments.your-site.example/healthz
-# -> ok
-
-curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://comments.your-site.example/api/admin/pending
-# -> {"comments":[]}
-
-curl 'https://comments.your-site.example/api/comments?path=/'
-# -> {"total":0,"comments":[]}
+adduser -S -h /opt/zapiska zapiska
+install -d -o zapiska -g zapiska /opt/zapiska /etc/zapiska
+cp target/release/zapiska /opt/zapiska/
+cp .env.example /etc/zapiska/zapiska.env
+cp deploy/zapiska.openrc /etc/init.d/zapiska
+chmod +x /etc/init.d/zapiska
+rc-update add zapiska default
+rc-service zapiska start
 ```
 
-Interactive API docs are at `/swagger-ui/`.
+## Validate
 
-## Troubleshooting
+```sh
+curl https://comments.your-site.example/healthz
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  https://comments.your-site.example/api/admin/pending
+curl 'https://comments.your-site.example/api/comments?path=/'
+```
 
-- **Config error at startup**: ensure `ADMIN_TOKEN` is set and non-empty.
-- **CORS errors in browser**: `ALLOWED_CORS_ORIGIN` must exactly match the
-  main site's origin (scheme + host + port).
-- **Database permission denied**: ensure the `zapiska` user owns the
-  `DATABASE_PATH` directory (non-Docker) or the named volume is writable
-  (Docker).
-- **TLS errors**: verify the reverse proxy serves a valid certificate for
-  `comments.your-site.example`.
+Open `/swagger-ui/` to view the interactive API page.
+
+## Troubleshoot
+
+- Startup fails when `ADMIN_TOKEN` is empty or missing.
+- Browser CORS needs an exact origin in `ALLOWED_CORS_ORIGIN`.
+- A reply needs `MAX_THREAD_DEPTH` above `0`.
+- Database writes need a writable `DATABASE_PATH` directory.
+- A public deployment needs a valid TLS certificate.
+
+See `docs/getting-started.md` and `docs/deployment.md` for more detail.

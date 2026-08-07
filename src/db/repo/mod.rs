@@ -1,11 +1,13 @@
 use super::RepoError;
 use super::pool::SqlitePool;
 
+use serde::{Deserialize, Serialize};
+
 type RepoResult<T> = Result<T, RepoError>;
 
 // ── Data types ──────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Comment {
     pub id: i64,
     pub target_path: String,
@@ -60,7 +62,7 @@ pub struct NewComment {
     pub content_hash: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebmentionSeen {
     pub source: String,
     pub target: String,
@@ -75,7 +77,7 @@ pub struct NewWebmentionSeen {
     pub last_status: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GithubProfile {
     pub login: String,
     pub name: Option<String>,
@@ -131,8 +133,12 @@ impl Repo {
 
 mod comments;
 mod github_profiles;
+mod reactions;
 mod urls;
 mod webmentions;
+
+pub use reactions::{CommentReaction, ReactionWithComment};
+pub use urls::{CommentUrl, UrlCommentRef, UrlStats};
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -413,6 +419,50 @@ mod tests {
         assert_eq!(page2.len(), 2);
         assert_eq!(page2[0].id, 3);
         assert_eq!(page2[1].id, 2);
+    }
+
+    #[tokio::test]
+    async fn list_approved_oldest_ascending_with_after_cursor() {
+        let (repo, _dir) = setup_repo();
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let id = repo
+                .insert_comment(NewComment {
+                    target_path: "/oldest".to_string(),
+                    comment_type: "native".to_string(),
+                    source_url: None,
+                    author_name: format!("User{i}"),
+                    author_url: None,
+                    author_avatar: None,
+                    content: format!("comment {i}"),
+                    parent_id: None,
+                    depth: 0,
+                    honeypot: false,
+                    delete_token: None,
+                    submitter_ip: None,
+                    submitter_ip_hash: None,
+                    content_hash: None,
+                })
+                .await
+                .unwrap();
+            repo.update_status(id, "approved").await.unwrap();
+            ids.push(id);
+        }
+        // Ascending order: oldest (smallest id) first.
+        let page = repo.list_approved_oldest("/oldest", 2, None).await.unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id, 1);
+        assert_eq!(page[1].id, 2);
+        // After-cursor: id > 2 → next two.
+        let page2 = repo
+            .list_approved_oldest("/oldest", 2, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2[0].id, 3);
+        assert_eq!(page2[1].id, 4);
+        // Only approved comments are returned.
+        let _ = ids;
     }
 
     #[tokio::test]
@@ -713,5 +763,153 @@ mod tests {
         let (repo, _dir) = setup_repo();
         let profile = repo.get_github_profile("nobody").await.unwrap();
         assert!(profile.is_none());
+    }
+
+    // ── Reaction tests ──
+
+    async fn seed_approved(repo: &Repo) -> i64 {
+        let id = repo
+            .insert_comment(NewComment {
+                target_path: "/react".to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "Alice".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "hi".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        repo.update_status(id, "approved").await.unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn reaction_upsert_new_change_and_noop() {
+        let (repo, _dir) = setup_repo();
+        let comment_id = seed_approved(&repo).await;
+
+        // New reaction → pending, changed.
+        let (id, changed) = repo
+            .upsert_reaction(comment_id, "👍", "h:abc")
+            .await
+            .unwrap();
+        assert!(changed);
+        let reaction = repo.get_reaction(id).await.unwrap().unwrap();
+        assert_eq!(reaction.status, "pending");
+        assert_eq!(reaction.reaction, "👍");
+
+        // Same reaction again → no-op, moderation state preserved.
+        let (id2, changed) = repo
+            .upsert_reaction(comment_id, "👍", "h:abc")
+            .await
+            .unwrap();
+        assert_eq!(id, id2);
+        assert!(!changed);
+
+        // Change emoji → update + reset to pending.
+        let (id3, changed) = repo
+            .upsert_reaction(comment_id, "❤️", "h:abc")
+            .await
+            .unwrap();
+        assert_eq!(id, id3);
+        assert!(changed);
+        let reaction = repo.get_reaction(id).await.unwrap().unwrap();
+        assert_eq!(reaction.reaction, "❤️");
+        assert_eq!(reaction.status, "pending");
+
+        // After approval, re-clicking the same emoji keeps it approved.
+        repo.update_reaction_status(id, "approved").await.unwrap();
+        let (_, changed) = repo
+            .upsert_reaction(comment_id, "❤️", "h:abc")
+            .await
+            .unwrap();
+        assert!(!changed);
+        assert_eq!(
+            repo.get_reaction(id).await.unwrap().unwrap().status,
+            "approved"
+        );
+
+        // A spam row allows a fresh reaction from the same identifier.
+        repo.update_reaction_status(id, "spam").await.unwrap();
+        let (_, changed) = repo
+            .upsert_reaction(comment_id, "👍", "h:abc")
+            .await
+            .unwrap();
+        assert!(changed);
+        assert_eq!(
+            repo.get_reaction(id).await.unwrap().unwrap().status,
+            "pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn reaction_delete_removes_active_only() {
+        let (repo, _dir) = setup_repo();
+        let comment_id = seed_approved(&repo).await;
+        repo.upsert_reaction(comment_id, "👍", "h:abc")
+            .await
+            .unwrap();
+        assert!(repo.delete_reaction(comment_id, "h:abc").await.unwrap());
+        assert!(!repo.delete_reaction(comment_id, "h:abc").await.unwrap());
+        // Deleted rows don't count as active.
+        let counts = repo.reaction_counts(&[comment_id]).await.unwrap();
+        assert!(counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reaction_counts_only_approved() {
+        let (repo, _dir) = setup_repo();
+        let c1 = seed_approved(&repo).await;
+        let c2 = seed_approved(&repo).await;
+
+        // c1: two approved 👍 + one pending ❤️; c2: one approved 👍.
+        let (r1, _) = repo.upsert_reaction(c1, "👍", "h:one").await.unwrap();
+        let (r2, _) = repo.upsert_reaction(c1, "👍", "h:two").await.unwrap();
+        let (r3, _) = repo.upsert_reaction(c1, "❤️", "h:three").await.unwrap();
+        let (r4, _) = repo.upsert_reaction(c2, "👍", "h:one").await.unwrap();
+        for id in [r1, r2, r4] {
+            repo.update_reaction_status(id, "approved").await.unwrap();
+        }
+        let _ = r3; // stays pending
+
+        let counts = repo.reaction_counts(&[c1, c2]).await.unwrap();
+        assert_eq!(counts[&c1].get("👍"), Some(&2));
+        assert_eq!(counts[&c1].get("❤️"), None, "pending reactions excluded");
+        assert_eq!(counts[&c2].get("👍"), Some(&1));
+        assert!(repo.reaction_counts(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reaction_list_filters_by_status_with_context() {
+        let (repo, _dir) = setup_repo();
+        let comment_id = seed_approved(&repo).await;
+        let (id, _) = repo
+            .upsert_reaction(comment_id, "😄", "h:abc")
+            .await
+            .unwrap();
+        let pending = repo
+            .list_reactions(Some("pending"), 10, None)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+        assert_eq!(pending[0].target_path, "/react");
+        assert_eq!(pending[0].comment_author, "Alice");
+        assert_eq!(pending[0].comment_status, "approved");
+        assert_eq!(pending[0].reaction, "😄");
+        assert!(
+            repo.list_reactions(Some("approved"), 10, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

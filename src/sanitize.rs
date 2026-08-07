@@ -45,12 +45,16 @@ pub fn content_hash(raw_content: &str) -> String {
 /// url_hash is a SipHash of the normalized URL (hex, `h:` prefix).
 pub fn extract_urls(html: &str) -> Vec<(String, String, String)> {
     let mut urls = Vec::new();
+    let bytes = html.as_bytes();
     let mut pos = 0;
 
-    while pos < html.len() {
-        // Find href="..." patterns
-        if let Some(start) = html[pos..].to_lowercase().find("href=\"") {
-            let abs_start = pos + start + 6;
+    while pos < bytes.len() {
+        // Find the next href=" ... " (case-insensitive) directly on the
+        // original bytes. Never lowercases the input: Unicode lowercasing
+        // can change byte lengths (e.g. 'İ'), which would shift offsets and
+        // let user-controlled content panic the byte slicing.
+        if let Some(start) = find_ascii_ci(bytes, b"href=\"", pos) {
+            let abs_start = start + 6;
             let remaining = &html[abs_start..];
             if let Some(end) = remaining.find('"') {
                 let raw_url = &remaining[..end];
@@ -81,6 +85,21 @@ pub fn extract_urls(html: &str) -> Vec<(String, String, String)> {
     urls.retain(|(_, _, hash)| seen.insert(hash.clone()));
 
     urls
+}
+
+/// ASCII case-insensitive substring search (no allocation, linear time).
+fn find_ascii_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || from > haystack.len() {
+        return None;
+    }
+    let mut i = from;
+    while i + needle.len() <= haystack.len() {
+        if haystack[i..i + needle.len()].eq_ignore_ascii_case(needle) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -186,5 +205,34 @@ mod tests {
         let result = sanitize_html("<p OnLoad=\"alert(1)\">hi</p>", 2000);
         assert!(!result.contains("OnLoad"));
         assert!(!result.contains("alert"));
+    }
+
+    #[test]
+    fn extract_urls_survives_unicode_before_href() {
+        // 'İ' lowercases to two chars — the old offset translation could
+        // panic the byte slicing. Must extract normally.
+        let html = "<p>İstanbul İstanbul İstanbul</p><a href=\"https://example.com/x\">link</a>";
+        let urls = extract_urls(html);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].0, "https://example.com/x");
+    }
+
+    #[test]
+    fn extract_urls_matches_uppercase_href() {
+        let html = "<a HREF=\"https://example.com/up\">x</a><A href='https://example.com/sq'>y</A>";
+        let urls = extract_urls(html);
+        assert_eq!(
+            urls.len(),
+            1,
+            "double-quoted href extracted, single-quoted ignored"
+        );
+        assert_eq!(urls[0].0, "https://example.com/up");
+    }
+
+    #[test]
+    fn find_ascii_ci_works() {
+        assert_eq!(find_ascii_ci(b"xxHREF=\"yy", b"href=\"", 0), Some(2));
+        assert_eq!(find_ascii_ci(b"xxhref=\"yy", b"href=\"", 3), None);
+        assert_eq!(find_ascii_ci(b"abc", b"href", 0), None);
     }
 }

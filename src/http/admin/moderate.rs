@@ -107,32 +107,18 @@ fn fire_status_webhook(
     changed_by: &str,
 ) {
     if let Some(ref url) = state.config.moderation_webhook_url {
-        let client = state.http_client.clone();
-        let url = url.clone();
-        let old = old_status.to_string();
-        let new = new_status.to_string();
-        let by = changed_by.to_string();
-        tokio::spawn(async move {
-            let payload = serde_json::json!({
+        crate::http::webhook::fire(
+            &state.http_client,
+            url,
+            serde_json::json!({
                 "event": "comment.status_changed",
                 "id": id,
-                "old_status": old,
-                "new_status": new,
-                "changed_by": by,
-            });
-            let resp = client
-                .post(&url)
-                .json(&payload)
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await;
-            match resp {
-                Ok(r) => {
-                    tracing::debug!(id, new_status = %new, webhook_status = %r.status(), "status change webhook sent")
-                }
-                Err(e) => tracing::warn!(id, err = %e, "status change webhook failed"),
-            }
-        });
+                "old_status": old_status,
+                "new_status": new_status,
+                "changed_by": changed_by,
+            }),
+            5,
+        );
     }
 }
 
@@ -168,7 +154,9 @@ pub async fn moderate(
         .status;
 
     state.repo.update_status(body.id, &body.action).await?;
-    fire_status_webhook(&state, body.id, &old_status, &body.action, "admin");
+    if old_status != body.action {
+        fire_status_webhook(&state, body.id, &old_status, &body.action, "admin");
+    }
     Ok(Json(ModerateResponse {
         id: body.id,
         status: body.action.clone(),

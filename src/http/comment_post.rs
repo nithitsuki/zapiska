@@ -162,6 +162,14 @@ pub async fn create_comment(
     // 3. Sanitize content
     let content = sanitize::sanitize_html(&form.content, state.config.max_content_len);
 
+    // 3.5 Language gate (opt-in via COMMENT_LANG_ALLOWED/BLOCKED). Hard
+    // reject: the comment is never stored.
+    if state.language.is_enabled() {
+        if let Err(e) = state.language.check(&content) {
+            return Err(AppError::BadRequest(format!("comment rejected: {e}")));
+        }
+    }
+
     // 4. Resolve author info
     let (resolved_name, resolved_url) = resolve_author(
         author_url.as_deref(),
@@ -928,6 +936,148 @@ mod tests {
         assert!(c.content.contains("<p>text</p>"), "safe text preserved");
         // author_name had a control char stripped
         assert_eq!(c.author_name, "BadGuy", "control char stripped from name");
+    }
+
+    // ── Language filter tests ────────────────────────────────
+
+    async fn post_content(app: &axum::Router, content: &str) -> axum::http::StatusCode {
+        let body = format!(
+            "target_path=/lang&author_name=Alice&content={}",
+            urlencode(content)
+        );
+        let resp = app.clone().oneshot(form_request(&body)).await.unwrap();
+        resp.status()
+    }
+
+    fn urlencode(s: &str) -> String {
+        let mut out = String::new();
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
+                b' ' => out.push('+'),
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn language_filter_off_by_default() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = post_content(&app, "これは日本語のコメントです。").await;
+        assert_eq!(
+            resp,
+            axum::http::StatusCode::CREATED,
+            "filtering off by default"
+        );
+    }
+
+    #[tokio::test]
+    async fn whitelist_rejects_other_languages() {
+        let (mut state, _dir) = test_state();
+        state.config.comment_lang_allowed = vec!["en".to_string()];
+        state.language = crate::language::LanguageGate::new(&state.config);
+        let app = build_app(state.clone());
+
+        let resp = post_content(
+            &app,
+            "This is a perfectly normal English comment that should pass.",
+        )
+        .await;
+        assert_eq!(
+            resp,
+            axum::http::StatusCode::CREATED,
+            "whitelisted language accepted"
+        );
+
+        let resp = post_content(&app, "これは日本語のコメントです。").await;
+        assert_eq!(
+            resp,
+            axum::http::StatusCode::BAD_REQUEST,
+            "non-whitelisted language rejected"
+        );
+
+        // Rejected comments are NOT stored.
+        let pending = state.repo.list_pending(10, None, None).await.unwrap();
+        assert_eq!(pending.len(), 1, "only the English comment stored");
+    }
+
+    #[tokio::test]
+    async fn blacklist_rejects_listed_languages() {
+        let (mut state, _dir) = test_state();
+        state.config.comment_lang_blocked = vec!["ja".to_string()];
+        state.language = crate::language::LanguageGate::new(&state.config);
+        let app = build_app(state);
+
+        let resp = post_content(&app, "This is an English comment.").await;
+        assert_eq!(resp, axum::http::StatusCode::CREATED);
+        let resp = post_content(&app, "これは日本語のコメントです。").await;
+        assert_eq!(resp, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn emoji_policy_never_rejects_emoji_only() {
+        let (mut state, _dir) = test_state();
+        state.config.comment_lang_allowed = vec!["en".to_string()];
+        state.config.comment_lang_allow_emoji = "never".to_string();
+        state.language = crate::language::LanguageGate::new(&state.config);
+        let app = build_app(state);
+
+        let resp = post_content(&app, "👍👍👍👍").await;
+        assert_eq!(
+            resp,
+            axum::http::StatusCode::BAD_REQUEST,
+            "emoji-only rejected under never"
+        );
+        let resp = post_content(&app, "Nice comment 👍").await;
+        assert_eq!(resp, axum::http::StatusCode::CREATED, "mixed text accepted");
+    }
+
+    #[tokio::test]
+    async fn emoji_policy_if_unknown_rejects_gibberish() {
+        let (mut state, _dir) = test_state();
+        state.config.comment_lang_allowed = vec!["en".to_string()];
+        state.config.comment_lang_allow_emoji = "if_unknown".to_string();
+        state.language = crate::language::LanguageGate::new(&state.config);
+        let app = build_app(state);
+
+        let resp = post_content(&app, "👍👍👍👍").await;
+        assert_eq!(
+            resp,
+            axum::http::StatusCode::CREATED,
+            "emoji-only accepted under if_unknown"
+        );
+        let resp = post_content(&app, "qzx qzx qzx qzx qzx qzx").await;
+        assert_eq!(
+            resp,
+            axum::http::StatusCode::BAD_REQUEST,
+            "undetectable text rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_comment_error_is_clear() {
+        let (mut state, _dir) = test_state();
+        state.config.comment_lang_allowed = vec!["en".to_string()];
+        state.language = crate::language::LanguageGate::new(&state.config);
+        let app = build_app(state);
+        let body = "target_path=/lang&author_name=Alice&content=これは日本語のコメントです。";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let resp_body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1024).await.unwrap())
+                .unwrap();
+        assert!(
+            resp_body["error"]
+                .as_str()
+                .unwrap()
+                .contains("not in the allowed list"),
+            "error explains why: {}",
+            resp_body["error"]
+        );
     }
 
     // ── Turnstile tests ──────────────────────────────────────

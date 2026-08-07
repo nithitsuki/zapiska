@@ -50,4 +50,31 @@ impl Repo {
         })
         .await
     }
+
+    /// Dump the whole profile cache (admin JSON export).
+    pub async fn list_all_github_profiles(&self) -> RepoResult<Vec<GithubProfile>> {
+        self.spawn(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT login, name, avatar_url, cached_at, valid FROM github_profiles ORDER BY login")
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let valid_int: i64 = row.get(4)?;
+                    Ok(GithubProfile {
+                        login: row.get(0)?,
+                        name: row.get(1)?,
+                        avatar_url: row.get(2)?,
+                        cached_at: row.get(3)?,
+                        valid: valid_int != 0,
+                    })
+                })
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+            }
+            Ok(result)
+        })
+        .await
+    }
 }

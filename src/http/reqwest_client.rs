@@ -6,9 +6,10 @@ use reqwest::Client;
 use crate::config::Config;
 use crate::ssrf::{SsrfError, resolve_and_check, ssrf_safe_redirect_policy};
 
-/// Build an SSRF-safe reqwest Client that enforces the private-IP blocklist
-/// at every redirect hop. Allows both HTTP and HTTPS — SSRF safety comes from
-/// DNS resolution checks + redirect policy, not from https_only.
+/// Build an SSRF-aware reqwest client for webmention fetches.
+///
+/// The first host is checked with DNS resolution. The redirect policy checks
+/// redirect host names and literal IP addresses. Both HTTP and HTTPS work.
 pub fn build_client(config: &Config) -> Client {
     Client::builder()
         .user_agent(format!(

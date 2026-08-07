@@ -1,127 +1,248 @@
 # Architecture
 
-Single Rust binary, three layers:
+zapiska is one Rust process with an Axum HTTP layer and a SQLite data store.
+The process has an optional webmention worker.
 
-```
-HTTP ingress (Axum + tower middleware)
-        |
-        +---> Public read path (GET /api/comments)
-        +---> Native comment ingest (POST /api/comment)
-        +---> Webmention ingest (POST /api/webmention) --[mpsc]--> Worker (optional)
-        +---> Admin endpoints (GET/POST /api/admin/*, cookie + bearer auth)
-        |
-SQLite (r2d2 pool, WAL mode, all access via spawn_blocking)
+```text
+HTTP router
+    |
+    +-- public read API
+    +-- native comment API
+    +-- reaction API
+    +-- RSS feed
+    +-- webmention API --> bounded worker queue --> source fetch and parse
+    +-- protected admin API
+    |
+SQLite connection pool
 ```
 
-## Modules
+The database uses WAL mode. Repository methods run blocking SQLite work inside
+`spawn_blocking`.
 
-```
+## Source modules
+
+```text
 src/
-  config.rs          Environment config
-  error.rs           AppError enum + IntoResponse + Display (6 HTTP status variants)
-  state.rs           AppState: config, pool, repo, github, wm_sender, http_client, notifier
-  sanitize.rs        HTML sanitization via ammonia
-  validate.rs        Input validation: target_path, URLs, control chars
-  ssrf.rs            Private-IP blocklist, DNS resolve+check (webmentions only)
-  github.rs          GitHubLookup trait + RealGitHub (cached API calls), GitHub URL parsing
-  mf2.rs             Microformats2 parser — h-entry, h-card (webmentions only)
-  worker.rs          Webmention worker pipeline — fetch → verify → parse → upsert
-  openapi.rs         OpenAPI 3.1 spec, feature-gated for webmention paths
+  config.rs             Environment configuration
+  error.rs              HTTP and repository errors
+  state.rs              Shared application state
+  language.rs           Native comment language gate
+  sanitize.rs           HTML cleaning, hashes, and URL extraction
+  validate.rs            Path, URL, and field checks
+  timeutil.rs            Date and time helpers
+  github.rs              GitHub lookup and profile cache interface
+  avatar.rs              Favicon and avatar helpers
+  ip_hash.rs             Peer IP hash helper
+  turnstile.rs           Turnstile siteverify client
+  worker.rs              Webmention worker
+  mf2.rs                 Microformats parser
+  ssrf.rs                Host and IP checks
   notify/
-    mod.rs           Notifier config, digest types, delivery dispatch
-    batcher.rs       Window/threshold batching of notifications
-    telegram.rs      Telegram channel (Bot API, HTML parse mode)
-    slack.rs         Slack channel (incoming webhook, blocks)
-    discord.rs       Discord channel (incoming webhook, markdown)
+    mod.rs              Notification dispatch
+    batcher.rs          In-memory notification windows
+    telegram.rs         Telegram message format
+    slack.rs            Slack message format
+    discord.rs          Discord message format
   db/
-    pool.rs          r2d2 SQLite pool + pragmas + migrations
+    pool.rs              SQLite pool and migrations
     repo/
-      mod.rs         Data types (Comment, NewComment), Repo core, row_to_comment
-      comments.rs    Comment CRUD: insert, list, moderate, get, threaded chain
-      webmentions.rs webmention_seen operations
-      github_profiles.rs GitHub profile cache operations
+      comments.rs        Comment storage and moderation
+      reactions.rs       Reaction storage and counts
+      urls.rs             Extracted URL storage and lookup
+      webmentions.rs     Webmention ledger storage
+      github_profiles.rs GitHub cache storage
   http/
-    mod.rs           Router builder + middleware stack
-    layers.rs        CORS, body limit, rate-limit configs
-    shutdown.rs      SIGTERM/SIGINT handler
-    comments_read.rs GET /api/comments
-    comment_post.rs  POST /api/comment — includes parent_id validation for threading
-    webmention_post.rs  POST /api/webmention (webmentions only)
+    mod.rs               Router and route layers
+    layers.rs            CORS, body limit, and rate limit builders
+    comments_read.rs     Public comment read API
+    comment_post.rs      Native comment and deletion API
+    reactions.rs         Public reaction API
+    feed.rs              RSS feed
+    webhook.rs           Shared fire-and-forget webhook sender
+    webmention_post.rs   Webmention ingress
     admin/
-      mod.rs         Constant-time token check + route re-exports
-      auth.rs        Admin auth middleware + login/logout
-      comments.rs    Pending queue, filtered listing, single comment + chain
-      moderate.rs    Single + batch moderation, status-change webhook
-      lookup.rs      Author, path, URL, and bulk-context endpoints
-    reqwest_client.rs  SSRF-safe reqwest client builder (webmentions only)
-    test_support.rs  Shared test helpers
+      auth.rs             Login, logout, and token checks
+      comments.rs         Admin comment queries
+      moderate.rs         Comment moderation
+      reactions.rs        Reaction moderation
+      data.rs             JSON export and import
+      lookup.rs           Author, URL, path, and context lookup
 ```
 
-Module visibility is feature-gated: `mf2`, `ssrf`, `worker`, `webmention_post`, `reqwest_client` are only compiled when the `webmentions` feature is enabled.
-
-## Data flow
-
-### Native comment
-1. POST form data to `/api/comment`.
-2. Validates fields (target_path, author_url, content length, parent_id if present).
-3. Content sanitized with ammonia.
-4. Author resolved: form name kept; URL set to user-provided website or derived from GitHub username. Avatar resolved separately: GitHub API, h-card, favicon, DiceBear.
-5. If `parent_id` provided: parent must exist, be approved, on the same path, and depth < 4. Child depth = parent depth + 1.
-6. Row inserted with `status = 'pending'`.
-7. Admin approves/spams/deletes via `/api/admin/*`.
-
-### Threaded replies
-- Top-level comments have `parent_id = null`, `depth = 0`.
-- Replies store the parent's ID and compute `depth = parent.depth + 1`.
-- Max nesting: 4 levels (depth 0–4).
-- The public API returns a flat list with `parent_id`; the embed widget builds the thread tree client-side.
-- Top-level sorted newest-first, replies sorted oldest-first within each parent.
-
-### Webmention
-1. POST `source` and `target` to `/api/webmention`.
-2. Validates both are absolute http(s), `target` origin matches `PUBLIC_TARGET_ORIGIN`.
-3. Job enqueued via `tokio::sync::mpsc`; returns 202 immediately.
-4. Background worker fetches source via SSRF-safe client.
-5. Verifies source HTML links to `target` (backlink check).
-6. Parses `h-entry` microformat for content + author.
-7. Upserts comment idempotently via `ON CONFLICT`. Webmentions are always top-level (parent_id = null, depth = 0).
-8. `webmention_seen` tracks alive/gone for deletion handling.
-9. Source returns 410 → comment marked deleted.
-
-## Database
-
-One SQLite file, three tables:
-
-- **comments** — native + webmention entries, status workflow (pending → approved/spam/deleted), parent_id and depth for threaded replies
-- **webmention_seen** — idempotency + deletion tracking
-- **github_profiles** — 30-day cache for GitHub lookups
-
-See `migrations/schema.sql` for the full schema.
-
-## Middleware stack
-
-Outer to inner:
-1. `RequestBodyLimitLayer` — rejects bodies over `MAX_BODY_SIZE` (413).
-2. `CorsLayer` — single allowed origin, GET/POST/OPTIONS, 10-min preflight cache.
-3. `tower_governor` rate limiting per route (all configurable via env vars — see [`deployment.md`](deployment.md)):
-   - Native comments: 5 req / 60s
-   - Webmentions: 30 req / 60s
-   - Public read: 60 req / 60s
-   - Admin: unlimited (auth-gated)
-4. Admin routes: `admin_auth` middleware — checks `Authorization: Bearer` header then `admin_token` cookie with constant-time comparison. The admin API is the interface for external moderation systems.
-
-## Error handling
-
-All endpoints return JSON:
-
-```json
-{ "error": "human-readable reason", "code": "rate_limited" }
-```
-
-Status codes: 200, 201, 202, 400, 401, 404, 429 (with `Retry-After`), 500, 503.
-
-The repo layer uses `RepoError` (`Internal`, `NotFound`) with a `From` impl to `AppError`. Keeps DB decoupled from HTTP.
+The modules `worker`, `mf2`, `ssrf`, `webmention_post`, and
+`reqwest_client` compile only with the `webmentions` feature.
 
 ## Feature flags
 
-See [deployment.md](deployment.md) for compile-time feature configuration.
+The default feature set is `comments,webmentions`.
+
+| Feature | State | Result |
+|---|---|---|
+| `comments` | Empty compatibility feature | Comment, reaction, feed, and admin code remains compiled. |
+| `webmentions` | Default and optional | Webmention ingress, worker, microformats parsing, and SSRF code. |
+
+The `comments` feature is empty. The comments-only build disables
+`webmentions` modules with `--no-default-features --features comments`.
+
+## Native comment flow
+
+The native flow has this sequence:
+
+1. The handler reads a form-encoded request.
+2. Route rate limiting and the request body limit run before the handler.
+3. The handler checks the honeypot, Turnstile, and the daily IP cap.
+4. The handler validates the path, name, and author URL.
+5. The handler sanitizes the content with `ammonia`.
+6. The language gate checks the sanitized content when configured.
+7. The handler resolves the author name, URL, and avatar.
+8. The handler checks the parent comment when `parent_id` is present.
+9. The repository stores the comment with its configured initial status.
+10. The handler extracts double-quoted absolute HTTP and HTTPS URLs from the
+    original form content.
+11. The notification batcher receives a new comment event.
+12. The moderation webhook receives the event when configured.
+
+The content hash helps a moderation service find repeated content. The server
+does not reject duplicate content by hash.
+
+## Threaded replies
+
+Top-level comments use `parent_id = null` and `depth = 0`.
+
+For a reply, the parent must:
+
+- Exist.
+- Have `status = approved`.
+- Use the same `target_path`.
+- Have a depth below `MAX_THREAD_DEPTH`.
+
+The server clamps `MAX_THREAD_DEPTH` to `0` through `10`. The default value is
+`0`, so replies are disabled by default.
+
+The public API returns a flat list. The supplied widget builds the tree in the
+browser. The API supports `newest` and `oldest` order with matching cursors.
+
+## Reaction flow
+
+The reaction handler checks the configured reaction set and the comment status.
+Only approved comments accept reactions.
+
+The default mode requires the admin token. In `anyone` mode, the server uses a
+hash of the peer IP as the reaction identifier.
+
+The repository stores one active reaction for each comment and identifier.
+New and changed reactions start as `pending`. Only approved reactions appear
+in public counts. A repeated reaction is a no-op.
+
+Reaction creation and status changes can send moderation webhook events.
+
+## Webmention flow
+
+The webmention endpoint is available only with the `webmentions` feature.
+
+1. The handler parses `source` and `target` as absolute HTTP or HTTPS URLs.
+2. The handler compares the target origin with `PUBLIC_TARGET_ORIGIN`.
+3. The handler rejects equal source and target URLs.
+4. The handler sends the job to a bounded channel and returns `202`.
+5. The worker checks the source hostname and resolved IP addresses.
+6. The worker fetches the source through the shared HTTP client.
+7. The worker checks that the source links to the target.
+8. The worker parses h-entry and h-card data.
+9. The worker upserts the comment by source URL and target path.
+10. The worker records the source state in `webmention_seen`.
+
+The queue capacity is `WORKER_BACKLOG`, with a default of `64`. A full queue
+returns `503`. A source update keeps the existing moderation status.
+
+The current client permits HTTP and HTTPS. The client checks the source before
+the request. Its custom redirect policy checks each redirect host and literal
+IP against the blocklist. The client does not set a five-hop redirect limit.
+
+## Database
+
+The database has five tables:
+
+| Table | Purpose |
+|---|---|
+| `comments` | Native comments, webmentions, status, reply data, and hashes. |
+| `webmention_seen` | Source and target state for repeated and gone mentions. |
+| `comment_urls` | Normalized URLs found in native comment content. |
+| `github_profiles` | Positive and negative GitHub profile cache entries. |
+| `comment_reactions` | Reaction identity, value, status, and timestamps. |
+
+The connection pool sets these pragmas:
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+PRAGMA synchronous = NORMAL;
+```
+
+## Middleware and route scope
+
+The public router has these layers and routes:
+
+- Body limits on native comment and webmention requests.
+- Native rate limits on comment submission, deletion, and reactions.
+- Read rate limits on the JSON read API and RSS feed.
+- Webmention rate limits on webmention ingress.
+- CORS on the public router.
+
+The public router also contains health, embed, Swagger, admin login, and admin
+logout routes. The protected admin route group is merged after the CORS layer.
+Admin routes do not advertise CORS.
+
+Configured CORS values can be one origin, a comma-separated list, or `*`.
+Configured origins use a 600 second preflight cache. Wildcard CORS does not set
+that cache value. The preflight methods are `GET`, `POST`, and `OPTIONS`.
+
+Default rate limits are:
+
+| Route group | Burst | Window |
+|---|---:|---:|
+| Native comment, deletion, and reactions | 50 | 60 seconds |
+| Webmention ingress | 30 | 60 seconds |
+| Public comments and RSS | 60 | 60 seconds |
+| Single comment moderation | 10 | 60 seconds |
+
+The admin rate limit does not cover every admin route. Admin authentication is
+required for the protected admin route group.
+
+## Notification flow
+
+The notification batcher is in memory. It supports Telegram, Slack, and
+Discord. Telegram needs both a bot token and a chat ID. Slack and Discord need a
+webhook URL.
+
+With the default settings, a new event opens a window for its page. The window
+ends after `NOTIFY_BATCH_SECS`. A count of `NOTIFY_BATCH_THRESHOLD` flushes the
+window early. `NOTIFY_BATCH_GRANULARITY=global` uses one window for the site.
+
+Set `NOTIFY_BATCH_SECS=0` for immediate delivery. Delivery runs in spawned tasks
+with a timeout. Delivery failure does not fail the comment request.
+
+Open notification windows are lost when the process stops.
+
+## Shutdown
+
+The process listens for Ctrl+C and SIGTERM. The shutdown signal stops the Axum
+server. The current shutdown function does not drain the webmention queue or
+wait for worker jobs. Queued webmentions and open notification windows can be
+lost when the process stops.
+
+## Errors
+
+JSON errors use this shape:
+
+```json
+{
+  "error": "human-readable reason",
+  "code": "rate_limited"
+}
+```
+
+The API uses status codes `200`, `201`, `202`, `400`, `401`, `404`, `413`,
+`429`, `500`, and `503`.
+
+See [API](api.md), [Security](security.md), and [Deployment](deployment.md).

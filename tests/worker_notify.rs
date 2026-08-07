@@ -87,6 +87,11 @@ async fn setup(
         notify_batch_secs: 0,
         notify_batch_threshold: 0,
         notify_batch_granularity: "page".to_string(),
+        reactions_allowed: "admin".to_string(),
+        reactions_set: vec!["👍".to_string()],
+        comment_lang_allowed: Vec::new(),
+        comment_lang_blocked: Vec::new(),
+        comment_lang_allow_emoji: "always".to_string(),
     };
     let notifier = Arc::new(NotificationBatcher::new(&config));
 

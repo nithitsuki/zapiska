@@ -1,12 +1,15 @@
 pub(crate) mod admin;
 pub(crate) mod comment_post;
 pub(crate) mod comments_read;
+pub(crate) mod feed;
 mod layers;
+pub(crate) mod reactions;
 #[cfg(feature = "webmentions")]
 pub mod reqwest_client;
 pub mod shutdown;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub(crate) mod webhook;
 #[cfg(feature = "webmentions")]
 pub(crate) mod webmention_post;
 
@@ -19,10 +22,10 @@ use crate::openapi::ApiDoc;
 use crate::state::AppState;
 
 pub fn build_app(state: AppState) -> Router {
-    let native_governor = layers::native_comment_governor(&state.config);
+    let native_governor = Arc::new(layers::native_comment_governor(&state.config));
     #[cfg(feature = "webmentions")]
     let webmention_governor = layers::webmention_governor(&state.config);
-    let read_governor = layers::read_governor(&state.config);
+    let read_governor = Arc::new(layers::read_governor(&state.config));
     let admin_moderate_governor = layers::admin_moderate_governor(&state.config);
 
     let cors = layers::cors_layer(&state.config);
@@ -68,6 +71,25 @@ pub fn build_app(state: AppState) -> Router {
             "/api/admin/moderate/batch",
             axum::routing::post(admin::moderate_batch),
         )
+        .route("/api/admin/export", axum::routing::get(admin::export))
+        .route(
+            "/api/admin/reactions",
+            axum::routing::get(admin::list_reactions),
+        )
+        .route(
+            "/api/admin/reactions/moderate",
+            axum::routing::post(admin::moderate_reaction),
+        )
+        .route(
+            "/api/admin/reactions/moderate/batch",
+            axum::routing::post(admin::moderate_reactions_batch),
+        )
+        .route(
+            "/api/admin/import",
+            axum::routing::post(admin::import).layer(axum::extract::DefaultBodyLimit::max(
+                admin::MAX_IMPORT_BODY_BYTES,
+            )),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin::admin_auth,
@@ -85,34 +107,59 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/admin/logout", axum::routing::post(admin::logout))
         .route(
             "/api/comment",
-            axum::routing::post(comment_post::create_comment).layer(GovernorLayer {
-                config: Arc::new(native_governor),
-            }),
+            axum::routing::post(comment_post::create_comment)
+                .layer::<_, std::convert::Infallible>(body_limit)
+                .layer(GovernorLayer {
+                    config: native_governor.clone(),
+                }),
         )
         .route(
             "/api/comment/{id}/delete",
-            axum::routing::post(comment_post::delete_comment),
+            axum::routing::post(comment_post::delete_comment)
+                .layer::<_, std::convert::Infallible>(body_limit)
+                .layer(GovernorLayer {
+                    config: native_governor.clone(),
+                }),
+        )
+        .route(
+            "/api/comment/{id}/reaction",
+            axum::routing::post(reactions::add_reaction).layer(GovernorLayer {
+                config: native_governor.clone(),
+            }),
+        )
+        .route(
+            "/api/comment/{id}/reaction",
+            axum::routing::delete(reactions::remove_reaction).layer(GovernorLayer {
+                config: native_governor,
+            }),
         )
         .route(
             "/api/comments",
             axum::routing::get(comments_read::list_comments).layer(GovernorLayer {
-                config: Arc::new(read_governor),
+                config: read_governor.clone(),
+            }),
+        )
+        .route(
+            "/feed.xml",
+            axum::routing::get(feed::feed).layer(GovernorLayer {
+                config: read_governor,
             }),
         );
 
     #[cfg(feature = "webmentions")]
     let router = router.route(
         "/api/webmention",
-        axum::routing::post(webmention_post::receive_webmention).layer(GovernorLayer {
-            config: Arc::new(webmention_governor),
-        }),
+        axum::routing::post(webmention_post::receive_webmention)
+            .layer::<_, std::convert::Infallible>(body_limit)
+            .layer(GovernorLayer {
+                config: Arc::new(webmention_governor),
+            }),
     );
 
-    router
-        .merge(admin_routes)
-        .layer(cors)
-        .layer(body_limit)
-        .with_state(state)
+    // CORS intentionally applies to the PUBLIC router only. Admin routes are
+    // server-side (same-origin dashboard); advertising them in preflight
+    // would contradict SPEC §6.7.
+    router.layer(cors).merge(admin_routes).with_state(state)
 }
 
 async fn admin_dashboard() -> axum::response::Html<&'static str> {
@@ -554,6 +601,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_sort_oldest_returns_ascending() {
+        let (state, _dir) = test_state();
+        for i in 0..5 {
+            seed_comment(&state, "/sorted", &format!("U{i}"), "approved").await;
+        }
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request_uri("/api/comments?path=/sorted&sort=oldest"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let comments = body["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 5);
+        let ids: Vec<i64> = comments.iter().map(|c| c["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5], "oldest first, ascending");
+        assert_eq!(comments[0]["author_name"], "U0");
+    }
+
+    #[tokio::test]
+    async fn read_sort_oldest_with_after_cursor_paginates() {
+        let (state, _dir) = test_state();
+        for i in 0..5 {
+            seed_comment(&state, "/sorted-cur", &format!("U{i}"), "approved").await;
+        }
+        let app = build_app(state);
+
+        let resp = app
+            .clone()
+            .oneshot(request_uri(
+                "/api/comments?path=/sorted-cur&sort=oldest&limit=2",
+            ))
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let page1 = body["comments"].as_array().unwrap();
+        assert_eq!(page1[0]["author_name"], "U0");
+        assert_eq!(page1[1]["author_name"], "U1");
+        let last_id = page1[1]["id"].as_i64().unwrap();
+
+        let resp2 = app
+            .clone()
+            .oneshot(request_uri(&format!(
+                "/api/comments?path=/sorted-cur&sort=oldest&limit=2&after={last_id}"
+            )))
+            .await
+            .unwrap();
+        let body2: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp2.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let page2 = body2["comments"].as_array().unwrap();
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2[0]["author_name"], "U2");
+        assert_eq!(page2[1]["author_name"], "U3");
+    }
+
+    #[tokio::test]
+    async fn read_sort_newest_is_explicit_and_default() {
+        let (state, _dir) = test_state();
+        for i in 0..3 {
+            seed_comment(&state, "/sorted-new", &format!("U{i}"), "approved").await;
+        }
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request_uri("/api/comments?path=/sorted-new&sort=newest"))
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let ids: Vec<i64> = body["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 2, 1], "newest first");
+    }
+
+    #[tokio::test]
+    async fn read_sort_invalid_returns_400() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request_uri("/api/comments?path=/x&sort=by-likes"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "unknown sort must be rejected");
+    }
+
+    #[tokio::test]
     async fn read_before_cursor_returns_empty_when_none_older() {
         let (state, _dir) = test_state();
         seed_comment(&state, "/empty-cur", "A", "approved").await;
@@ -651,5 +805,177 @@ mod tests {
             .map(|c| c["author_name"].as_str().unwrap())
             .collect();
         assert_eq!(authors, vec!["Approved"]);
+    }
+
+    // ── RSS feed tests ───────────────────────────────────────
+
+    /// Parse the response body as RSS XML; returns the item titles.
+    fn feed_item_titles(body: &[u8]) -> Vec<String> {
+        use quick_xml::Reader;
+        use quick_xml::events::Event;
+        let mut reader = Reader::from_reader(body);
+        let mut titles = Vec::new();
+        let mut buf = Vec::new();
+        let mut in_item = false;
+        let mut in_title = false;
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => match e.name().as_ref() {
+                    b"item" => in_item = true,
+                    b"title" if in_item => in_title = true,
+                    _ => {}
+                },
+                Ok(Event::End(e)) => match e.name().as_ref() {
+                    b"item" => in_item = false,
+                    b"title" if in_item => in_title = false,
+                    _ => {}
+                },
+                Ok(Event::Text(t)) if in_title => {
+                    titles.push(t.unescape().unwrap_or_default().into_owned());
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => panic!("feed is not well-formed XML: {e}"),
+                _ => {}
+            }
+            buf.clear();
+        }
+        titles
+    }
+
+    #[tokio::test]
+    async fn feed_returns_only_approved_comments() {
+        let (state, _dir) = test_state();
+        seed_comment(&state, "/feed-test", "Alice", "approved").await;
+        seed_comment(&state, "/feed-test", "Bob", "pending").await;
+        seed_comment(&state, "/feed-test", "Charlie", "spam").await;
+
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request_uri("/feed.xml?path=/feed-test"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "application/rss+xml; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let titles = feed_item_titles(&body);
+        assert_eq!(titles, vec!["Alice"], "only approved comments in feed");
+    }
+
+    #[tokio::test]
+    async fn feed_global_includes_all_paths_with_path_in_titles() {
+        let (state, _dir) = test_state();
+        seed_comment(&state, "/blog/a", "Alice", "approved").await;
+        seed_comment(&state, "/blog/b", "Bob", "approved").await;
+
+        let app = build_app(state);
+        let resp = app.oneshot(request_uri("/feed.xml")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let titles = feed_item_titles(&body);
+        assert_eq!(titles, vec!["Bob on /blog/b", "Alice on /blog/a"]);
+    }
+
+    #[tokio::test]
+    async fn feed_per_path_titles_are_bare_author_names() {
+        let (state, _dir) = test_state();
+        seed_comment(&state, "/blog/a", "Alice", "approved").await;
+
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request_uri("/feed.xml?path=/blog/a"))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let titles = feed_item_titles(&body);
+        assert_eq!(titles, vec!["Alice"]);
+    }
+
+    #[tokio::test]
+    async fn feed_invalid_path_returns_400() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request_uri("/feed.xml?path=no-slash"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn feed_empty_is_still_well_formed() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app.oneshot(request_uri("/feed.xml")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let xml = String::from_utf8(body.to_vec()).unwrap();
+        assert!(xml.contains("<channel>"), "empty feed has a channel");
+        assert!(
+            xml.contains("<lastBuildDate>"),
+            "empty feed has lastBuildDate"
+        );
+        assert!(feed_item_titles(&body).is_empty());
+    }
+
+    #[tokio::test]
+    async fn feed_default_limit_is_50() {
+        let (state, _dir) = test_state();
+        for i in 0..55 {
+            seed_comment(&state, "/many", &format!("User{i}"), "approved").await;
+        }
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request_uri("/feed.xml?path=/many"))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            feed_item_titles(&body).len(),
+            50,
+            "default feed limit is 50"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_does_not_apply_to_admin_routes() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request_with_origin(
+                axum::http::Method::OPTIONS,
+                "/api/admin/pending",
+                "https://nithitsuki.com",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none(),
+            "admin routes must not advertise CORS (SPEC §6.7)"
+        );
+        assert!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+                .is_none(),
+            "admin routes must not answer preflight"
+        );
     }
 }

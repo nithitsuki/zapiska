@@ -1,377 +1,415 @@
-# Getting started with zapiska
+# Getting started
 
-This guide assumes you already know how to self-host a website: you have a server with a public IP, can put a service behind a reverse proxy, can get a TLS cert, and are comfortable with the shell.
+This guide deploys zapiska behind a TLS reverse proxy.
 
-> **Prefer an AI agent?** Copy the prompt in [`docs/ai-agent-setup.md`](ai-agent-setup.md) into your coding assistant and it will read the skills in `.skills/` and set everything up for you.
+The guide assumes that you can use a shell and manage a server.
 
-By the end you'll have zapiska running on `https://comments.your-site.example`, serving comments for `https://your-site.example`.
+By the end, zapiska listens at a URL such as
+`https://comments.your-site.example` and serves a site such as
+`https://your-site.example`.
 
-> Time: ~15 minutes if you've got Rust or Docker handy.
+## What zapiska provides
 
----
+zapiska is one Rust process with one SQLite file.
 
-## What you're running
+The server provides:
 
-zapiska is a single Rust binary backed by one SQLite file. There is no Node, no Postgres, no Redis. You don't run migrations by hand — they apply on startup.
+- A public approved comment API at `GET /api/comments`.
+- A native comment API at `POST /api/comment`.
+- A reaction API for approved comments.
+- An RSS feed at `GET /feed.xml`.
+- A webmention API when the `webmentions` feature is enabled.
+- Protected admin routes for moderation, lookup, export, and import.
+- A widget at `/embed/comments.js`.
 
-It exposes:
+See [API](api.md) for the full route list.
 
-- A public **read** API (`GET /api/comments`) your site calls to show approved comments.
-- A public **submit** API (`POST /api/comment`) your comment form posts to.
-- A **webmention** endpoint (`POST /api/webmention`) other IndieWeb sites ping.
-- **Admin** endpoints (`/api/admin/*`) you call to approve, spam, delete.
-- A static **embed widget** at `/embed/comments.js`.
+## Prerequisites
 
-See [api.md](api.md) for the full reference and [architecture.md](architecture.md) for the layout.
+You need:
 
----
+- A Linux server or a local machine.
+- A domain or subdomain for zapiska.
+- A TLS reverse proxy for a public deployment.
+- A random admin token.
 
-## 0. Prerequisites
-
-- A Linux server (a $5 VPS is plenty).
-- The main website you want comments on, reachable at some origin like `https://your-site.example`.
-- A subdomain for zapiska, e.g. `comments.your-site.example`. Point its A/AAAA record at the same server.
-- A reverse proxy with TLS (e.g. nginx + certbot, or Caddy with automatic TLS).
-- One secret: a long random string for `ADMIN_TOKEN`.
-
-Generate that now:
+Create an admin token:
 
 ```sh
 openssl rand -base64 32
 ```
 
----
+Keep this value private.
 
-## 1. Decide how you want to run it
+## Choose a run method
 
-Pick one of:
+Choose one method:
 
-- **Docker** — fastest path, no Rust toolchain needed.
-- **Pre-built binary** — easiest if a release tarball is available.
-- **Build from source** — full control; picks up optional feature flags.
+- Docker Compose.
+- A release binary.
+- A source build.
 
-### Option A: Docker (recommended to start)
+### Docker Compose
 
-```sh
-git clone https://github.com/nithitsuki/zapiska.git   # or your fork
-cd zapiska
-cp .env.example .env
-$EDITOR .env               # set ADMIN_TOKEN, PUBLIC_TARGET_ORIGIN, ALLOWED_CORS_ORIGIN
-docker compose up -d       # build + run + healthcheck — one command
-```
-
-The canonical `docker-compose.yml` reads every variable from `.env` (with
-sane defaults) and refuses to start with a clear message if `ADMIN_TOKEN`
-is missing. The container binds `0.0.0.0:3000` internally and writes SQLite
-to `/data`. The compose file maps that port to **localhost:3000** on the
-host so you can sit a reverse proxy in front of it without exposing it to
-the open internet. The `zapiska-data` named volume keeps your DB across
-restarts, and the built-in healthcheck (against `/healthz`) marks the
-container `healthy` once it's ready.
-
-### Option B: Pre-built binary
-
-If a release tarball is published for your architecture, download and unzip it into `/opt/zapiska/`. Skip to [step 2](#2-point-it-at-your-site).
-
-### Option C: Build from source
-
-You need Rust 1.85+ (edition 2024) and `libsqlite3-dev` + `pkg-config`:
+Clone the repository and start the service:
 
 ```sh
-sudo apt-get install -y libsqlite3-dev pkg-config     # Debian/Ubuntu
-# or: sudo dnf install -y sqlite-devel pkgconf-pkg-config   (Fedora)
-
 git clone https://github.com/nithitsuki/zapiska.git
 cd zapiska
-
-cargo build --release
-# binary ends up at target/release/zapiska
+cp .env.example .env
+$EDITOR .env
+docker compose up -d --build
 ```
 
-To build without webmention support (smaller binary, fewer deps):
+Set these values in `.env`:
+
+```env
+ADMIN_TOKEN=replace-this-value
+PUBLIC_TARGET_ORIGIN=https://your-site.example
+ALLOWED_CORS_ORIGIN=https://your-site.example
+```
+
+The compose file sets `BIND_ADDR=0.0.0.0:3000` inside the container. It maps
+host `127.0.0.1:3000` to the container.
+
+The database is stored in the `zapiska-data` volume.
+
+Check the service:
+
+```sh
+docker compose ps
+curl http://127.0.0.1:3000/healthz
+```
+
+### Release binary
+
+Download the archive for your target from the GitHub release. Put the binary in
+`/opt/zapiska/` and continue with [Configure zapiska](#configure-zapiska).
+
+### Source build
+
+Rust 1.85 or later is required.
+SQLite development headers are not required because the build uses bundled
+SQLite.
+
+```sh
+git clone https://github.com/nithitsuki/zapiska.git
+cd zapiska
+cargo build --release
+```
+
+The binary is `target/release/zapiska`.
+
+Build without webmention support:
 
 ```sh
 cargo build --release --no-default-features --features comments
 ```
 
----
+## Configure zapiska
 
-## 2. Point it at your site
+The server reads environment variables at startup.
 
-Everything is configured through environment variables. The ones you must set for any real deployment:
+The required value is:
 
-| Variable | Example | Why |
-|---|---|---|
-| `ADMIN_TOKEN` | (output of `openssl rand -base64 32`) | Authenticates the admin API. **Required.** |
-| `PUBLIC_TARGET_ORIGIN` | `https://your-site.example` | The site you accept comments/webmentions for. `target` URLs must start with this. |
-| `ALLOWED_CORS_ORIGIN` | `https://your-site.example` | Origin(s) the browser may fetch the read API from. Single origin, comma-separated list (e.g. `http://localhost:1313,https://your-site.example`), or `*`. CORS is rejected for anything else. |
-| `DATABASE_PATH` | `/opt/zapiska/comments.db` (or `/data/comments.db` in Docker) | Where the SQLite file lives. Back this path up. |
-| `BIND_ADDR` | `127.0.0.1:3000` (default) | Listen address. Keep localhost-only if you're behind a reverse proxy. |
-
-Recommended but optional:
-
-| Variable | Why |
-|---|---|
-| `GITHUB_TOKEN` | Raises the GitHub API rate limit from 60/hr to 5000/hr when commenters supply a `github_username`. No scopes needed. |
-| `STORE_IP_ADDRESS=true` | Lets your moderation logic do IP-based reputation. Off by default for privacy. IPs are SHA-256 hashed before storage — raw IPs never touch disk. |
-| `DEFAULT_COMMENT_STATUS` | `pending` (safe, manual review) or `approved` (immediate, your engine reverts spam later). |
-
-Full list: [deployment.md](deployment.md). The `.env.example` file is the canonical commented reference.
-
-### Quick local sanity check
-
-```sh
-export ADMIN_TOKEN=$(openssl rand -base64 32)
-export PUBLIC_TARGET_ORIGIN=https://your-site.example
-export ALLOWED_CORS_ORIGIN=https://your-site.example
-./target/release/zapiska   # or: docker compose up
+```env
+ADMIN_TOKEN=replace-this-value
 ```
 
-In another shell:
+Set the site values:
+
+```env
+PUBLIC_TARGET_ORIGIN=https://your-site.example
+ALLOWED_CORS_ORIGIN=https://your-site.example
+DATABASE_PATH=/opt/zapiska/comments.db
+BIND_ADDR=127.0.0.1:3000
+```
+
+`PUBLIC_TARGET_ORIGIN` is compared by parsed origin. It is not a string prefix.
+
+`ALLOWED_CORS_ORIGIN` can contain one origin, a comma-separated list, or `*`.
+Use `*` only for local testing.
+
+The full variable list is in [Deployment](deployment.md) and `.env.example`.
+
+## Check the server
+
+Run the binary:
+
+```sh
+./target/release/zapiska
+```
+
+Check health and the public API:
 
 ```sh
 curl http://127.0.0.1:3000/healthz
-# -> ok
-
 curl 'http://127.0.0.1:3000/api/comments?path=/'
-# -> {"total":0,"comments":[]}
-
-curl -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:3000/api/admin/pending
-# -> {"comments":[]}
 ```
 
-Interactive API docs are served at `/swagger-ui/` while the server runs.
+The first response is `ok`. The second response is an empty comments object.
 
----
+Open the interactive API page at:
 
-## 3. Put it behind a reverse proxy
+```text
+http://127.0.0.1:3000/swagger-ui/
+```
 
-zapiska binds `127.0.0.1:3000` by default. It expects TLS to be terminated upstream. Below are minimal nginx and Caddy examples — pick whichever you use.
+## Use a reverse proxy
 
-### nginx (with certbot)
+The bare-metal server listens on `127.0.0.1:3000`.
+Terminate TLS in nginx or Caddy.
+
+Example nginx location:
 
 ```nginx
-server {
-    listen 443 ssl http2;
-    server_name comments.your-site.example;
-
-    ssl_certificate     /etc/letsencrypt/live/comments.your-site.example/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/comments.your-site.example/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-
-server {
-    listen 80;
-    server_name comments.your-site.example;
-    return 301 https://$host$request_uri;
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Real-IP $remote_addr;
 }
 ```
 
-> **Note on rate limiting.** zapiska rate-limits by TCP peer IP. Behind a reverse proxy, that peer is the proxy itself, not the real client. If you need per-client limits to work correctly across multiple real clients, run zapiska directly or front it with a layer that still passes distinct source IPs (e.g. a localhost-bound `proxy_pass` per real client, or terminate TLS in zapiska itself). For most personal-blog use cases the per-IP caps are a backstop and `tower_governor` on the proxy IP is fine.
+See [Deployment](deployment.md) for a complete proxy and service example.
 
-### Caddy (automatic TLS)
+## Add the widget
 
-```caddy
-comments.your-site.example {
-    reverse_proxy 127.0.0.1:3000
-}
-```
-
-### systemd unit (for non-Docker deployments)
-
-```ini
-[Unit]
-Description=zapiska comment server
-After=network.target
-
-[Service]
-Type=simple
-User=zapiska
-WorkingDirectory=/opt/zapiska
-EnvironmentFile=/opt/zapiska/.env
-ExecStart=/opt/zapiska/zapiska
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then:
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now zapiska
-sudo journalctl -u zapiska -f   # watch it start
-```
-
----
-
-## 4. Add comments to your site
-
-### Show approved comments
-
-Drop this where you want the thread to appear:
+Put this element where the comment thread must appear:
 
 ```html
 <div id="nc-comments"></div>
 <script
   id="nc-comments"
   src="https://comments.your-site.example/embed/comments.js"
-  data-path="/blog/hello-world"></script>
+  data-path="/blog/hello-world"
+  data-limit="50"
+></script>
 ```
 
-`data-path` must match the path on your main site (the stuff after `PUBLIC_TARGET_ORIGIN`). For `https://your-site.example/blog/hello-world` it's `/blog/hello-world`.
+The value of `data-path` must match the path after the main site origin.
 
-The widget fetches `GET /api/comments?path=...&limit=50` and renders approved comments. `content` is ammonia-cleaned server-side and still re-sanitised client-side; author fields are inserted as text, never `innerHTML`.
+The widget reads approved comments and builds the reply tree in the browser.
+It renders sanitized `content` as HTML. It renders author values as text.
 
-Every text string, behavior flag, and style in the widget is overridable — see the [full attribute reference](../embed/README.md#all-data--attributes). You can also suppress the built-in styles entirely with `data-nostyles="true"` and provide your own.
+The server default is `MAX_THREAD_DEPTH=0`. Set a value above `0` before you
+use reply forms.
 
-> Want to build your own frontend? The [embed README](../embed/README.md#building-a-custom-frontend) has a complete code example using just `fetch()`. zapiska is backend-only — how comments look is entirely up to you.
+See [Embed](../embed/README.md) for all widget attributes.
 
-### Accept new comments
+## Add a native comment form
+
+Create the top-level form on your site:
 
 ```html
 <form action="https://comments.your-site.example/api/comment" method="POST">
   <input type="hidden" name="target_path" value="/blog/hello-world">
-  <input type="text"   name="author_name" placeholder="Name" required>
-  <input type="url"    name="author_url"   placeholder="Website (optional)">
+  <input type="text" name="author_name" required>
+  <input type="url" name="author_url">
   <textarea name="content" required></textarea>
-  <!-- honeypot: bots fill this, humans never see it -->
   <input type="text" name="website" style="display:none">
   <button type="submit">Send</button>
 </form>
 ```
 
-The response is `201` with `{ "delete_token": "..." }`. Keep that token if you want self-service deletion (`POST /api/comment/{id}/delete`).
+The hidden `website` field is the current honeypot field. A filled honeypot is
+stored with a flag. The server does not discard it.
 
-### Advertise webmention support (optional, but recommended)
+The response contains a delete token and the final initial status. It does not
+contain the new comment ID.
 
-In your main site's `<head>`:
+## Add webmention discovery
+
+When webmentions are enabled, add this link to the main site head:
 
 ```html
-<link rel="webmention" href="https://comments.your-site.example/api/webmention" />
+<link rel="webmention" href="https://comments.your-site.example/api/webmention">
 ```
 
-Only do this if you build with the `webmentions` feature (default). Disabling it strips the webmention endpoint, worker, SSRF guards, and the microformats parser.
+The worker verifies the source backlink before it stores a mention.
 
-### Add Cloudflare Turnstile (optional bot protection)
+## Enable Turnstile
 
-Turnstile is **off by default** — comment submissions go straight through. To require a human-solving widget:
+Turnstile is off by default.
 
-1. Create a widget at https://dash.cloudflare.com → Turnstile. Note the **sitekey** (public) and **secret** (private). Add your main site's hostname (and `localhost`, `127.0.0.1` for dev) to the widget's allowed domains.
-2. Set on zapiska:
-   ```env
-   TURNSTILE_ENABLED=true
-   TURNSTILE_SECRET_KEY=0x4AAAAAAA...   # the secret, never the sitekey
-   ```
-   Restart zapiska. Startup will fail fast if `TURNSTILE_ENABLED=true` and the secret is missing.
-3. Load the widget script in your page (or per-form):
-   ```html
-   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-   ```
-4. Add the widget container inside your comment form. The widget renders the `cf-turnstile-response` hidden input automatically — do **not** add it yourself:
-   ```html
-   <form action="https://comments.your-site.example/api/comment" method="POST">
-     <input type="hidden" name="target_path" value="/blog/hello-world">
-     <input type="text" name="author_name" placeholder="Name" required>
-     <textarea name="content" required></textarea>
-     <div class="cf-turnstile" data-sitekey="0x4AAAAAAA..."></div>
-     <input type="text" name="website" style="display:none">  <!-- honeypot -->
-     <button type="submit">Send</button>
-   </form>
-   ```
+1. Create a Turnstile widget.
+2. Add the main site host to the widget.
+3. Set `TURNSTILE_ENABLED=true`.
+4. Set `TURNSTILE_SECRET_KEY` on the server.
+5. Put the public sitekey in the form.
 
-When enabled, zapiska verifies the token server-side against Cloudflare's `siteverify` before storing the comment. Invalid/expired/replayed tokens return `400 { "code": "turnstile_failed" }` and the comment is not stored. If zapiska can't reach Cloudflare's siteverify endpoint, it returns `503` and **fails closed**. See [deployment.md](deployment.md#cloudflare-turnstile-optional-bot-protection) for the full env reference and [security.md](security.md#cloudflare-turnstile-optional) for the threat model.
+```html
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="public-sitekey"></div>
+```
 
----
+The widget creates `cf-turnstile-response`. Do not create that hidden field by
+hand.
 
-## 5. Moderate
+The server checks the token. It returns `400` for a failed token and `503` when
+Cloudflare cannot be reached. It does not store the comment in either case.
 
-New comments land with `status = 'pending'` (unless `DEFAULT_COMMENT_STATUS=approved`). They are not served by `GET /api/comments` until you approve them.
+## Moderate comments
 
-Easiest path: log in to get a session cookie and call the admin API.
+New native comments use `pending` status by default.
+
+Authenticate:
 
 ```sh
-# Get a session cookie (HttpOnly, 30-day)
 curl -c cookies.txt -X POST \
   -H "Content-Type: application/json" \
   -d "{\"token\":\"$ADMIN_TOKEN\"}" \
-  https://comments.your-site.example/api/admin/login
+  http://127.0.0.1:3000/api/admin/login
+```
 
-# List pending comments
-curl -b cookies.txt https://comments.your-site.example/api/admin/pending
+List pending comments:
 
-# Approve / spam / delete
+```sh
+curl -b cookies.txt http://127.0.0.1:3000/api/admin/pending
+```
+
+Approve one comment:
+
+```sh
 curl -b cookies.txt -X POST \
   -H "Content-Type: application/json" \
-  -d '{"id":1,"action":"approved"}' \
-  https://comments.your-site.example/api/admin/moderate
+  -d '{"id":42,"action":"approved"}' \
+  http://127.0.0.1:3000/api/admin/moderate
 ```
 
-A minimal admin dashboard is included at `embed/admin.html` if you'd rather click buttons. Point it at your instance and log in with `ADMIN_TOKEN`.
+The valid actions are `approved`, `spam`, `deleted`, and `pending`.
 
-### Automate moderation
+## Configure reactions
 
-Once you're happy with the workflow, hook an external moderation engine in. Either:
+The default mode requires the admin token:
 
-- Set `MODERATION_WEBHOOK_URL` and zapiska will `POST` the payload to your service on every submission (fire-and-forget by default, or `MODERATION_WEBHOOK_MODE=sync` to wait for an action), **or**
-- Have your service poll `GET /api/admin/comments?status=pending` and batch-moderate via `POST /api/admin/moderate/batch`.
-
-The full walkthrough (rules engine, LLM, Flask webhook server) is in [moderation-engine.md](moderation-engine.md).
-
----
-
-## 6. Back up
-
-The entire state is one SQLite file plus its WAL:
-
-```sh
-cp /data/comments.db  /backups/comments-$(date +%F).db
-cp /data/comments.db-wal /backups/comments-$(date +%F).db-wal 2>/dev/null || true
+```env
+REACTIONS_ALLOWED=admin
+REACTIONS_SET=👍,❤️,😄,😮,😢,😡
 ```
 
-For systemd deployments, swap `/data/` for your `DATABASE_PATH` directory. For Docker, `docker compose exec zapiska cat /data/comments.db > backup.db` works in a pinch, but a cold file copy from the host volume is safer.
+Set `REACTIONS_ALLOWED=anyone` to identify callers by a hash of the peer IP.
+This mode has limited abuse protection. Use it only when the risk is known.
 
----
-
-## 7. Update
+Moderate reactions with:
 
 ```sh
-# From source
-git pull
+curl -b cookies.txt http://127.0.0.1:3000/api/admin/reactions?status=pending
+```
+
+## Configure language filtering
+
+The language gate applies only to native comments and is off by default.
+
+Allow English and German:
+
+```env
+COMMENT_LANG_ALLOWED=en,de
+COMMENT_LANG_ALLOW_EMOJI=always
+```
+
+A whitelist takes precedence over `COMMENT_LANG_BLOCKED`.
+Unknown and emoji-heavy text uses `COMMENT_LANG_ALLOW_EMOJI`.
+
+The detector uses `whatlang`. It checks sanitized, tag-free content.
+
+## Configure notifications
+
+Set Telegram, Slack, or Discord values in the environment.
+
+```env
+TELEGRAM_BOT_TOKEN=replace-this-value
+TELEGRAM_CHAT_ID=@alerts
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/example
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/example
+```
+
+The default batcher groups events for 60 seconds by page.
+
+```env
+NOTIFY_BATCH_SECS=60
+NOTIFY_BATCH_THRESHOLD=20
+NOTIFY_BATCH_GRANULARITY=page
+```
+
+Set `NOTIFY_BATCH_SECS=0` for immediate delivery.
+Delivery failure does not fail the comment request.
+
+## Export data
+
+Create a JSON export with admin authentication:
+
+```sh
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:3000/api/admin/export > backup.json
+```
+
+The export contains comments, webmention state, extracted URLs, GitHub
+profiles, and reactions.
+
+Restore it with:
+
+```sh
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data @backup.json \
+  http://127.0.0.1:3000/api/admin/import
+```
+
+The import limit is 16 MiB. It re-sanitizes comment content and skips failed
+comment and URL rows.
+
+## Back up the SQLite file
+
+Stop the service before a file copy:
+
+```sh
+sudo systemctl stop zapiska
+cp /opt/zapiska/comments.db /backups/comments.db
+cp /opt/zapiska/comments.db-wal /backups/comments.db-wal 2>/dev/null || true
+sudo systemctl start zapiska
+```
+
+The JSON export is safer for a live backup.
+
+## Update zapiska
+
+From source:
+
+```sh
 cargo build --release
 sudo systemctl restart zapiska
-
-# Docker
-git pull
-docker compose up -d --build
 ```
 
-Schema migrations run automatically on startup — they're idempotent.
+With Docker:
 
----
+```sh
+```
 
-## 8. Troubleshooting
+Database schema creation runs at startup and is idempotent.
 
-- **`failed to load configuration: ADMIN_TOKEN is required but not set`** — your `.env` isn't on the path or the var is empty. zapiska loads `.env` from the working directory automatically (via `dotenvy`); under systemd set `EnvironmentFile=/opt/zapiska/.env` on the unit.
-- **Browser fetch to `/api/comments` is blocked by CORS.** — `ALLOWED_CORS_ORIGIN` doesn't include your main site's exact origin (scheme + host + port). For local dev with a static site generator, add the dev server origin too: `ALLOWED_CORS_ORIGIN=http://localhost:1313,https://your-site.example`. Fix the env var and restart.
-- **Webmention returns `400 invalid target`.** — the `target` URL you received doesn't start with `PUBLIC_TARGET_ORIGIN`. Either fix the sender or correct the env var.
-- **`503 Service Unavailable` from `POST /api/webmention`.** — the worker backlog is full (`WORKER_BACKLOG`, default 64). Raise it or investigate a fetch storm.
-- **Comments are accepted but my site shows nothing.** — they're still `pending`. Approve them via the admin API, or set `DEFAULT_COMMENT_STATUS=approved` if you prefer immediate posts.
-- **Rate limits don't seem per-client.** — you're probably hitting zapiska through a single reverse proxy. See the note in [step 3](#3-put-it-behind-a-reverse-proxy).
+## Troubleshooting
 
----
+### The server stops at startup
 
-## Next steps
+Check `ADMIN_TOKEN`. Check the environment file path.
 
-- [api.md](api.md) — full HTTP reference.
-- [deployment.md](deployment.md) — feature flags, logging, systemd/Docker details, backups.
-- [moderation-engine.md](moderation-engine.md) — building your own spam pipeline.
-- [security.md](security.md) — the threat model and how each control is implemented.
+### Browser requests fail with CORS
+
+Set `ALLOWED_CORS_ORIGIN` to the exact scheme, host, and port of the main site.
+Restart zapiska after the change.
+
+### Replies return an error
+
+Set `MAX_THREAD_DEPTH` above `0`. The parent comment must be approved and use
+the same path.
+
+### A comment is stored but does not appear
+
+Check its status. The public API returns approved comments only.
+
+### Rate limits use one shared client address
+
+The server sees the reverse proxy address. Review the proxy and network path
+when several visitors share one address.

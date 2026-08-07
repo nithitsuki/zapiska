@@ -3,40 +3,88 @@
 </p>
 
 <p align="center">
-  <strong>A comment and webmention engine.</strong>
+  <strong>A self-hosted comment and webmention engine.</strong>
   <br>
-  Self-hosted. One binary. Your data.
+  One Rust binary. One SQLite file. Your data.
   <br>
-  <a href="docs/getting-started.md">Getting started</a> · <a href="docs/api.md">API</a> · <a href="https://discord.gg/Q9fjx3gynN">Discord</a> · <a href="https://github.com/sponsors/nithitsuki">Sponsor</a>
+  <a href="docs/getting-started.md">Getting started</a> |
+  <a href="docs/api.md">API</a> |
+  <a href="embed/README.md">Embed</a> |
+  <a href="https://discord.gg/Q9fjx3gynN">Discord</a> |
+  <a href="https://github.com/sponsors/nithitsuki">Sponsor</a>
 </p>
 
 ---
 
-# features
+# Features
 
-<p align="center">
-  <span style="font-size: 0.8em; color: #666;">fully custom UI left upto you!</span>
-  <br>
-  <img src="assets/basic-ss.png" alt="zapiska screenshot" width="300px">
-  <br>
-  <span style="font-size: 0.8em; color: #666;">Basic screenshot of the a minimal UI frontend</span>
-</p>
+## Backend only
 
+Use the supplied widget or build your own frontend. The public API returns JSON.
 
-### Style it all you want
-Zapiska is backend only. Use the [configurable widget](embed/README.md), or build your [own widget](embed/README.md#building-a-custom-frontend). Indie Web is all about expressing yourself
+## Bring your own moderation
 
-### Bring your own moderation (BYOM)
-Hook in an LLM, a rules engine, a community blocklist, or the built-in dashboard. Zapiska doesn't decide what spam means-it's your call. Community moderation tools plug in via the admin API.
+Use the admin API, a rules engine, an LLM, or another moderation service.
+Comments and reactions stay pending until a moderator approves them.
 
-### Threaded replies
-Nested conversations supported, oldest-first within each thread. Prefer flat? Set depth to 0.
+## Threaded replies
 
-### Webmention support
-Accepts W3C webmentions, auto-fetches source pages, parses author profiles, and pulls in avatars.
+Replies use `parent_id` and `depth`. Set `MAX_THREAD_DEPTH` above `0` to enable
+threading. The server clamps the value to `0` through `10`.
 
-### Built-in spam protection
-Rate limiting, per-IP daily caps, per-domain caps, honeypot fields, content-hash dedup, and URL cross-referencing. Cloudflare turnstile is also supported for extra protection.
+## Reactions
 
-### One binary, zero dependencies
-Rust and SQLite only. No Postgres, no Redis, no JS runtime. ~10MB, runs on a $5 VPS or a Raspberry Pi.
+The default reaction set is `👍,❤️,😄,😮,😢,😡`. Reactions use the same pending,
+approved, spam, and deleted states as comments. Only approved counts appear in
+the public read API.
+
+## RSS feeds
+
+Use `/feed.xml` for approved comments across the site. Add `path` to select one
+page. Feed items use RSS 2.0 and RFC 822 dates.
+
+## Language filtering
+
+Use ISO 639-1 allow or block lists for native comments. The gate is off by
+default. Configure a separate policy for emoji-heavy or unknown text.
+
+## Notifications
+
+Send new comment and webmention alerts to Telegram, Slack, or Discord. The
+in-memory batcher groups alerts by page or across the site. Set the window to
+`0` for immediate delivery.
+
+## Export and import
+
+Export and restore all five SQLite tables with JSON. The export includes
+comments, webmention state, extracted URLs, GitHub profiles, and reactions.
+Imports preserve IDs and statuses, re-sanitize comment content, and skip bad
+rows without stopping the whole import.
+
+## Webmention support
+
+The default `webmentions` feature receives W3C webmentions, verifies backlinks,
+fetches source pages, parses h-entry and h-card data, and stores mentions.
+
+Build without webmentions when you need a comments-only binary:
+
+```sh
+cargo build --release --no-default-features --features comments
+```
+
+## Protection
+
+The server provides body limits, per-route rate limits, daily and domain caps,
+honeypot flags, content hashes for moderation lookup, HTML sanitization, URL
+tracking, and optional Cloudflare Turnstile verification.
+
+`content_hash` helps a moderation service find repeated content. It does not
+reject or merge duplicate comments.
+
+## Small deployment
+
+The binary uses Rust and SQLite. SQLite is compiled with the bundled feature.
+No PostgreSQL, Redis, Node.js, or JavaScript runtime is required on the server.
+
+See [Getting started](docs/getting-started.md), [Deployment](docs/deployment.md),
+[API](docs/api.md), [Security](docs/security.md), and [Architecture](docs/architecture.md).

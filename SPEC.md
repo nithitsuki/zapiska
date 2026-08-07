@@ -1,593 +1,433 @@
 # Specification
 
-A self-hosted comment engine in Rust (Axum + SQLite) for the IndieWeb. Handles:
+zapiska is a self-hosted comment and webmention engine.
+It uses Rust, Axum, Tokio, and SQLite.
 
-1. Native comment form submissions via a public API.
-2. Incoming [W3C Webmentions](https://www.w3.org/TR/webmention/) from other IndieWeb sites.
-3. Public read API (JSON, CORS-enabled) for embedding approved comments on `nithitsuki.com` via a client-side `<script>`.
-4. Bearer-token-protected admin endpoints for manual moderation.
+The server supports:
 
-Runs locally behind a reverse proxy at `https://webmention.nithitsuki.com`. The main site it serves is `https://nithitsuki.com`; webmention `target` URLs must reference the main site.
+1. Native comments.
+2. Threaded replies.
+3. Approved comment reads.
+4. Reactions with moderation status.
+5. RSS feeds.
+6. W3C webmention receipt.
+7. Admin moderation and lookup.
+8. JSON export and import.
+9. Telegram, Slack, and Discord notifications.
 
----
+The default target origin is `https://nithitsuki.com`.
+Deployments must set `PUBLIC_TARGET_ORIGIN` to their own site origin.
 
-## 1. Architecture
+## Architecture
 
-The app is async. HTTP handlers are decoupled from heavy outbound work (webmention fetches) via an mpsc channel.
+The process has these layers:
 
-```
-                ┌─────────────────────────────────┐
-                │         AXUM WEB ROUTER         │
-                │  (tower layers: body-limit,    │
-                │   CORS, rate-limit, tracing)    │
-                └───┬──────────┬──────────┬───────┘
-                    │          │          │
-   POST /api/comment    POST /api/webmention   GET /api/comments
-   (native form)         (federated ping)       (public read)
-        │                     │                     │
-        ▼                     ▼                     ▼
-  ┌────────────┐       ┌──────────────┐       ┌──────────────┐
-  │ Validate + │       │ Validate     │       │ SQLite read  │
-  │ ammonia    │       │ target origin│       │ (spawn_blk)  │
-  │ sanitize   │       │ enqueue to   │       └──────┬───────┘
-  │ content    │       │ mpsc channel │              │
-  └─────┬──────┘       └──────┬───────┘              │
-        │                     │ 202 Accepted         │
-        │                     ▼                      │
-        │             ┌──────────────────────┐       │
-        │             │ Tokio async worker   │       │
-        │             │  - SSRF-safe fetch   │       │
-        │             │  - verify backlink   │       │
-        │             │  - parse h-entry     │       │
-        │             │  - parse h-card      │       │
-        │             │  - GitHub enrichment │       │
-        │             │    (cached API)      │       │
-        │             └──────────┬───────────┘       │
-        │                        │                   │
-        ▼                        ▼                   ▼
-   ┌──────────────────────────────────────────────────────┐
-   │           SQLite Database Store (comments.db)        │
-   │   comments.status: 'pending' (default)               │
-   │   github_profiles cache (30-day TTL)                 │
-   └──────────────────────────┬───────────────────────────┘
-                              │
-              POST /api/admin/moderate  +  GET /api/admin/pending
-              (Bearer ADMIN_TOKEN)         (Bearer ADMIN_TOKEN)
-                              │
-                              ▼
-   ┌──────────────────────────────────────────────────────┐
-   │           Public Read API (/api/comments)            │
-   │           - returns status='approved' only           │
-   └──────────────────────────────────────────────────────┘
+```text
+Axum router
+    |
+    +-- public comments
+    +-- native comments
+    +-- reactions
+    +-- RSS
+    +-- webmentions --> bounded Tokio channel --> worker
+    +-- admin routes
+    |
+SQLite pool and repository
 ```
 
-### Async rules
+All SQLite work runs inside `spawn_blocking`.
+The database uses WAL mode.
 
-- All SQLite ops go through `spawn_blocking` — disk I/O never blocks the async runtime.
-- Webmention worker uses a bounded `tokio::sync::mpsc::channel`. HTTP handler pushes a `(source, target)` job and returns `202` immediately.
-- Backlog capped at 64 (default). Overflow gets `503` instead of unbounded buffering.
-- Graceful shutdown drains the queue and waits for in-flight fetches before exit.
+## Feature flags
 
----
+```toml
+default = ["comments", "webmentions"]
+comments = []
+webmentions = ["scraper", "ipnet"]
+```
 
-### Feature flags
+The `comments` feature is empty. It remains for the comments-only build.
 
-Webmentions are optional at compile time. Building without them strips the webmention endpoint, background worker, SSRF guards, and microformats parser:
+The `webmentions` feature controls the webmention endpoint, worker, parser,
+SSRF module, and webmention-specific avatar fetches.
+
+Build without webmentions:
 
 ```sh
 cargo build --release --no-default-features --features comments
 ```
 
-| Feature | Default | Description |
-|---|---|---|
-| `comments` | on | Native comment submission, threaded read API, admin API, embed widget |
-| `webmentions` | on | W3C webmention ingress, background worker, h-entry parsing, SSRF protection, avatar favicon extraction |
+Language detection is a runtime feature. The `whatlang` dependency is compiled
+in every build. The language gate is off unless a language list is configured.
 
----
+## Configuration
 
-## 2. Configuration
-
-Everything comes from environment variables at startup. No secrets in code.
+The server reads environment variables at startup.
 
 | Variable | Default | Description |
-|---|---|---|---|
-| `ADMIN_TOKEN` | *required, no default* | Bearer token for `/api/admin/*`. Loaded once; compared in constant time. |
-| `BIND_ADDR` | `127.0.0.1:3000` | Listen address. Localhost-only because we sit behind a reverse proxy. |
-| `PUBLIC_TARGET_ORIGIN` | `https://nithitsuki.com` | The canonical origin of the main site this server rates mentions for. `target` must start with this. |
-| `ALLOWED_CORS_ORIGIN` | `https://nithitsuki.com` | Single origin the read API is callable from. Reflected verbatim in `Access-Control-Allow-Origin`. |
+|---|---|---|
+| `ADMIN_TOKEN` | Required | Token for protected admin routes. |
+| `BIND_ADDR` | `127.0.0.1:3000` | Listen address. |
+| `PUBLIC_TARGET_ORIGIN` | `https://nithitsuki.com` | Accepted webmention target origin. |
+| `ALLOWED_CORS_ORIGIN` | `https://nithitsuki.com` | One origin, a list, or `*`. |
 | `DATABASE_PATH` | `./comments.db` | SQLite file path. |
-| `GITHUB_TOKEN` | *(optional)* | Personal access token (minimal scope). Optional — raises anonymous GitHub API limit from 60/hr to 5000/hr. Strongly recommended. |
-| `MAX_CONTENT_LEN` | `2000` | Max `content` length in chars. |
-| `MAX_AUTHOR_LEN` | `100` | Max `author_name` length in chars. |
-| `MAX_BODY_SIZE` | `8192` | Per-request body limit bytes (tower). |
-| `FETCH_TIMEOUT_MS` | `4000` | Outbound HTTP budget for source/GitHub fetches. |
-| `WORKER_BACKLOG` | `64` | Bounded mpsc capacity; overflow returns `503`. |
-| `HONEYPOT_FIELD` | `website` | Name of the honeypot form field. When non-empty, the submission is stored with `honeypot = 1` (flagged, not discarded). |
-| `STORE_IP_ADDRESS` | `false` | Store submitter IPs in the database for spam analysis. When enabled, IPs are SHA-256 hashed before storage — raw IPs never touch disk. |
-| `IP_HASH_SECRET` | *(unset)* | Optional salt mixed into the IP hash to prevent rainbow table attacks. Only used when `STORE_IP_ADDRESS=true`. |
-| `MAX_COMMENTS_PER_IP_PER_DAY` | `50` | Per-IP daily native comment cap. `0` = unlimited. |
-| `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` | `10` | Per-source-domain hourly webmention cap. `0` = unlimited. |
-| `MODERATION_WEBHOOK_URL` | *(unset)* | URL for external moderation webhook. POSTs full enriched payload on each submission. |
-| `MODERATION_WEBHOOK_MODE` | `async` | `async` = fire-and-forget; `sync` = wait for response, apply returned `action`. |
-| `TELEGRAM_BOT_TOKEN` | *(unset)* | Telegram bot token (via @BotFather). Together with `TELEGRAM_CHAT_ID`, a message is sent for every new comment. |
-| `TELEGRAM_CHAT_ID` | *(unset)* | Telegram chat ID (numeric or `@username`) that receives new-comment alerts. |
-| `TELEGRAM_API_BASE` | `https://api.telegram.org` | Override for the Telegram Bot API base URL (tests / proxies). |
-| `SLACK_WEBHOOK_URL` | *(unset)* | Slack Incoming Webhook URL; new comments are posted to the channel. |
-| `DISCORD_WEBHOOK_URL` | *(unset)* | Discord Incoming Webhook URL; new comments are posted to the channel. |
-| `NOTIFY_BATCH_SECS` | `60` | Batching window in seconds. Comments arriving within the window are collected into one digest message per page. `0` = send every comment immediately. |
-| `NOTIFY_BATCH_THRESHOLD` | `20` | Mid-window flush: when a page's pending batch reaches this count, it is flushed immediately as an aggregated digest. `0` = window-based only. |
-| `NOTIFY_BATCH_GRANULARITY` | `page` | `page` = one window per `target_path`; `global` = a single site-wide window. |
-| `DEFAULT_COMMENT_STATUS` | `pending` | Initial moderation status. `pending` = requires review; `approved` = auto-publish. |
-| `MAX_THREAD_DEPTH` | `0` | Maximum nesting depth for replies. `0` = nesting disabled. Clamped 0-10. |
-| `RUST_LOG` | `info` | `tracing` filter directive. |
+| `GITHUB_TOKEN` | Unset | Optional GitHub API token. |
+| `MAX_CONTENT_LEN` | `2000` | Stored content limit in characters. |
+| `MAX_AUTHOR_LEN` | `100` | Author name limit in characters. |
+| `MAX_BODY_SIZE` | `8192` | Global body limit in bytes. |
+| `FETCH_TIMEOUT_MS` | `4000` | Outbound request timeout. |
+| `WORKER_BACKLOG` | `64` | Webmention queue capacity. |
+| `RUST_LOG` | `info` | Log filter. |
+| `MAX_COMMENTS_PER_IP_PER_DAY` | `50` | Native comment daily cap. |
+| `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` | `10` | Webmention domain cap. |
+| `STORE_IP_ADDRESS` | `false` | Store raw and hashed peer IP values. |
+| `IP_HASH_SECRET` | Unset | Salt for the IP hash. |
+| `MODERATION_WEBHOOK_URL` | Unset | External moderation webhook. |
+| `MODERATION_WEBHOOK_MODE` | `async` | `async` or `sync`. |
+| `DEFAULT_COMMENT_STATUS` | `pending` | Initial native comment status. |
+| `MAX_THREAD_DEPTH` | `0` | Reply depth. Clamped to `0` through `10`. |
+| `TELEGRAM_BOT_TOKEN` | Unset | Telegram bot token. |
+| `TELEGRAM_CHAT_ID` | Unset | Telegram destination. |
+| `TELEGRAM_API_BASE` | Telegram API URL | Telegram API override. |
+| `SLACK_WEBHOOK_URL` | Unset | Slack webhook. |
+| `DISCORD_WEBHOOK_URL` | Unset | Discord webhook. |
+| `NOTIFY_BATCH_SECS` | `60` | Notification window. Zero sends immediately. |
+| `NOTIFY_BATCH_THRESHOLD` | `20` | Early notification flush count. |
+| `NOTIFY_BATCH_GRANULARITY` | `page` | `page` or `global`. |
+| `REACTIONS_ALLOWED` | `admin` | `admin` or `anyone`. |
+| `REACTIONS_SET` | Six emoji values | Allowed reaction values. |
+| `COMMENT_LANG_ALLOWED` | Unset | ISO 639-1 allow list. |
+| `COMMENT_LANG_BLOCKED` | Unset | ISO 639-1 block list. |
+| `COMMENT_LANG_ALLOW_EMOJI` | `always` | `always`, `never`, or `if_unknown`. |
+| `TURNSTILE_ENABLED` | `false` | Require Turnstile for native comments. |
+| `TURNSTILE_SECRET_KEY` | Unset | Turnstile secret. |
+| `TURNSTILE_VERIFY_URL` | Cloudflare URL | Turnstile verify endpoint. |
 
-Startup fails fast if `ADMIN_TOKEN` is unset.
+Rate limit variables are:
 
-### Admin notifications
+| Variable | Default |
+|---|---:|
+| `RATE_LIMIT_NATIVE` | `50` |
+| `RATE_LIMIT_NATIVE_WINDOW` | `60` |
+| `RATE_LIMIT_WEBMENTION` | `30` |
+| `RATE_LIMIT_WEBMENTION_WINDOW` | `60` |
+| `RATE_LIMIT_READ` | `60` |
+| `RATE_LIMIT_READ_WINDOW` | `60` |
+| `RATE_LIMIT_ADMIN_MODERATE` | `10` |
+| `RATE_LIMIT_ADMIN_MODERATE_WINDOW` | `60` |
 
-zapiska can alert an admin when new comments arrive (native or webmention). Unlike the moderation webhook — which is a *moderation decision channel* — these are one-way notifications:
+`HONEYPOT_FIELD` is loaded from the environment. The current native handler
+uses the `website` field regardless of this value.
 
-- **Telegram**: requires both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. A message (HTML parse mode) with the commenter, content preview (300 chars, HTML stripped), honeypot flag, and the admin path is sent to `POST {TELEGRAM_API_BASE}/bot{token}/sendMessage`.
-- **Slack**: `SLACK_WEBHOOK_URL` receives a blocks-format payload with the same content.
-- **Discord**: `DISCORD_WEBHOOK_URL` receives a markdown `content` payload (posted as user `zapiska`).
+## Data model
 
-#### Batching
+SQLite has five tables.
 
-By default (`NOTIFY_BATCH_SECS=60`) notifications are **batched**, so a comment flood produces a handful of messages rather than one per comment (the "10+, 100+, 1k+" pattern). Behavior:
+### comments
 
-- The first comment on a page opens a window; subsequent comments on that page within the window are counted silently.
-- When the window closes, ONE digest is sent per channel: "6 new comments on /blog/hello · By: Alice, Bob, Carol +3 more · First: Alice: "…"" with a link to the admin pending queue.
-- If `NOTIFY_BATCH_THRESHOLD` (default 20) is reached mid-window, the batch is flushed immediately as an aggregated digest.
-- `NOTIFY_BATCH_GRANULARITY=global` switches to a single site-wide window (digests mix pages).
-- `NOTIFY_BATCH_SECS=0` restores immediate per-comment delivery.
+The `comments` table has these fields:
 
-The batcher is in-memory; batches still open at shutdown are lost (same tradeoff as the in-memory rate limiter). For webmentions, only the *first* sighting of a `source` URL is batched — update pings are silent.
-
-All delivery is **fire-and-forget**: each channel is sent on its own spawned task with a 10s timeout; failures are logged at `warn` and never affect the comment submission.
-
----
-
-## 3. Dependencies
-
-Crates in `[dependencies]`:
-
-| Crate | Purpose |
+| Field | Meaning |
 |---|---|
-| `axum` | HTTP router, layers. |
-| `tokio` (full) | Async runtime, mpsc, spawn_blocking, signal handling. |
-| `tower` / `tower-http` | Body limit, CORS, trace layers. |
-| `tower_governor` | Per-IP rate limiting on ingestion routes. |
-| `rusqlite` | SQLite driver. |
-| `r2d2` + `r2d2_sqlite` | Connection pool for `spawn_blocking` SQLite ops. |
-| `reqwest` (rustls, no default features + `https`) | Outbound fetches for webmention source + GitHub API. |
-| `ammonia` | HTML sanitizer for stored content. |
-| `scraper` | CSS-selector parsing for microformats2 (`h-entry`, `h-card`). |
-| `url` | URL parsing/validation. |
-| `serde` + `serde_json` | (De)serialization. |
-| `tracing` + `tracing-subscriber` | Structured logging. |
-| `subtle` | Constant-time admin token compare. |
+| `id` | Autoincrement row ID. |
+| `target_path` | Local path on the target site. |
+| `comment_type` | `native` or `webmention`. |
+| `source_url` | Webmention source URL or null. |
+| `author_name` | Cleaned author name. |
+| `author_url` | Absolute HTTP or HTTPS URL or null. |
+| `author_avatar` | Avatar URL or null. |
+| `content` | Sanitized HTML. |
+| `status` | `pending`, `approved`, `spam`, or `deleted`. |
+| `created_at` | Creation timestamp. |
+| `updated_at` | Last update timestamp. |
+| `parent_id` | Parent comment ID or null. |
+| `depth` | Reply depth. |
+| `honeypot` | Honeypot flag. |
+| `delete_token` | Native self-delete token or null. |
+| `submitter_ip` | Raw peer IP when IP storage is enabled. |
+| `submitter_ip_hash` | Salted or unsalted SHA-256 IP hash. |
+| `content_hash` | Hash of normalized input content. |
 
----
+### webmention_seen
 
-## 4. Database Schema
+This table tracks source and target pairs.
+The status is `alive` or `gone`.
 
-A SQLite file (`comments.db`) with two tables.
+### comment_urls
 
-### 4.1 `comments`
+This table stores URLs found in native comment form HTML.
+Each row has a normalized URL, domain, and URL hash.
 
-| Field | Type | Modifiers | Description |
-|---|---|---|---|
-| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | Row id. |
-| `target_path` | TEXT | NOT NULL | Destination local path on the main site (e.g., `/blog/hello`). Always starts with `/`, no `//`, no control chars, ≤1024 chars. |
-| `comment_type` | TEXT | NOT NULL CHECK IN (`native`,`webmention`) | Ingestion vector. |
-| `source_url` | TEXT | NULLABLE | For webmentions: the remote `source` URL. NULL for native. |
-| `author_name` | TEXT | NOT NULL | Cleaned name. ≤`MAX_AUTHOR_LEN`. |
-| `author_url` | TEXT | NULLABLE | Absolute `http(s)` URL (validated via `url` crate) or NULL. |
-| `author_avatar` | TEXT | NULLABLE | Absolute `http(s)` URL or NULL. |
-| `content` | TEXT | NOT NULL | Ammonia-sanitized HTML. ≤`MAX_CONTENT_LEN` after sanitization. |
-| `status` | TEXT | NOT NULL DEFAULT `pending` CHECK IN (`pending`,`approved`,`spam`,`deleted`) | Moderation status. |
-| `created_at` | TEXT | NOT NULL DEFAULT (datetime 'now') | RFC3339 / ISO8601 stamp. |
-| `updated_at` | TEXT | NOT NULL DEFAULT (datetime 'now') | Updated when row is re-processed (webmention update) or moderated. |
-| `parent_id` | INTEGER | NULLABLE REFERENCES comments(id) | ID of the parent comment for threaded replies. NULL = top-level. |
-| `depth` | INTEGER | NOT NULL DEFAULT 0 | Nesting depth (0 = top-level, max 4). |
-| `honeypot` | INTEGER | NOT NULL DEFAULT 0 | 1 if the honeypot anti-spam field was triggered. |
-| `delete_token` | TEXT | NULLABLE | Random token for self-service comment deletion. |
-| `submitter_ip` | TEXT | NULLABLE | SHA-256 hash of the submitter IP address (prefix `h:` + 64 hex chars). Only stored when `STORE_IP_ADDRESS` is enabled. |
-| `content_hash` | TEXT | NULLABLE | SipHash of normalized content (for duplicate detection). Prefix `h:` + 16 hex chars. |
+### github_profiles
 
-Indexes:
-- `CREATE INDEX idx_comments_read ON comments(target_path, status, created_at);` — hot read path.
-- `CREATE UNIQUE INDEX idx_comments_source_target ON comments(source_url, target_path) WHERE source_url IS NOT NULL;` — webmention idempotency lookup.
-- `CREATE INDEX idx_comments_parent ON comments(parent_id);` — reply lookups.
+This table stores positive and negative GitHub profile cache entries.
+Positive entries use a 30 day cache. Negative entries use a one hour cache.
 
-### 4.2 `webmention_seen` (idempotency / deletion handling)
+### comment_reactions
 
-Lightweight ledger of *processed* webmention pings so duplicate re-sends and deletions are handled correctly.
+This table stores one row for each comment and reaction identifier.
+The status uses the same four values as the `comments` table.
 
-| Field | Type | Modifiers | Description |
-|---|---|---|---|
-| `source` | TEXT | NOT NULL | Source URL. |
-| `target` | TEXT | NOT NULL | Target URL. |
-| `last_seen_at` | TEXT | NOT NULL | Last successful ping timestamp. |
-| `last_status` | TEXT | NOT NULL | `alive` or `gone` (410 / no backlink). |
-| PRIMARY KEY (`source`, `target`) | | | Natural composite key. |
+## Native comments
 
-Lookup order on each ping: if `(source,target)` exists with `last_status='alive'`, this is an *update* — overwrite the matching `comments` row (status preserved if already `approved`/`spam`). If `last_status='gone'`, set the matching comment's status to `deleted`.
+### Request
 
-### 4.3 `comment_urls` (extracted URLs)
+`POST /api/comment` uses form encoding.
 
-URLs extracted from comment content at store time. Enables cross-comment tracking without maintaining your own database.
-
-| Field | Type | Modifiers | Description |
-|---|---|---|---|
-| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | Row id. |
-| `comment_id` | INTEGER | NOT NULL REFERENCES comments(id) | Parent comment. |
-| `url` | TEXT | NOT NULL | Normalized URL (lowercase, no fragment). |
-| `domain` | TEXT | NOT NULL | Hostname extracted from URL. |
-| `url_hash` | TEXT | NOT NULL | SipHash of normalized URL (prefix `h:`). |
-
-Indexes: `idx_comment_urls_comment`, `idx_comment_urls_domain`, `idx_comment_urls_hash`.
-
-### 4.4 `github_profiles` (30-day cache)
-
-| Field | Type | Modifiers | Description |
-|---|---|---|---|
-| `login` | TEXT | PRIMARY KEY | Lowercased GitHub username. |
-| `name` | TEXT | NULLABLE | `name` from GitHub API, fallback `login`. |
-| `avatar_url` | TEXT | NOT NULL | `avatar_url` from GitHub API. |
-| `cached_at` | TEXT | NOT NULL | Insert/refresh timestamp. |
-| `valid` | INTEGER | NOT NULL | 1 if user exists, 0 if 404 (negative cache, 1h TTL). |
-
-A row is fresh for 30 days (`valid=1`) or 1 hour (`valid=0`); otherwise re-fetched.
-
-### 4.5 SQLite pragmas (set on every pool connection)
-
-```sql
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
-PRAGMA synchronous = NORMAL;
+```text
+target_path=/blog/hello
+author_name=Alice
+author_url=https://alice.blog
+github_username=alice
+parent_id=42
+content=Great post.
+website=
+cf-turnstile-response=token
 ```
 
-Schema is idempotent (embedded SQL via `include_str!`).
+### Processing
 
----
+1. Apply the native rate limit and body limit.
+2. Check Turnstile when enabled.
+3. Check the per-IP daily cap.
+4. Validate the target path and author fields.
+5. Compute the content hash.
+6. Sanitize and truncate content.
+7. Apply the language gate when enabled.
+8. Resolve author and avatar data.
+9. Check the parent comment.
+10. Store the row.
+11. Extract native comment URLs.
+12. Queue notifications.
+13. Send the moderation webhook.
 
-## 5. Endpoints
+The content hash supports moderation lookup. It does not reject duplicate rows.
 
-### 5.1 `POST /api/comment`
+### Response
 
-`Content-Type: application/x-www-form-urlencoded`. Rate-limited per-IP (5 req / 60s). Body limit `MAX_BODY_SIZE`.
-
-Form fields:
-
-```
-target_path=/guestbook
-author_name=Bob Vance
-author_url=https://vancerefrigeration.com   (optional)
-github_username=bobvance                    (optional)
-parent_id=42                               (optional, for threaded replies)
-content=Terrific project setup!
-```
-
-Processing rules:
-
-1. Validate field lengths: `content` ≤ `MAX_CONTENT_LEN`, `author_name` ≤ `MAX_AUTHOR_LEN`, `target_path` ≤ 1024.
-2. Validate `target_path`: must start with `/`, must not contain `//`, must not contain control chars (`\x00`-`\x1F`).
-3. If `author_url` present: parse with `url` crate; reject unless scheme is `http`/`https` and host is non-empty.
-4. If `parent_id` present: parent must exist, be approved, on the same `target_path`, and at depth < `MAX_THREAD_DEPTH`. Depth is set to `parent.depth + 1`. If `MAX_THREAD_DEPTH` is 0, nesting is disabled entirely.
-5. Normalise & sanitise:
-   - `content` → `ammonia::clean` (default policy). Result truncated to `MAX_CONTENT_LEN`.
-   - `author_name` → strip control chars, trim whitespace.
-6. Author resolution (priority order):
-   1. If `github_username`: look up `github_profiles` cache; on miss/refresh fetch `GET https://api.github.com/users/<login>` (with `User-Agent:` header, `FETCH_TIMEOUT_MS` timeout, optional `Authorization: Bearer <GITHUB_TOKEN>`). On `200` store `name ?? login` and `avatar_url`. On `404`, negative-cache `valid=0` for 1h, set `author_name` to the form's `author_name`.
-   2. Avatar resolution (separate from name, priority order):
-      1. If `author_url` is a GitHub profile URL → GitHub API avatar.
-      2. (webmentions feature) Fetch author's page → h-card photo → favicon parse.
-      3. icon.horse favicon service.
-      4. GitHub username fallback (if provided).
-      5. `/embed/default-avatar.jpg` (served locally, not hotlinked).
-7. Honeypot check: if the honeypot field is non-empty, `honeypot` flag is set to `1` on the stored comment. The moderation system decides what to do.
-8. A `delete_token` is generated for every submission and returned in the response body: `{ "delete_token": "a1b2c3d4e5f6g7h8" }`.
-9. Insert with `status='pending'`, `comment_type='native'`.
-10. Respond `201 Created` with `{ "delete_token": "..." }`. On validation failure respond `400 Bad Request` with a JSON `{ "error": "..." }` body. **Never echo raw user input back.**
-
-#### `POST /api/comment/{id}/delete`
-
-Self-service comment deletion. Requires the `delete_token` returned from the original submission.
-
-`Content-Type: application/json`
-
-```json
-{ "token": "a1b2c3d4e5f6g7h8" }
-```
-
-If the token matches the stored `delete_token` for the comment, the status is set to `deleted`. The endpoint is rate-limited to prevent brute-forcing tokens.
-
-Response (200): `{ "success": true }`
-
-Errors: 404 (comment not found or token doesn't match, returned as a single case to avoid leaking valid IDs).
-
-### 5.2 `POST /api/webmention`
-
-`Content-Type: application/x-www-form-urlencoded`. Rate-limited per-IP (30 req / 60s — gentler than native since pings come from other sites). Body limit `MAX_BODY_SIZE`.
-
-Form fields:
-
-```
-source=https://alice.blog/hello-world
-target=https://nithitsuki.com/blog/hello
-```
-
-Processing rules:
-
-1. Parse `source` and `target` with `url` crate. Reject (`400`) if either fails to parse or is not an absolute `http(s)` URL.
-2. Reject (`400`) if `target` does not start with `${PUBLIC_TARGET_ORIGIN}`.
-3. Reject (`400`) if `source` and `target` are equal (per spec).
-4. Enqueue `(source, target)` onto the mpsc channel. If the channel is full, respond `503 Service Unavailable` so the remote sender retries.
-5. Respond `202 Accepted` immediately. Body must not be required to process the response per spec.
-
-Background worker (per job, all inside async worker task):
-
-1. **Idempotency+ deletion check** against `webmention_seen`:
-   - If `(source,target)` has `last_status='gone'` → look up existing `comments` row by `(source_url,target_path)`; if `approved`, set `status='deleted'`. Re-respond internally as handled; skip fetch.
-2. **SSRF-safe fetch** of `source` (see §6.1):
-   - Resolve hostname (do **not** redirect-block here — reqwest follows redirects, but every resolved IP at each hop must pass the private-range check).
-   - GET with `FETCH_TIMEOUT_MS`, max 5 redirects, `User-Agent: webmention.nithitsuki.com`.
-   - On `410 Gone` → record `webmention_seen.last_status='gone'`, set existing approved comment to `deleted`. Done.
-   - On other fetch failure (timeout, 4xx/5xx, blocked IP) → record `webmention_seen.last_status` unchanged; drop job silently (logged at `warn`).
-3. **Backlink verification (W3C requirement):** parse the fetched HTML with `scraper`; search for any `<a>`, `<link>`, or `<area>` whose `href` (resolved absolute) equals `target`. If none found → reject the ping: write `webmention_seen.last_status='gone'` only if the source previously existed; do **not** store a comment. Drop the job.
-4. **h-entry parse** (`scraper`): find the first `.h-entry` (or `.hentry` legacy).
-   - `content`: `.e-content` HTML → `ammonia::clean → trunc to `MAX_CONTENT_LEN`. If none, take `.p-summary`; if none, take `.p-name`. If absolutely nothing, use a placeholder "Mentioned this page." string.
-   - `author`: `.p-author` (may be a nested `.h-card` or a plain string). Resolve `author_name` = `.p-name` (or text). `author_url` = `.u-url`. `author_avatar` = `.u-photo`. If `.p-author` is a plain URL/`u-url`, fetch its `h-card` once (same SSRF-safe fetch). If nothing found, fallback `author_name` = registrable domain of `source`, `author_url` = `source`, `author_avatar` = `https://icon.horse/<domain>`.
-5. **Idempotent upsert**: look up `comments` by `(source_url,target_path)`. If exists: overwrite `content`/`author_*` (status preserved — already-approved stays approved). If missing: insert new row with `status='pending'` (manual review required on first sighting).
-6. Update `webmention_seen` with `last_seen_at=now`, `last_status='alive'`.
-7. All errors are logged with `tracing`; no response is sent (the `202` was already returned).
-
-`target_path` is derived from `target` by stripping `${PUBLIC_TARGET_ORIGIN}` (leaving `"/"` if root).
-
-### 5.3 `GET /api/comments`
-
-`Content-Type: application/json`. CORS: single origin, never `*`. Rate-limited per-IP (60 req / 60s).
-
-Query params:
-
-- `path` (required): e.g., `/blog/hello`. Returns `400` if missing/invalid (`/`-prefix, no `//`).
-- `limit` (optional, default `50`, max `100`).
-- `before` (optional): return rows with `id < before` (cursor pagination).
-
-Response (`200 OK`):
+The server returns `201` with:
 
 ```json
 {
-  "total": 137,
-  "comments": [
-    {
-      "id": 42,
-      "comment_type": "webmention",
-      "author_name": "Alice",
-      "author_url": "https://alice.blog",
-      "author_avatar": "https://alice.blog/me.jpg",
-      "content": "<p>Mentioned your page…</p>",
-      "created_at": "2026-07-03T16:40:00Z",
-      "parent_id": null,
-      "depth": 0
-    }
-  ]
+  "delete_token": "0123456789abcdef",
+  "status": "pending"
 }
 ```
 
-The embed widget builds a thread tree client-side from the flat `parent_id` list. Top-level comments sorted newest-first, replies sorted oldest-first within each parent.
+The status can be `pending`, `approved`, `spam`, or `deleted` after a sync
+moderation decision.
 
-`total` is the count of `approved` comments for `path` (cached/cheap; reorder against `comments` is fine).
+The response does not include the comment ID.
 
-Also handle `OPTIONS` preflight for the CORS route.
+### Self deletion
 
-### 5.4 Admin endpoints
-
-All admin endpoints need either `Authorization: Bearer <ADMIN_TOKEN>` (header) or `admin_token=<ADMIN_TOKEN>` (cookie, set via `POST /api/admin/login`). Token comparison is constant-time (`subtle::ConstantTimeEq`), runs even on malformed headers. On mismatch: `401`.
-
-See [docs/api.md](docs/api.md) for the full admin API reference, including cookie auth, single-comment lookup with parent chain, batch moderation, and IP filtering.
-
-#### `POST /api/admin/login`
-
-Exchange a token for an `HttpOnly` session cookie (30-day expiry). Body: `{ "token": "..." }`. Response: `{ "success": true }` + `Set-Cookie` header.
-
-#### `POST /api/admin/logout`
-
-Clear the session cookie.
-
-#### `GET /api/admin/pending`
-
-Pending comments, newest-first. Supports `limit`, `before`, `path` filters. Returns full comment data including `parent_id`, `depth`, `honeypot`, `submitter_ip`.
-
-#### `GET /api/admin/comments`
-
-List comments by status: `pending`, `approved`, `spam`, `deleted`, or `all`. Supports `limit`, `before`, `path`, and `ip` (filter by submitter IP address). Designed for moderation engine integration.
-
-#### `GET /api/admin/comments/{id}`
-
-Fetch a single comment with its full ancestor chain. Returns `{ "comment": {...}, "parents": [...] }` where `parents` is ordered from immediate parent up to the root. Lets a moderation engine see the full thread context.
-
-#### `POST /api/admin/moderate`
-
-Approve, spam, delete, or revert a comment. Body: `{ "id": 42, "action": "approved" }`. Valid actions: `approved`, `spam`, `deleted`, `pending`. Responds `{ "id": 42, "status": "approved" }`.
-
-#### `POST /api/admin/moderate/batch`
-
-Moderate multiple comments in one request. Body: `{ "actions": [{ "id": 1, "action": "approved" }, ...] }`. Returns per-item results with individual errors. Designed for automated moderation pipelines.
-
----
-
-## 6. Security
-
-### 6.1 SSRF
-
-Before any outbound request (and at every redirect hop), resolve the hostname and check every resolved IP. Reject if any IP falls in:
-
-- IPv4: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16` (link-local — includes AWS metadata `169.254.169.254`), `172.16.0.0/12`, `192.0.0.0/24`, `192.0.2.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `240.0.0.0/4`.
-- IPv6: `::1/128`, `fc00::/7` (unique-local), `fe80::/10` (link-local), `::ffff:0:0/96` (IPv4-mapped — re-check against the IPv4 list).
-- String hosts `localhost`, `*.local`, `*.internal`, `*.localhost` are rejected outright.
-
-Store the parsed IP set per request; **do not** re-resolve between validation and connect (DNS rebinding mitigation). Implement by constructing `reqwest` with a custom `redirect::Policy` that re-runs the validator on each `Location`; reject on a forbidden target by returning a redirect-stopping error.
-
-Reject requests whose host **fails to resolve** (`400` / drop job). Fail closed.
-
-### 6.2 Outbound timeouts
-
-Single process-wide `reqwest::Client` built with:
-
-- `timeout(Duration::from_millis(FETCH_TIMEOUT_MS))`,
-- `connect_timeout(...)` (2s),
-- `redirect::Policy::limited(5) + custom SSRF policy`,
-- `user_agent("webmention.nithitsuki.com (+https://webmention.nithitsuki.com)")`,
-- `https_only(true)` (TLS-only; reject plaintext remote sources — prevents trivial MITM tampering of parsed author data),
-- rustls TLS backend (no OpenSSL).
-
-### 6.3 SQLite concurrency
-
-All SQL is dispatched via `spawn_blocking` against an `r2d2` pool. WAL mode allows concurrent reads while a moderation write is in flight. `busy_timeout=5000ms` absorbs brief writer contention.
-
-### 6.4 XSS mitigation
-
-- `content` is always `ammonia::clean`-ed before storage, regardless of source (native form or h-entry HTML). Default ammonia policy (strips scripts, event handlers, `style`, `iframe`, etc.) is the baseline; **do not** widen it.
-- `author_name`, `author_url`, `author_avatar`, `target_path` are stored as text and **always rendered as escaped text** in the JSON API — the API returns them as plain JSON strings (no HTML), so client-side renders must escape on display. Document this contract.
-
-### 6.5 Rate limiting & anti-spam
-
-- `tower_governor` (in-memory, per-IP, token-bucket or fixed-window) on `/api/comment` (5 req / 60s) and `/api/webmention` (30 req / 60s). No external store — acceptable for local hosting; restart clears buckets.
-- `GET /api/*` gets a liberal per-IP limit; admin routes have none (they're token-gated).
-- **Per-IP daily cap**: `MAX_COMMENTS_PER_IP_PER_DAY` (default 50). Tracks native comment submissions per IP per day in an in-memory limiter. Returns `429 Retry-After: 86400` when exceeded. Catches 1/min steady spammers.
-- **Per-domain hourly webmention cap**: `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` (default 10). Tracks webmentions per source domain per hour. Returns `429 Retry-After: 3600` when exceeded.
-- **Honeypot**: A hidden form field (`HONEYPOT_FIELD`, default `"website"`) that bots auto-fill. When non-empty, the submission is stored with `honeypot = 1` but not discarded — the moderation system decides what to do.
-
-### 6.6 Body size & parsing
-
-- Global `tower::limit::RequestBodyLimitLayer(MAX_BODY_SIZE)`.
-- URL-decode form bodies with a strict decoder (reject NULs, reject overlong sequences).
-- All inputs trimmed of trailing whitespace; control characters stripped from text fields.
-
-### 6.7 Admin auth
-
-- `ADMIN_TOKEN` loaded once at startup into a `String` held by the router state.
-- Compared with `subtle::ConstantTimeEq` against the incoming header bytes (base64/utf-8). A missing/malformed header still triggers a comparison against a fixed placeholder to keep timing constant.
-- All `/api/admin/*` routes are **not** advertised in CORS preflight (`Access-Control-Allow-Methods` lists only `GET, OPTIONS`) — those routes are server-side only.
-
-### 6.8 No path-traversal / host-injection in `target_path`
-
-`target_path` from native form and from webmention `target` derivation both pass through:
-
-1. Must begin with `/`.
-2. Must not contain `//`, `..`, control chars, `\`.
-3. Length ≤ 1024.
-Reject otherwise (`400` for native; drop+log for webmention).
-
----
-
-## 7. Microformats Parsing Detail
-
-Worker HTML inspection using `scraper`:
-
-```
-[fetch source HTML] -> [verify backlink to target exists]
-                          │
-            no: drop ping (log; record 'gone' only if previously 'alive')
-            yes:
-              v
-        [find .h-entry (or .hentry)]
-                          │
-        ┌─────────────────┼──────────────────────┐
-        ▼                 ▼                        ▼
-  .e-content (HTML)   .p-name (title)        .p-author
-  ammonia clean      fallback content       │
-                                            ▼
-                                ┌───────────────────────┐
-                                │ nested .h-card?      │
-                                │ yes: .p-name,         │
-                                │      .u-url, .u-photo │
-                                │ no:  plain text       │
-                                │      (name only)      │
-                                └───────────────────────┘
-                                            │
-                                  fallback (domain of source):
-                                    author_name = registrable domain
-                                    author_url  = source
-                                    author_avatar = https://icon.horse/<domain>
-```
-
-If `content` after sanitization is empty, use a stable placeholder: `"Mentioned this page."`. Never store an empty content (`NOT NULL`).
-
----
-
-## 8. Embedding on nithitsuki.com (client side)
-
-`nithitsuki.com` loads a small `<script id="nc-comments" data-path="/blog/hello" ...></script>` near where comments should appear. The script (served by you, hosted on `nithitsuki.com` static:
-
-```
-GET https://webmention.nithitsuki.com/api/comments?path=<data-path>&limit=50
-```
-
-The CORS header `Access-Control-Allow-Origin: https://nithitsuki.com` (single, fixed) is required for the fetch to succeed from the main site's origin. Preflight (`OPTIONS`) is supported and cached (`Access-Control-Max-Age: 600`).
-
-The script renders the JSON client-side. Two **security contracts** that must hold:
-
-1. The script MUST treat `content` as sanitized HTML (it is already ammonia-cleaned server-side). Insert via `innerHTML`.
-2. The script MUST treat `author_name`, `author_url`, `author_avatar` as plain text / attribute values (escape on insert). Never put these into `innerHTML`.
-
-These two contracts together mean even a malicious source URL cannot break out of the avatar/name rendering.
-
-The native comment **form** on `nithitsuki.com` also posts to `https://webmention.nithitsuki.com/api/comment`; that route is also CORS-public for `POST` (add `POST` to `Access-Control-Allow-Methods` on `/api/comment`), with explicit preflight.
-
-`webmention.nithitsuki.com` additionally advertises its endpoint to the IndieWeb by exposing (out of scope of this server's code, but documented here) on `nithitsuki.com`:
-
-```html
-<link rel="webmention" href="https://webmention.nithitsuki.com/api/webmention" />
-```
-
----
-
-## 9. Logging & Diagnostics
-
-- `tracing` with `tracing-subscriber` JSON formatter.
-- Spans: per-request (`method`, `path`, `peer_ip`, `status`, `latency_ms`).
-- Worker jobs emit at `info` for successful upserts, `warn` for fetch failures / blocked SSRF attempts / 410 deletions, `error` for DB failures.
-- Never log raw `content`, `author_url`, or `ADMIN_TOKEN` (token absent from logs entirely). `target_path` and `id` are safe.
-- Startup logs the resolved config (with `ADMIN_TOKEN` redacted) at `info`.
-
----
-
-## 10. Graceful Shutdown
-
-- `tokio::signal::ctrl_c()` + `SIGTERM` (via `tokio::signal::unix`).
-- On signal: stop accepting new HTTP connections (Axum's `with_graceful_shutdown`), drain the mpsc channel to completion, wait up to `FETCH_TIMEOUT_MS × 2` for in-flight worker fetches, close the SQLite pool.
-- In-flight worker errors during shutdown are logged; **already-queued** jobs persist? No — they live only in memory; document that a crash between `202` and worker commit may drop the ping. Acceptable per W3C (sender may retry).
-
----
-
-## 11. Error Response Conventions
-
-All public endpoints return JSON error bodies:
+`POST /api/comment/{id}/delete` accepts:
 
 ```json
-{ "error": "human-readable reason", "code": "rate_limited" }
+{
+  "token": "0123456789abcdef"
+}
 ```
 
-Status codes in use:
-- `201` (native ingest ok), `202` (webmention accepted), `200` (read / moderate ok).
-- `400` (validation failure, bad target, missing field).
-- `401` (admin token missing/wrong).
-- `404` (moderate id not found).
-- `429` (rate limited — include `Retry-After` header).
-- `500` (unexpected internal error — generic message; details in logs only).
-- `503` (worker backlog full).
+The route uses the native rate limit. A missing row and a wrong token both
+return `404`.
 
----
+## Threaded replies
 
-## 12. Out of Scope (explicitly)
+Replies need `MAX_THREAD_DEPTH > 0`.
 
-- Outbound/send webmentions (this server only *receives* pings).
-- Authentication for comment *authors* (no login; manual approval is the gate).
-- Multi-user / multi-tenant (single site: `nithitsuki.com`).
-- Image upload / media hosting (avatars are remote URLs only).
-- WebSub / Salmention (updates to already-approved mentions are re-processed but not pushed onward).
-- Apple News / Atom feed ingestion.
+The parent must exist, be approved, and use the same target path.
+The child depth is the parent depth plus one.
+
+The server clamps configured depth to `0` through `10`.
+
+## Reactions
+
+`POST /api/comment/{id}/reaction` accepts a configured reaction value.
+The target comment must be approved.
+
+In admin mode, the bearer token identifies the reaction as `admin`.
+In anyone mode, the peer IP hash identifies the reaction.
+
+The database has one active row for each comment and identifier.
+Changing a reaction resets its status to `pending`.
+Repeating an active reaction does not change its status.
+
+`DELETE /api/comment/{id}/reaction` marks the active reaction as deleted.
+
+Only approved reactions appear in the public `reactions` object.
+
+## Language gate
+
+The gate applies to native comments after HTML sanitization.
+
+The detector uses `whatlang` and an internal ISO 639-3 value.
+Configuration uses ISO 639-1 values.
+
+When an allow list exists, it has precedence over the block list.
+The gate returns `400` and stores no rejected comment.
+
+Unknown content uses the emoji policy:
+
+- `always` accepts unknown content.
+- `never` rejects emoji-heavy content.
+- `if_unknown` accepts emoji-heavy content and rejects other unknown content.
+
+## Webmentions
+
+`POST /api/webmention` exists only with `webmentions`.
+
+The handler:
+
+1. Parses absolute source and target URLs.
+2. Compares the target origin with `PUBLIC_TARGET_ORIGIN`.
+3. Rejects equal source and target URLs.
+4. Queues the job.
+5. Returns `202`.
+
+The worker:
+
+1. Checks the source host and resolved IP values.
+2. Fetches the source through the shared client.
+3. Checks for a link to the target.
+4. Parses h-entry and h-card data.
+5. Sanitizes the selected content.
+6. Upserts the comment by source and target path.
+7. Records the result in `webmention_seen`.
+
+The worker uses a bounded queue. A full queue returns `503`.
+The worker stores webmentions as top-level comments.
+
+The shared client permits HTTP and HTTPS. It uses the configured request
+timeout and a ten second connection timeout. The redirect policy checks hosts
+and literal IP values. It does not set a redirect count.
+
+## Public read API
+
+`GET /api/comments` needs `path`.
+
+The default order is newest first. `before` returns IDs below the cursor.
+`sort=oldest` returns oldest first. `after` returns IDs above the cursor.
+
+The response contains only approved comments and approved reaction counts.
+
+## RSS
+
+`GET /feed.xml` returns approved comments in RSS 2.0.
+
+Without `path`, the feed contains comments from all paths.
+With `path`, the feed contains comments for one path.
+
+The feed escapes XML text and converts timestamps to RFC 822.
+
+## Admin routes
+
+Protected routes accept a bearer token or an admin session cookie.
+
+The admin API provides:
+
+- Pending comment listing.
+- Path listing.
+- Comment status listing.
+- Parent chain lookup.
+- Single and batch comment moderation.
+- Extracted URL lookup.
+- Author lookup.
+- Bulk context lookup.
+- Reaction listing and moderation.
+- Full JSON export and import.
+
+The single comment moderation route uses the admin rate limit.
+The batch route processes items independently.
+
+## Export and import
+
+`GET /api/admin/export` returns version `1`.
+The export contains:
+
+- All comment rows.
+- All webmention ledger rows.
+- All extracted URL rows.
+- All GitHub profile rows.
+- All reaction rows.
+
+`POST /api/admin/import` accepts version `1` and a body up to 16 MiB.
+
+The import sorts comments by ID and restores parents before children.
+It re-sanitizes content and checks selected field values.
+It skips failed comment and URL rows and reports their counts.
+
+## Notifications
+
+The notification batcher supports Telegram, Slack, and Discord.
+
+Telegram needs a bot token and chat ID.
+Slack and Discord need a webhook URL.
+
+The batcher groups events by page by default.
+Use `global` to use one site-wide window.
+Set the window to `0` for immediate delivery.
+
+The batcher stores open windows in memory.
+Open windows are lost when the process stops.
+
+Webmention updates do not create a new notification.
+
+## Middleware
+
+The public router uses:
+
+- Route body limits.
+- Per-route rate limits.
+- CORS.
+
+The protected admin routes are merged outside the CORS layer.
+The public CORS methods are `GET`, `POST`, and `OPTIONS`.
+
+The public router also contains health, embed, Swagger, login, and logout.
+
+## Security rules
+
+The server must:
+
+- Sanitize stored HTML.
+- Validate HTTP and HTTPS author URLs.
+- Validate target paths.
+- Check webmention source addresses.
+- Compare admin tokens in constant time.
+- Limit request bodies.
+- Limit native, webmention, read, and single moderation routes.
+
+Most repository queries use SQLite parameters.
+The author lookup still builds escaped filter expressions.
+
+## Shutdown
+
+The process listens for Ctrl+C and SIGTERM.
+The current shutdown handler stops the Axum server.
+It does not drain the webmention queue or notification batcher.
+
+## Error response
+
+API errors use:
+
+```json
+{
+  "error": "human-readable reason",
+  "code": "rate_limited"
+}
+```
+
+The API uses status codes `200`, `201`, `202`, `400`, `401`, `404`, `413`,
+`429`, `500`, and `503`.
+
+## Out of scope
+
+- Outbound webmention sending.
+- Author login.
+- Multi-user administration.
+- Multi-tenant hosting.
+- Image upload.
+- Media hosting.
+- WebSub.
+- Salmention.

@@ -43,6 +43,7 @@ async fn main() {
     let repo = Repo::new(sqlite_pool.clone());
 
     let notifier = Arc::new(NotificationBatcher::new(&config));
+    let language = zapiska::language::LanguageGate::new(&config);
 
     let github: Arc<dyn GitHubLookup> = Arc::new(RealGitHub::new(
         repo.clone(),
@@ -72,6 +73,7 @@ async fn main() {
         repo,
         github,
         notifier,
+        language,
         #[cfg(feature = "webmentions")]
         wm_sender,
         http_client,

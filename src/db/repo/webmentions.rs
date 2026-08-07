@@ -46,4 +46,33 @@ impl Repo {
         })
         .await
     }
+
+    /// Dump the whole webmention ledger (admin JSON export).
+    pub async fn list_all_webmention_seen(&self) -> RepoResult<Vec<WebmentionSeen>> {
+        self.spawn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT source, target, last_seen_at, last_status
+                     FROM webmention_seen
+                     ORDER BY source, target",
+                )
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(WebmentionSeen {
+                        source: row.get(0)?,
+                        target: row.get(1)?,
+                        last_seen_at: row.get(2)?,
+                        last_status: row.get(3)?,
+                    })
+                })
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+            }
+            Ok(result)
+        })
+        .await
+    }
 }

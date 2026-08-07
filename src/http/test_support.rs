@@ -95,8 +95,14 @@ pub(crate) mod helpers {
             notify_batch_secs: 0,
             notify_batch_threshold: 0,
             notify_batch_granularity: "page".to_string(),
+            reactions_allowed: "admin".to_string(),
+            reactions_set: vec!["👍".to_string(), "❤️".to_string(), "😄".to_string()],
+            comment_lang_allowed: Vec::new(),
+            comment_lang_blocked: Vec::new(),
+            comment_lang_allow_emoji: "always".to_string(),
         };
         let notifier = Arc::new(crate::notify::NotificationBatcher::new(&config));
+        let language = crate::language::LanguageGate::new(&config);
 
         let state = AppState {
             config,
@@ -104,6 +110,7 @@ pub(crate) mod helpers {
             repo,
             github,
             notifier,
+            language,
             #[cfg(feature = "webmentions")]
             wm_sender,
             http_client: reqwest::Client::builder()
@@ -187,5 +194,27 @@ pub(crate) mod helpers {
             ))))
             .body(axum::body::Body::from(body.to_owned()))
             .unwrap()
+    }
+
+    /// Helper to build an admin-authorized JSON request for testing
+    /// (Bearer `test` — matches the test state's ADMIN_TOKEN).
+    pub fn json_request(
+        method: axum::http::Method,
+        uri: &str,
+        body: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut req = request(method, uri);
+        *req.body_mut() = axum::body::Body::from(body.to_owned());
+        req.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        req.headers_mut()
+            .insert(axum::http::header::CONTENT_LENGTH, body.len().into());
+        req.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer test"),
+        );
+        req
     }
 }

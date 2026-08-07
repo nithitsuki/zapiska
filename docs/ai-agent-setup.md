@@ -1,66 +1,62 @@
 # Set up zapiska with an AI agent
 
-You can have an AI coding assistant set up zapiska end-to-end by pasting the
-prompt below. The prompt instructs the agent to read the skills in `.skills/`
-and the docs in `docs/` and follow them step by step.
+Use the prompt below with an AI coding assistant.
+The assistant must read the repository skills and documentation before it acts.
 
-## Copy-paste prompt
+## Prompt
 
 ```text
-Set up zapiska for me end to end.
+Set up zapiska from start to finish.
 
-zapiska is a self-hosted comment engine in this repo. Follow the skills in
-`.skills/` and the docs in `docs/` to:
+Read these files before you make changes:
 
-1. Set up the zapiska server (read `.skills/setup-server/SKILL.md`).
-2. Build the frontend integration on my site (read `.skills/build-frontend/SKILL.md`).
-3. Optionally configure Cloudflare Turnstile (read `.skills/configure-turnstile/SKILL.md`).
+1. .skills/setup-server/SKILL.md
+2. .skills/build-frontend/SKILL.md
+3. .skills/configure-turnstile/SKILL.md, when Turnstile is requested
+4. docs/getting-started.md
+5. docs/deployment.md
+6. docs/api.md
 
-Work through the skills in that order. Ask me only when required information is
-missing (e.g. domain, deployment preference, Cloudflare credentials).
+Ask a question only when you need information that is not in this prompt.
+Do not write secrets to files or chat messages.
 
-Details:
-- My main site origin: https://your-site.example
-- I want to host zapiska at: https://comments.your-site.example
-- Deployment preference: Docker / build from source / pre-built binary
-- Add Turnstile bot protection: yes / no
-- Framework or site type: (e.g. static HTML, Next.js, Astro, SvelteKit, WordPress, etc.)
+Main site origin: https://your-site.example
+zapiska origin: https://comments.your-site.example
+Deployment method: Docker, source build, or release binary
+Turnstile: enabled or disabled
+Site type: static HTML, Astro, Next.js, SvelteKit, WordPress, or other
 
-When you need secrets, tell me the exact environment variable name and where to
-set it, but do not write secrets into any files or chat logs.
+Do these tasks:
+
+1. Deploy the server.
+2. Set the required environment variables.
+3. Check /healthz.
+4. Add the widget or a custom frontend.
+5. Add a native comment form.
+6. Add webmention discovery when webmentions are enabled.
+7. Test one comment and one moderation decision.
+8. Report the exact files and commands that you used.
 ```
 
-## How to use it
+## Use the prompt
 
-1. Replace the placeholder values in the prompt with your actual details.
-2. Paste the prompt into your AI coding assistant (OpenCode, Claude Code,
-   Cursor, Copilot Chat, etc.).
-3. The agent will read the skills and docs from the repo and perform the setup.
-4. If you already have some parts done, tell the agent which step to start from.
+1. Replace the placeholder values.
+2. Paste the prompt into the assistant.
+3. Answer questions about the deployment and site.
+4. Check the reported files and commands.
 
-## What each skill covers
+## Skill files
 
 | Skill | File | Purpose |
 |---|---|---|
-| Set up server | `.skills/setup-server/SKILL.md` | Deploy zapiska, configure env vars, reverse proxy, TLS, systemd, health checks. |
-| Build frontend | `.skills/build-frontend/SKILL.md` | Add the widget or a custom frontend, comment form, styling, webmention link. |
-| Configure Turnstile | `.skills/configure-turnstile/SKILL.md` | Enable bot protection on the server and in the comment forms. |
+| Server setup | `.skills/setup-server/SKILL.md` | Deployment and service setup. |
+| Frontend | `.skills/build-frontend/SKILL.md` | Widget, form, and custom frontend. |
+| Turnstile | `.skills/configure-turnstile/SKILL.md` | Cloudflare bot protection. |
 
-## Docs reference
+## Reference files
 
-The skills point to these docs when more detail is needed:
-
-- [`docs/getting-started.md`](getting-started.md) — end-to-end walkthrough
-- [`docs/deployment.md`](deployment.md) — env vars, Docker, systemd, updates
-- [`docs/api.md`](api.md) — full API reference
-- [`embed/README.md`](../embed/README.md) — widget attributes and custom frontend example
-- [`.env.example`](../.env.example) — annotated configuration file
-
-## Tips
-
-- Make sure the assistant has access to the repo (it needs to read `.skills/`
-  and `docs/`).
-- If you only want the server, tell the assistant to skip the frontend and
-  Turnstile skills.
-- If you already deployed the server, tell the assistant to start from the
-  frontend skill.
+- [Getting started](getting-started.md)
+- [Deployment](deployment.md)
+- [API](api.md)
+- [Embed](../embed/README.md)
+- [Configuration](../.env.example)

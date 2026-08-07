@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::db::pool::SqlitePool;
 use crate::db::repo::Repo;
 use crate::github::GitHubLookup;
+use crate::language::LanguageGate;
 use crate::notify::NotificationBatcher;
 #[cfg(feature = "webmentions")]
 use crate::worker::JobSender;
@@ -20,6 +21,8 @@ pub struct AppState {
     pub github: Arc<dyn GitHubLookup>,
     /// Notification channels (Telegram / Slack / Discord) with batching.
     pub notifier: Arc<NotificationBatcher>,
+    /// Optional language filtering for native comments (off by default).
+    pub language: LanguageGate,
     #[cfg(feature = "webmentions")]
     pub wm_sender: JobSender,
     /// Shared HTTP client (used for all outbound requests: GitHub enrichment,
@@ -107,18 +110,8 @@ fn yesterday_key() -> String {
 
 /// Convert days since Unix epoch to (year, month, day).
 fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z % 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+    let (y, m, d) = crate::timeutil::ymd_from_days(days as i64);
+    (y as u64, m as u64, d as u64)
 }
 
 /// Build a limiter key for per-IP-per-day tracking.

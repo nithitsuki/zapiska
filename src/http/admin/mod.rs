@@ -10,13 +10,17 @@
 
 pub(crate) mod auth;
 pub(crate) mod comments;
+pub(crate) mod data;
 pub(crate) mod lookup;
 pub(crate) mod moderate;
+pub(crate) mod reactions;
 
-pub(crate) use auth::{admin_auth, login, logout};
+pub(crate) use auth::{admin_auth, login, logout, request_has_admin_token};
 pub(crate) use comments::{get_comment, list_comments, list_pending};
+pub(crate) use data::{MAX_IMPORT_BODY_BYTES, export, import};
 pub(crate) use lookup::{author_lookup, bulk_context, comment_urls, list_paths, url_lookup};
 pub(crate) use moderate::{moderate, moderate_batch};
+pub(crate) use reactions::{list_reactions, moderate_reaction, moderate_reactions_batch};
 
 /// Constant-time token comparison, length-independent (both sides padded).
 fn validate_token(actual: &[u8], expected: &[u8]) -> bool {
@@ -552,5 +556,480 @@ mod tests {
         .unwrap();
         let comments = body["comments"].as_array().unwrap();
         assert_eq!(comments.len(), 2);
+    }
+
+    // ── Export / import (data backup & restore) ─────────────
+
+    /// Seed a comment directly through the repo with a given status.
+    async fn seed_status(
+        state: &crate::state::AppState,
+        path: &str,
+        author: &str,
+        status: &str,
+    ) -> i64 {
+        let id = state
+            .repo
+            .insert_comment(crate::db::repo::NewComment {
+                target_path: path.to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: author.to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: format!("comment by {author}"),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        if status != "pending" {
+            state.repo.update_status(id, status).await.unwrap();
+        }
+        id
+    }
+
+    #[tokio::test]
+    async fn export_requires_auth() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(unauthorized_request(
+                axum::http::Method::GET,
+                "/api/admin/export",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn import_requires_auth() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(unauthorized_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn export_includes_all_statuses_and_threading() {
+        let (state, _dir) = helpers::test_state();
+        let parent = seed_status(&state, "/export", "Parent", "approved").await;
+        let child = state
+            .repo
+            .insert_comment(crate::db::repo::NewComment {
+                target_path: "/export".to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "Child".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "reply".to_string(),
+                parent_id: Some(parent),
+                depth: 1,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        seed_status(&state, "/export", "Spammy", "spam").await;
+        seed_status(&state, "/export", "Deleted", "deleted").await;
+
+        let app = build_app(state);
+        let resp = app
+            .oneshot(authorized_request(
+                axum::http::Method::GET,
+                "/api/admin/export",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["version"], 1);
+        assert!(body["exported_at"].as_str().unwrap().ends_with('Z'));
+        let comments = body["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 4, "all statuses exported");
+        let statuses: Vec<&str> = comments
+            .iter()
+            .map(|c| c["status"].as_str().unwrap())
+            .collect();
+        assert!(statuses.contains(&"approved"));
+        assert!(statuses.contains(&"spam"));
+        assert!(statuses.contains(&"deleted"));
+        let child_row = comments
+            .iter()
+            .find(|c| c["id"].as_i64() == Some(child))
+            .unwrap();
+        assert_eq!(
+            child_row["parent_id"].as_i64(),
+            Some(parent),
+            "threading preserved"
+        );
+        assert_eq!(child_row["depth"].as_i64(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn import_restores_full_backup_into_fresh_db() {
+        // Source: seeded state with an approved comment (incl. a reply).
+        let (state_a, _dir_a) = helpers::test_state();
+        let parent = seed_status(&state_a, "/migrate", "Alice", "approved").await;
+        state_a
+            .repo
+            .insert_comment(crate::db::repo::NewComment {
+                target_path: "/migrate".to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "Bob".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "reply".to_string(),
+                parent_id: Some(parent),
+                depth: 1,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        let app_a = build_app(state_a.clone());
+        let resp = app_a
+            .oneshot(authorized_request(
+                axum::http::Method::GET,
+                "/api/admin/export",
+            ))
+            .await
+            .unwrap();
+        let export = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
+            .await
+            .unwrap();
+
+        // Target: a fresh, empty DB.
+        let (state_b, _dir_b) = helpers::test_state();
+        assert_eq!(
+            state_b.repo.list_all_comments().await.unwrap().len(),
+            0,
+            "target starts empty"
+        );
+        let app_b = build_app(state_b.clone());
+        let resp = app_b
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                core::str::from_utf8(&export).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "import accepted");
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["comments_imported"], 2);
+
+        // Full fidelity: ids, threading, and status survive.
+        let restored = state_b.repo.list_all_comments().await.unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0].id, parent, "id preserved");
+        assert_eq!(restored[0].status, "approved");
+        assert_eq!(restored[1].parent_id, Some(parent), "threading restored");
+    }
+
+    #[tokio::test]
+    async fn import_is_idempotent() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state.clone());
+        let export_body = serde_json::json!({
+            "version": 1,
+            "comments": [{
+                "id": 7,
+                "target_path": "/idem",
+                "comment_type": "native",
+                "source_url": null,
+                "author_name": "Alice",
+                "author_url": null,
+                "author_avatar": null,
+                "content": "<p>hi</p>",
+                "status": "approved",
+                "created_at": "2026-08-01 10:00:00",
+                "updated_at": "2026-08-01 10:00:00",
+                "parent_id": null,
+                "depth": 0,
+                "honeypot": false,
+                "delete_token": null,
+                "submitter_ip": null,
+                "submitter_ip_hash": null,
+                "content_hash": null
+            }]
+        })
+        .to_string();
+
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(json_request(
+                    axum::http::Method::POST,
+                    "/api/admin/import",
+                    &export_body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+        }
+        assert_eq!(
+            state.repo.list_all_comments().await.unwrap().len(),
+            1,
+            "re-import must not duplicate rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_rejects_unknown_version() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                r#"{"version": 99, "comments": []}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn import_resanitizes_malicious_content() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state.clone());
+        let export_body = serde_json::json!({
+            "version": 1,
+            "comments": [{
+                "id": 1,
+                "target_path": "/evil-import",
+                "comment_type": "native",
+                "source_url": null,
+                "author_name": "Hacker",
+                "author_url": "javascript:alert(1)",
+                "author_avatar": null,
+                "content": "<script>alert(1)</script><p>ok</p>",
+                "status": "approved",
+                "created_at": "2026-08-01 10:00:00",
+                "updated_at": "2026-08-01 10:00:00",
+                "parent_id": null,
+                "depth": 0,
+                "honeypot": false,
+                "delete_token": null,
+                "submitter_ip": null,
+                "submitter_ip_hash": null,
+                "content_hash": null
+            }]
+        })
+        .to_string();
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &export_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        // The comment as a whole is rejected: author_url with a non-http(s)
+        // scheme fails the same validation native submissions get.
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["comments_imported"], 0);
+        assert_eq!(
+            result["comments_skipped"], 1,
+            "bad author_url rejects the comment"
+        );
+        assert!(state.repo.get_comment(1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn import_sanitizes_content_but_keeps_valid_urls() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state.clone());
+        let export_body = serde_json::json!({
+            "version": 1,
+            "comments": [{
+                "id": 2,
+                "target_path": "/sanitize-import",
+                "comment_type": "native",
+                "source_url": null,
+                "author_name": "Alice",
+                "author_url": "https://alice.blog",
+                "author_avatar": null,
+                "content": "<script>alert(1)</script><p>ok</p>",
+                "status": "approved",
+                "created_at": "2026-08-01 10:00:00",
+                "updated_at": "2026-08-01 10:00:00",
+                "parent_id": null,
+                "depth": 0,
+                "honeypot": false,
+                "delete_token": null,
+                "submitter_ip": null,
+                "submitter_ip_hash": null,
+                "content_hash": null
+            }]
+        })
+        .to_string();
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &export_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let stored = state.repo.get_comment(2).await.unwrap().unwrap();
+        assert!(
+            !stored.content.contains("<script>"),
+            "content re-sanitized on import"
+        );
+        assert!(stored.content.contains("<p>ok</p>"));
+        assert_eq!(stored.author_url.as_deref(), Some("https://alice.blog"));
+        assert_eq!(stored.status, "approved");
+    }
+
+    #[tokio::test]
+    async fn import_accepts_large_payloads_beyond_form_limit() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state.clone());
+        // 50 comments x ~200 bytes ≈ 10 KB — well over the 8 KB form body
+        // limit that public routes enforce.
+        let mut comments = Vec::new();
+        for i in 0..50 {
+            comments.push(serde_json::json!({
+                "id": i + 1,
+                "target_path": "/bulk",
+                "comment_type": "native",
+                "source_url": null,
+                "author_name": format!("User{i}"),
+                "author_url": null,
+                "author_avatar": null,
+                "content": format!("<p>bulk comment {i} with some padding</p>"),
+                "status": "pending",
+                "created_at": "2026-08-01 10:00:00",
+                "updated_at": "2026-08-01 10:00:00",
+                "parent_id": null,
+                "depth": 0,
+                "honeypot": false,
+                "delete_token": null,
+                "submitter_ip": null,
+                "submitter_ip_hash": null,
+                "content_hash": null
+            }));
+        }
+        let export_body = serde_json::json!({ "version": 1, "comments": comments }).to_string();
+        assert!(
+            export_body.len() > 8192,
+            "payload must exceed the form limit"
+        );
+
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &export_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "large import must not hit the 8 KB form cap"
+        );
+        assert_eq!(state.repo.list_all_comments().await.unwrap().len(), 50);
+    }
+
+    #[tokio::test]
+    async fn import_skips_orphaned_rows_without_aborting() {
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state.clone());
+        // Child references a parent that fails validation (bad status) and
+        // gets skipped; a URL row references a comment that was never in the
+        // import at all. The import must complete, not 500.
+        let export_body = serde_json::json!({
+            "version": 1,
+            "comments": [
+                {
+                    "id": 1, "target_path": "/orphan", "comment_type": "native",
+                    "source_url": null, "author_name": "Bad", "author_url": null,
+                    "author_avatar": null, "content": "x", "status": "evil",
+                    "created_at": "2026-08-01 10:00:00", "updated_at": "2026-08-01 10:00:00",
+                    "parent_id": null, "depth": 0, "honeypot": false,
+                    "delete_token": null, "submitter_ip": null,
+                    "submitter_ip_hash": null, "content_hash": null
+                },
+                {
+                    "id": 2, "target_path": "/orphan", "comment_type": "native",
+                    "source_url": null, "author_name": "Child", "author_url": null,
+                    "author_avatar": null, "content": "reply to skipped parent",
+                    "status": "pending", "created_at": "2026-08-01 10:00:00",
+                    "updated_at": "2026-08-01 10:00:00", "parent_id": 1,
+                    "depth": 1, "honeypot": false, "delete_token": null,
+                    "submitter_ip": null, "submitter_ip_hash": null, "content_hash": null
+                }
+            ],
+            "comment_urls": [
+                { "id": 1, "comment_id": 999, "url": "https://evil.com/x",
+                  "domain": "evil.com", "url_hash": "h:deadbeef" }
+            ]
+        })
+        .to_string();
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &export_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "import must complete despite bad rows");
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["comments_imported"], 0);
+        assert_eq!(
+            result["comments_skipped"], 2,
+            "parent + orphaned child skipped"
+        );
+        assert_eq!(
+            result["comment_urls_imported"], 0,
+            "URL for missing comment skipped"
+        );
+        assert!(state.repo.get_comment(1).await.unwrap().is_none());
+        assert!(state.repo.get_comment(2).await.unwrap().is_none());
     }
 }

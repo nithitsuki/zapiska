@@ -113,6 +113,78 @@ impl Repo {
         .await
     }
 
+    /// List approved comments for a path, oldest first (ascending id order).
+    /// `after` is the cursor: rows with `id > after`. Used by
+    /// `GET /api/comments?sort=oldest`.
+    pub async fn list_approved_oldest(
+        &self,
+        path: &str,
+        limit: i64,
+        after: Option<i64>,
+    ) -> RepoResult<Vec<Comment>> {
+        let path = path.to_string();
+        self.spawn(move |conn| {
+            let mut stmt = if let Some(_cursor) = after {
+                conn.prepare(
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
+                     FROM comments
+                     WHERE target_path = ?1 AND status = 'approved' AND id > ?2
+                     ORDER BY id ASC
+                     LIMIT ?3",
+                )
+                .map_err(|e| RepoError::Internal(e.to_string()))?
+            } else {
+                conn.prepare(
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
+                     FROM comments
+                     WHERE target_path = ?1 AND status = 'approved'
+                     ORDER BY id ASC
+                     LIMIT ?2",
+                )
+                .map_err(|e| RepoError::Internal(e.to_string()))?
+            };
+
+            let rows = if let Some(cursor) = after {
+                stmt.query_map(params![path, cursor, limit], row_to_comment)
+                    .map_err(|e| RepoError::Internal(e.to_string()))?
+            } else {
+                stmt.query_map(params![path, limit], row_to_comment)
+                    .map_err(|e| RepoError::Internal(e.to_string()))?
+            };
+
+            let mut comments = Vec::new();
+            for row in rows {
+                comments.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+            }
+            Ok(comments)
+        })
+        .await
+    }
+
+    /// List approved comments across ALL paths, newest first (global feed).
+    pub async fn list_approved_global(&self, limit: i64) -> RepoResult<Vec<Comment>> {
+        self.spawn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
+                     FROM comments
+                     WHERE status = 'approved'
+                     ORDER BY id DESC
+                     LIMIT ?1",
+                )
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let rows = stmt
+                .query_map(params![limit], row_to_comment)
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut comments = Vec::new();
+            for row in rows {
+                comments.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+            }
+            Ok(comments)
+        })
+        .await
+    }
+
     /// List all distinct paths that have comments, with counts per status.
     pub async fn list_paths(&self) -> RepoResult<Vec<(String, i64, i64, i64, i64, i64)>> {
         self.spawn(move |conn| {
@@ -524,6 +596,83 @@ impl Repo {
             )
             .optional()
             .map_err(|e| RepoError::Internal(e.to_string()))
+        })
+        .await
+    }
+
+    /// Dump every comment (all statuses, all paths), oldest first.
+    /// Used by the admin JSON export.
+    pub async fn list_all_comments(&self) -> RepoResult<Vec<Comment>> {
+        self.spawn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
+                     FROM comments
+                     ORDER BY id ASC",
+                )
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let rows = stmt
+                .query_map([], row_to_comment)
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut comments = Vec::new();
+            for row in rows {
+                comments.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+            }
+            Ok(comments)
+        })
+        .await
+    }
+
+    /// Import a full comment row, preserving its id, status, and timestamps.
+    /// Upsert by id (ON CONFLICT updates content/author/status) so re-imports
+    /// are idempotent. Parents sort before children in the export, so the
+    /// foreign key on `parent_id` always resolves.
+    pub async fn import_comment(&self, input: Comment) -> RepoResult<()> {
+        self.spawn(move |conn| {
+            conn.execute(
+                "INSERT INTO comments (id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                 ON CONFLICT(id) DO UPDATE SET
+                     target_path = excluded.target_path,
+                     comment_type = excluded.comment_type,
+                     source_url = excluded.source_url,
+                     author_name = excluded.author_name,
+                     author_url = excluded.author_url,
+                     author_avatar = excluded.author_avatar,
+                     content = excluded.content,
+                     status = excluded.status,
+                     created_at = excluded.created_at,
+                     updated_at = excluded.updated_at,
+                     parent_id = excluded.parent_id,
+                     depth = excluded.depth,
+                     honeypot = excluded.honeypot,
+                     delete_token = excluded.delete_token,
+                     submitter_ip = excluded.submitter_ip,
+                     content_hash = excluded.content_hash,
+                     submitter_ip_hash = excluded.submitter_ip_hash",
+                params![
+                    input.id,
+                    input.target_path,
+                    input.comment_type,
+                    input.source_url,
+                    input.author_name,
+                    input.author_url,
+                    input.author_avatar,
+                    input.content,
+                    input.status,
+                    input.created_at,
+                    input.updated_at,
+                    input.parent_id,
+                    input.depth,
+                    input.honeypot as i64,
+                    input.delete_token,
+                    input.submitter_ip,
+                    input.content_hash,
+                    input.submitter_ip_hash,
+                ],
+            )
+            .map_err(|e| RepoError::Internal(e.to_string()))?;
+            Ok(())
         })
         .await
     }

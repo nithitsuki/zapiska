@@ -1,21 +1,16 @@
-# Comments embed
+# Embed comments
 
-This is the client-side widget and form reference for embedding zapiska on your site.
-Replace `comments.your-site.example` with your zapiska domain.
+This guide shows how to add the zapiska widget and how to use the API from a
+custom frontend.
 
-- [Widget](#widget) — drop-in threaded comment thread
-- [Form](#form) — submit new comments
-- [Webmention](#webmention-discovery) — receive IndieWeb pings
-- [Turnstile](#cloudflare-turnstile-optional) — optional bot protection
-- [Building a custom frontend](#building-a-custom-frontend) — use the raw API
-
----
+Replace `comments.your-site.example` with the zapiska host.
 
 ## Widget
 
-Add a `<div id="nc-comments"></div>` where comments should appear, then drop in the script:
+Add a container and the script:
 
 ```html
+<div id="nc-comments"></div>
 <script
   id="nc-comments"
   src="https://comments.your-site.example/embed/comments.js"
@@ -24,158 +19,136 @@ Add a `<div id="nc-comments"></div>` where comments should appear, then drop in 
 ></script>
 ```
 
-- `data-path` — the path on your main site this page maps to (required).
-- `data-limit` — max comments to show (optional, defaults to 50).
+The server must include the main site origin in `ALLOWED_CORS_ORIGIN`.
 
-The script fetches `GET /api/comments?path=...` and renders approved comments.
-Content is sanitized server-side (ammonia) and re-sanitized client-side.
-Author names and URLs are text-escaped, never `innerHTML`.
+The widget reads approved comments from `/api/comments`.
+It builds the reply tree in the browser.
+It renders approved reaction counts when they exist.
 
-> `ALLOWED_CORS_ORIGIN` must be set to your main site's origin for the fetch to succeed.
+The default server value `MAX_THREAD_DEPTH=0` disables replies.
+Set it above `0` before you use the reply form.
 
-### All data-* attributes
+## Widget attributes
 
-Every aspect of the widget is configurable through attributes on the `<script>` tag.
-All are optional — the widget uses sensible defaults for everything.
+All attributes are optional.
 
-#### API & data
-
-| Attribute | Default | Description |
-|---|---|---|
-| `data-api-origin` | derived from `src` or `window.location.origin` | Override the API origin (if the JS is served from a different domain than the API). |
-| `data-path` | `/` | The page path to fetch comments for. |
-| `data-limit` | `50` | Max comments to fetch (passed to the API). |
-
-#### Text overrides
-
-Every text string can be replaced. Use `%d` in `data-heading-text` for the comment count.
+### API values
 
 | Attribute | Default | Description |
 |---|---|---|
-| `data-heading-text` | `Comments (%d)` | Section heading. `%d` is replaced with the comment count. |
-| `data-empty-text` | `No comments yet.` | Shown when there are no approved comments. |
-| `data-error-text` | `Comments could not be loaded.` | Shown on API fetch failure. |
-| `data-reply-text` | `Reply` | Reply button label on each comment. |
-| `data-submit-text` | `Submit` | Reply form submit button. |
-| `data-cancel-text` | `Cancel` | Reply form cancel button. |
-| `data-name-placeholder` | `Your name` | Reply form name input placeholder. |
-| `data-website-placeholder` | `Website (optional)` | Reply form website input placeholder. |
-| `data-reply-placeholder` | `Write your reply...` | Reply form textarea placeholder. |
-| `data-pending-text` | `Reply submitted (pending approval).` | Shown after a reply is submitted successfully. |
+| `data-api-origin` | Derived from `src` | API origin when it differs from the script origin. |
+| `data-path` | `/` | Main site path. |
+| `data-limit` | `50` | Maximum comments to read. |
 
-#### Behavior
+### Text values
 
 | Attribute | Default | Description |
 |---|---|---|
-| `data-hide-replies` | `false` | Set `"true"` to hide reply buttons on all comments (read-only thread). |
-| `data-hide-heading` | `false` | Set `"true"` to suppress the "Comments (x)" heading. |
-| `data-nostyles` | `false` | Set `"true"` to skip injecting default CSS entirely — you provide your own. Class names used: `.nc-comment`, `.nc-meta`, `.nc-avatar`, `.nc-author`, `.nc-date`, `.nc-body`, `.nc-reply-btn`, `.nc-reply-form`, `.nc-thread`, `.nc-heading`, `.nc-empty`, `.nc-error`. |
-| `data-link-target` | `_blank` | `target` attribute for author name links. Set to `_self` to open in the same tab. |
-| `data-avatar-size` | `24` | Avatar width/height in pixels. |
-| `data-turnstile-sitekey` | _(unset)_ | When set, the reply form renders a Cloudflare Turnstile widget with this sitekey. The token is sent as `cf-turnstile-response`. Requires `TURNSTILE_ENABLED=true` on the server. |
+| `data-heading-text` | `Comments (%d)` | `%d` becomes the approved count. |
+| `data-empty-text` | `No comments yet.` | Text for an empty thread. |
+| `data-error-text` | `Comments could not be loaded.` | Text for a read error. |
+| `data-reply-text` | `Reply` | Reply button text. |
+| `data-submit-text` | `Submit` | Reply submit text. |
+| `data-cancel-text` | `Cancel` | Reply cancel text. |
+| `data-name-placeholder` | `Your name` | Name input placeholder. |
+| `data-website-placeholder` | `Website (optional)` | Website input placeholder. |
+| `data-reply-placeholder` | `Write your reply...` | Reply content placeholder. |
+| `data-pending-text` | `Reply submitted (pending approval).` | Text after a successful reply. |
 
-### Style with your own CSS
+### Display values
 
-The widget injects low-specificity class selectors that your own stylesheet
-overrides naturally. Set `data-nostyles="true"` and write everything yourself.
-The available class names are `.nc-comment`, `.nc-meta`, `.nc-avatar`,
-`.nc-author`, `.nc-date`, `.nc-body`, `.nc-reply-btn`, `.nc-reply-form`,
-`.nc-thread`, `.nc-heading`, `.nc-empty`, `.nc-error`.
+| Attribute | Default | Description |
+|---|---|---|
+| `data-hide-replies` | `false` | Hide reply buttons. |
+| `data-hide-heading` | `false` | Hide the heading. |
+| `data-nostyles` | `false` | Do not add the default CSS. |
+| `data-link-target` | `_blank` | Target for author links. |
+| `data-avatar-size` | `24` | Avatar size in pixels. |
+| `data-turnstile-sitekey` | Unset | Public Turnstile sitekey for reply forms. |
 
-### Fully custom heading
+## Widget classes
 
-```html
-<script id="nc-comments"
-  src="https://comments.your-site.example/embed/comments.js"
-  data-path="/blog/post-1"
-  data-heading-text="%d thoughts"
-  data-hide-replies="true"
-></script>
+Set `data-nostyles="true"` to supply all CSS.
+
+The widget uses these classes:
+
+```text
+.nc-comment .nc-meta .nc-avatar .nc-author .nc-date .nc-body
+.nc-reactions .nc-reply-btn .nc-reply-form .nc-thread
+.nc-heading .nc-empty .nc-error
 ```
 
----
+## Top-level form
 
-## Form
-
-To submit a top-level comment, POST to the API directly. The widget only renders
-replies — you must build the comment form yourself.
-
-```
-POST https://comments.your-site.example/api/comment
-Content-Type: application/x-www-form-urlencoded
-```
-
-Fields: `target_path`, `author_name`, `content`, and optionally `author_url`,
-`github_username`, `parent_id` (for threaded replies), `website` (honeypot),
-and `cf-turnstile-response` (when `TURNSTILE_ENABLED=true`).
-
-A minimal HTML form:
+The widget supplies reply forms. Create a top-level form on the main site.
 
 ```html
 <form action="https://comments.your-site.example/api/comment" method="POST">
   <input type="hidden" name="target_path" value="/blog/hello-world">
-  <input type="text"     name="author_name" placeholder="Name" required>
-  <input type="url"      name="author_url"   placeholder="Website (optional)">
+  <input type="text" name="author_name" required>
+  <input type="url" name="author_url">
   <textarea name="content" required></textarea>
   <input type="text" name="website" style="display:none">
   <button type="submit">Send</button>
 </form>
 ```
 
----
+The server reads `website` as the honeypot field.
+
+The response contains `delete_token` and `status`. It does not contain the new
+comment ID.
 
 ## Webmention discovery
 
-If you build with the `webmentions` feature (default), advertise the endpoint
-in `<head>`:
+When the server uses the `webmentions` feature, add this link to the main site:
 
 ```html
-<link rel="webmention" href="https://comments.your-site.example/api/webmention" />
+<link rel="webmention" href="https://comments.your-site.example/api/webmention">
 ```
 
----
+## Turnstile
 
-## Cloudflare Turnstile (optional)
+When the server enables Turnstile, every native comment and reply needs a valid
+token.
 
-When `TURNSTILE_ENABLED=true` on the server, forms must include a Turnstile
-widget that sends `cf-turnstile-response`. For your own top-level form:
+For a top-level form, load the script and add the widget container:
 
 ```html
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-<form action="https://comments.your-site.example/api/comment" method="POST">
-  <input type="hidden" name="target_path" value="/blog/hello-world">
-  <input type="text"  name="author_name" placeholder="Name" required>
-  <input type="url"   name="author_url"  placeholder="Website (optional)">
-  <textarea name="content" required></textarea>
-  <div class="cf-turnstile" data-sitekey="0x4AAAAAAA-your-public-sitekey"></div>
-  <input type="text" name="website" style="display:none">
-  <button type="submit">Send</button>
-</form>
+<div class="cf-turnstile" data-sitekey="public-sitekey"></div>
 ```
 
-For the widget's inline reply form, set `data-turnstile-sitekey` on the script
-tag — the widget loads the Turnstile API, renders the widget, and includes
-the token in the POST.
+The widget creates `cf-turnstile-response`. Do not add that field by hand.
 
----
+For inline replies, set `data-turnstile-sitekey` on the comments script.
 
-## Building a custom frontend
+## Custom frontend
 
-zapiska is backend-only. The widget is a convenience — you are not required to
-use it. All data comes from two endpoints:
-
-### Fetch comments
+Read comments with `fetch`:
 
 ```js
 fetch('https://comments.your-site.example/api/comments?path=/blog/post-1&limit=50')
-  .then(function (r) { return r.json(); })
+  .then(function (response) {
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  })
   .then(function (data) {
-    console.log(data.total);       // total approved count
-    console.log(data.comments);   // array of comment objects
+    renderThread(data.comments, data.total);
   });
 ```
 
-Each comment:
+The read API supports these query values:
+
+```text
+sort=newest
+before=42
+sort=oldest
+after=42
+```
+
+Use `before` with `newest`. Use `after` with `oldest`.
+
+Each public comment contains:
 
 ```json
 {
@@ -184,44 +157,104 @@ Each comment:
   "author_name": "Alice",
   "author_url": "https://alice.blog",
   "author_avatar": "https://alice.blog/avatar.jpg",
-  "content": "<p>Great post!</p>",
-  "created_at": "2026-07-03T16:40:00",
+  "content": "<p>Great post.</p>",
+  "created_at": "2026-07-03 16:40:00",
   "parent_id": null,
-  "depth": 0
+  "depth": 0,
+  "reactions": {
+    "👍": 5
+  }
 }
 ```
 
-- `content` is already ammonia-sanitized HTML. Insert via `innerHTML`.
-- `author_name`, `author_url`, `author_avatar` are **plain text** — escape or
-  use `.textContent` / attribute values. Never put them through `innerHTML`.
-- `parent_id` is `null` for top-level. Replies link via `parent_id` — build
-  a tree client-side. Top-level sorted newest-first, replies oldest-first.
+The `content` value is sanitized HTML. Use `innerHTML` only for this value.
+Use text or attribute values for author fields. Do not put author fields in
+`innerHTML`.
 
-### Submit a comment
+Build the reply tree from `parent_id`:
 
 ```js
-var body = 'target_path=' + encodeURIComponent('/blog/post-1') +
-           '&author_name=' + encodeURIComponent('Alice') +
-           '&content=' + encodeURIComponent('<p>Nice!</p>');
+function buildTree(comments) {
+  var nodes = {};
+  var roots = [];
+
+  comments.forEach(function (comment) {
+    nodes[comment.id] = { comment: comment, children: [] };
+  });
+
+  comments.forEach(function (comment) {
+    var node = nodes[comment.id];
+    if (comment.parent_id && nodes[comment.parent_id]) {
+      nodes[comment.parent_id].children.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+
+  roots.sort(function (a, b) {
+    return b.comment.id - a.comment.id;
+  });
+
+  Object.keys(nodes).forEach(function (id) {
+    nodes[id].children.sort(function (a, b) {
+      return a.comment.id - b.comment.id;
+    });
+  });
+
+  return roots;
+}
+```
+
+The widget uses newest roots and oldest replies. A custom frontend can honor
+the selected API order instead.
+
+## Submit with JavaScript
+
+```js
+var body = new URLSearchParams({
+  target_path: '/blog/post-1',
+  author_name: 'Alice',
+  content: '<p>Nice post.</p>'
+});
 
 fetch('https://comments.your-site.example/api/comment', {
   method: 'POST',
   headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
   body: body
 })
-.then(function (r) {
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.json();
-})
-.then(function (data) {
-  console.log(data.delete_token);  // for self-service deletion
+  .then(function (response) {
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  })
+  .then(function (data) {
+    console.log(data.status);
+  });
+```
+
+## Reactions
+
+The public reaction route needs the admin token by default:
+
+```js
+fetch('https://comments.your-site.example/api/comment/42/reaction', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer ' + token,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({ reaction: '👍' })
 });
 ```
 
-For Turnstile, add `&cf-turnstile-response=<token>` to the body. Read the token
-from `turnstile.getResponse()` (see the widget source for a complete example).
+Only approved reactions appear in `reactions` counts.
+The public CORS preflight does not advertise `DELETE`.
 
-### Full API reference
+## Security rules
 
-See [docs/api.md](../docs/api.md) for all endpoints, admin API, moderation
-webhooks, and error responses.
+- Render `content` as sanitized HTML only.
+- Render author values as text or attributes.
+- Keep the admin token out of browser code unless the user accepts admin mode.
+- Use HTTPS for public requests.
+- Set the exact main site origin in `ALLOWED_CORS_ORIGIN`.
+
+See [the full API reference](../docs/api.md).

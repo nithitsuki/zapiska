@@ -101,6 +101,25 @@ pub struct Config {
     /// Batch window scoping: "page" = one window per target_path,
     /// "global" = a single site-wide window.
     pub notify_batch_granularity: String,
+    /// Who may react to comments: "admin" (default — only requests with the
+    /// admin token), or "anyone" (public, IP-hashed identity — HIGHLY
+    /// discouraged without additional protections; reserved future value:
+    /// "authenticated").
+    pub reactions_allowed: String,
+    /// Allowed reaction set, comma-separated (e.g. "👍,❤️,😄"). The API
+    /// rejects anything outside this set.
+    pub reactions_set: Vec<String>,
+    /// Whitelist of comment languages as ISO 639-1 codes (e.g. "en,de,ja").
+    /// Empty = no whitelist. When set, comments in other languages are
+    /// rejected with 400. Wins over the blacklist when both are set.
+    pub comment_lang_allowed: Vec<String>,
+    /// Blacklist of comment languages as ISO 639-1 codes. Empty = no
+    /// blacklist. Ignored when a whitelist is set.
+    pub comment_lang_blocked: Vec<String>,
+    /// Policy for undetectable / emoji-heavy comments: "always" (default,
+    /// emoji-only comments pass), "never" (emoji-heavy rejected), or
+    /// "if_unknown" (emoji-heavy pass, other undetectable text rejected).
+    pub comment_lang_allow_emoji: String,
 }
 
 #[derive(Debug, Error)]
@@ -131,6 +150,12 @@ pub enum ConfigError {
     InvalidRateLimitBurst(String),
     #[error("NOTIFY_BATCH_GRANULARITY must be 'page' or 'global', got: {0}")]
     InvalidNotifyGranularity(String),
+    #[error("REACTIONS_ALLOWED must be 'admin' or 'anyone', got: {0}")]
+    InvalidReactionsMode(String),
+    #[error("unknown language code '{0}' in COMMENT_LANG_ALLOWED/BLOCKED (use ISO 639-1)")]
+    InvalidLangCode(String),
+    #[error("COMMENT_LANG_ALLOW_EMOJI must be 'always', 'never', or 'if_unknown', got: {0}")]
+    InvalidEmojiPolicy(String),
 }
 
 fn env_or_default(key: &str, default: &str) -> String {
@@ -309,18 +334,58 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty());
 
-        let notify_batch_secs = env_or_default("NOTIFY_BATCH_SECS", "60")
-            .parse::<u64>()
-            .unwrap_or(60);
-        let notify_batch_threshold = env_or_default("NOTIFY_BATCH_THRESHOLD", "20")
-            .parse::<u32>()
-            .unwrap_or(20);
+        let notify_batch_secs = parse_or_err(
+            "NOTIFY_BATCH_SECS",
+            env_or_default("NOTIFY_BATCH_SECS", "60"),
+            ConfigError::InvalidRateLimitWindow,
+        )?;
+        let notify_batch_threshold = parse_or_err(
+            "NOTIFY_BATCH_THRESHOLD",
+            env_or_default("NOTIFY_BATCH_THRESHOLD", "20"),
+            ConfigError::InvalidRateLimitBurst,
+        )?;
         let notify_batch_granularity =
             env_or_default("NOTIFY_BATCH_GRANULARITY", "page").to_lowercase();
         if notify_batch_granularity != "page" && notify_batch_granularity != "global" {
             return Err(ConfigError::InvalidNotifyGranularity(
                 notify_batch_granularity,
             ));
+        }
+
+        let reactions_allowed = env_or_default("REACTIONS_ALLOWED", "admin").to_lowercase();
+        if reactions_allowed != "admin" && reactions_allowed != "anyone" {
+            return Err(ConfigError::InvalidReactionsMode(reactions_allowed));
+        }
+        let reactions_set: Vec<String> = env_or_default("REACTIONS_SET", "👍,❤️,😄,😮,😢,😡")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        fn parse_lang_codes(key: &str) -> Result<Vec<String>, ConfigError> {
+            let raw = env::var(key).unwrap_or_default();
+            let codes: Vec<String> = raw
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            for code in &codes {
+                if crate::language::lang_from_iso_639_1(code).is_none() {
+                    return Err(ConfigError::InvalidLangCode(code.clone()));
+                }
+            }
+            Ok(codes)
+        }
+
+        let comment_lang_allowed = parse_lang_codes("COMMENT_LANG_ALLOWED")?;
+        let comment_lang_blocked = parse_lang_codes("COMMENT_LANG_BLOCKED")?;
+        let comment_lang_allow_emoji =
+            env_or_default("COMMENT_LANG_ALLOW_EMOJI", "always").to_lowercase();
+        if !matches!(
+            comment_lang_allow_emoji.as_str(),
+            "always" | "never" | "if_unknown"
+        ) {
+            return Err(ConfigError::InvalidEmojiPolicy(comment_lang_allow_emoji));
         }
 
         Ok(Config {
@@ -364,6 +429,11 @@ impl Config {
             notify_batch_secs,
             notify_batch_threshold,
             notify_batch_granularity,
+            reactions_allowed,
+            reactions_set,
+            comment_lang_allowed,
+            comment_lang_blocked,
+            comment_lang_allow_emoji,
         })
     }
 
@@ -424,6 +494,11 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 notify_batch_secs: {}, \
                 notify_batch_threshold: {}, \
                 notify_batch_granularity: {}, \
+                reactions_allowed: {}, \
+                reactions_set: {:?}, \
+                comment_lang_allowed: {:?}, \
+                comment_lang_blocked: {:?}, \
+                comment_lang_allow_emoji: {}, \
                 rust_log: {} \
             }}",
             self.0.bind_addr,
@@ -479,6 +554,11 @@ impl std::fmt::Display for RedactedConfig<'_> {
             self.0.notify_batch_secs,
             self.0.notify_batch_threshold,
             self.0.notify_batch_granularity,
+            self.0.reactions_allowed,
+            self.0.reactions_set,
+            self.0.comment_lang_allowed,
+            self.0.comment_lang_blocked,
+            self.0.comment_lang_allow_emoji,
             self.0.rust_log,
         )
     }
@@ -537,6 +617,11 @@ mod tests {
                 "NOTIFY_BATCH_SECS",
                 "NOTIFY_BATCH_THRESHOLD",
                 "NOTIFY_BATCH_GRANULARITY",
+                "REACTIONS_ALLOWED",
+                "REACTIONS_SET",
+                "COMMENT_LANG_ALLOWED",
+                "COMMENT_LANG_BLOCKED",
+                "COMMENT_LANG_ALLOW_EMOJI",
             ];
             for var in vars {
                 // SAFETY: held ENV_LOCK prevents concurrent env mutation.
@@ -618,11 +703,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_github_token_treated_as_none() {
-        with_env(&[("ADMIN_TOKEN", "test"), ("GITHUB_TOKEN", "")], || {
-            let config = Config::from_env().unwrap();
-            assert!(config.github_token.is_none());
-        });
+    fn empty_reactions_set_disables_reactions() {
+        with_env(
+            &[("ADMIN_TOKEN", "test"), ("REACTIONS_SET", " , , ")],
+            || {
+                let config = Config::from_env().unwrap();
+                assert!(
+                    config.reactions_set.is_empty(),
+                    "empty set means reactions are disabled entirely"
+                );
+            },
+        );
     }
 
     #[test]
@@ -889,6 +980,105 @@ mod tests {
     }
 
     #[test]
+    fn reactions_defaults() {
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.reactions_allowed, "admin");
+            assert_eq!(
+                config.reactions_set,
+                vec!["👍", "❤️", "😄", "😮", "😢", "😡"]
+            );
+        });
+    }
+
+    #[test]
+    fn reactions_loaded_from_env() {
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("REACTIONS_ALLOWED", "anyone"),
+                ("REACTIONS_SET", "👍, 👎, 🚀"),
+            ],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.reactions_allowed, "anyone");
+                assert_eq!(config.reactions_set, vec!["👍", "👎", "🚀"]);
+            },
+        );
+    }
+
+    #[test]
+    fn invalid_reactions_mode_rejected() {
+        with_env(
+            &[("ADMIN_TOKEN", "test"), ("REACTIONS_ALLOWED", "everyone")],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(err, ConfigError::InvalidReactionsMode(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn language_filter_defaults_off() {
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            let config = Config::from_env().unwrap();
+            assert!(config.comment_lang_allowed.is_empty());
+            assert!(config.comment_lang_blocked.is_empty());
+            assert_eq!(config.comment_lang_allow_emoji, "always");
+        });
+    }
+
+    #[test]
+    fn language_codes_loaded_from_env() {
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("COMMENT_LANG_ALLOWED", "en, DE,ja"),
+                ("COMMENT_LANG_BLOCKED", "ru"),
+                ("COMMENT_LANG_ALLOW_EMOJI", "if_unknown"),
+            ],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.comment_lang_allowed, vec!["en", "de", "ja"]);
+                assert_eq!(config.comment_lang_blocked, vec!["ru"]);
+                assert_eq!(config.comment_lang_allow_emoji, "if_unknown");
+            },
+        );
+    }
+
+    #[test]
+    fn unknown_language_code_rejected() {
+        with_env(
+            &[("ADMIN_TOKEN", "test"), ("COMMENT_LANG_ALLOWED", "en,xx")],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(err, ConfigError::InvalidLangCode(_)));
+            },
+        );
+        with_env(
+            &[("ADMIN_TOKEN", "test"), ("COMMENT_LANG_BLOCKED", "klingon")],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(err, ConfigError::InvalidLangCode(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn invalid_emoji_policy_rejected() {
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("COMMENT_LANG_ALLOW_EMOJI", "sometimes"),
+            ],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(err, ConfigError::InvalidEmojiPolicy(_)));
+            },
+        );
+    }
+
+    #[test]
     fn redacted_display_hides_admin_and_github_tokens() {
         let config = Config {
             bind_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -932,6 +1122,11 @@ mod tests {
             notify_batch_secs: 60,
             notify_batch_threshold: 20,
             notify_batch_granularity: "page".to_string(),
+            reactions_allowed: "admin".to_string(),
+            reactions_set: vec!["👍".to_string(), "❤️".to_string()],
+            comment_lang_allowed: vec!["en".to_string()],
+            comment_lang_blocked: Vec::new(),
+            comment_lang_allow_emoji: "always".to_string(),
         };
         let rendered = format!("{}", config.redacted_display());
         assert!(

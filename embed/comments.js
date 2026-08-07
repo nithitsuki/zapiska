@@ -248,6 +248,21 @@
     body.innerHTML = content;
     el.appendChild(body);
 
+    // Reaction counts (approved only, supplied inline by the API).
+    if (c.reactions && typeof c.reactions === 'object') {
+      var names = Object.keys(c.reactions).filter(function (r) {
+        return c.reactions[r] > 0;
+      });
+      if (names.length > 0) {
+        var reactions = document.createElement('div');
+        reactions.className = 'nc-reactions';
+        reactions.textContent = names.map(function (r) {
+          return r + ' ' + c.reactions[r];
+        }).join('  ·  ');
+        el.appendChild(reactions);
+      }
+    }
+
     if (!hideReplies) {
       var replyBtn = document.createElement('button');
       replyBtn.className = 'nc-reply-btn';

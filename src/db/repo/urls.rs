@@ -1,10 +1,10 @@
 use rusqlite::params;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{Repo, RepoError, RepoResult};
 
 /// An extracted URL from a comment.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommentUrl {
     pub id: i64,
     pub comment_id: i64,
@@ -178,6 +178,48 @@ impl Repo {
                 .filter_map(|r| r.ok())
                 .collect();
             Ok(hashes)
+        })
+        .await
+    }
+
+    /// Dump every extracted URL (admin JSON export).
+    pub async fn list_all_comment_urls(&self) -> RepoResult<Vec<CommentUrl>> {
+        self.spawn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, comment_id, url, domain, url_hash FROM comment_urls ORDER BY id",
+                )
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(CommentUrl {
+                        id: row.get(0)?,
+                        comment_id: row.get(1)?,
+                        url: row.get(2)?,
+                        domain: row.get(3)?,
+                        url_hash: row.get(4)?,
+                    })
+                })
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+            }
+            Ok(result)
+        })
+        .await
+    }
+
+    /// Remove all URL rows for a comment (used before re-importing them so
+    /// restores are idempotent).
+    pub async fn delete_urls_for_comment(&self, comment_id: i64) -> RepoResult<()> {
+        self.spawn(move |conn| {
+            conn.execute(
+                "DELETE FROM comment_urls WHERE comment_id = ?1",
+                params![comment_id],
+            )
+            .map_err(|e| RepoError::Internal(e.to_string()))?;
+            Ok(())
         })
         .await
     }

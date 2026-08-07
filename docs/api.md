@@ -1,429 +1,569 @@
 # API
 
-Interactive docs at `/swagger-ui/` when the server is running. Raw OpenAPI 3.1 spec at `/api-docs/openapi.json`.
+Interactive API docs are available at `/swagger-ui/`.
+The OpenAPI document is available at `/api-docs/openapi.json`.
 
-## Public
+All paths use the zapiska origin.
+
+## Public API
 
 ### GET /api/comments
 
-Approved comments for a path. Returns a flat list — the embed widget builds the thread tree client-side.
+Return approved comments for one path.
 
-`parent_id` is the ID of the parent comment (null for top-level). `depth` is the nesting level (0 = top-level, up to `MAX_THREAD_DEPTH`).
+The response is a flat list. The `parent_id` value links a reply to its
+parent. A frontend can build the thread tree.
 
-| Param | Type | Default | Description |
+| Parameter | Type | Default | Description |
 |---|---|---|---|
-| `path` | string | **required** | Path on the main site (e.g. `/blog/hello`). Starts with `/`. |
-| `limit` | int | 50 | Max results (clamped 1-100). |
-| `before` | int | — | Cursor: rows with `id < before`. |
+| `path` | string | Required | Main site path. It must start with `/`. |
+| `limit` | integer | `50` | Maximum result count. The server clamps it to `1` through `100`. |
+| `sort` | string | `newest` | `newest` or `oldest`. |
+| `before` | integer | None | For `newest`, return IDs below this value. |
+| `after` | integer | None | For `oldest`, return IDs above this value. |
 
-Response (200):
+Response:
 
 ```json
 {
-  "total": 137,
+  "total": 1,
   "comments": [
     {
       "id": 42,
-      "comment_type": "webmention",
+      "comment_type": "native",
       "author_name": "Alice",
       "author_url": "https://alice.blog",
-      "author_avatar": "https://alice.blog/me.jpg",
-      "content": "<p>Mentioned your page</p>",
-      "created_at": "2026-07-03T16:40:00",
-      "parent_id": null,
-      "depth": 0
-    }
-  ]
-}
-```
-
-`total` counts all approved comments for the path. Only `status = 'approved'` comments are included.
-
-Errors: 400 (path missing/invalid).
-
----
-
-### POST /api/comment
-
-Submit a native comment. Creates a `pending` (or `approved`, depending on `DEFAULT_COMMENT_STATUS`) entry.
-
-`Content-Type: application/x-www-form-urlencoded`
-
-| Field | Required | Description |
-|---|---|---|
-| `target_path` | yes | Path on the main site. |
-| `author_name` | yes | Display name (max 100 chars). |
-| `content` | yes | HTML content (ammonia sanitized, max 2000 chars). |
-| `author_url` | no | Author's website (absolute http/https). |
-| `github_username` | no | GitHub username for profile enrichment. |
-| `parent_id` | no | ID of the parent comment for threaded replies. Requires `MAX_THREAD_DEPTH > 0`. |
-| `website` | no | Honeypot field — if non-empty the comment is stored with `honeypot = 1`. |
-| `cf-turnstile-response` | conditional | Cloudflare Turnstile token. Required when `TURNSTILE_ENABLED=true`; ignored otherwise. Rendered automatically by the widget or by the explicit Turnstile script tag. |
-
-Response: 201 with `{ "delete_token": "a1b2c3d4e5f6g7h8" }`. The `delete_token` is a 16-char hex string for self-service deletion. When `MODERATION_WEBHOOK_MODE=sync`, the response also includes the final moderation status: `{ "delete_token": "...", "status": "approved" }`.
-
-Errors: 400 (validation, or Turnstile verification failure with `code: "turnstile_failed"`), 429 (rate limited), 503 (Turnstile siteverify endpoint unreachable — fail closed).
-
-Author resolution (priority order):
-1. `author_url` → form name kept, URL stored as-is
-2. `github_username` (without `author_url`) → form name kept; `author_url` set to `https://github.com/<username>`. If form name was empty, the GitHub API name is used instead.
-
-Avatar resolution (priority order, independent of name):
-1. Resolved `author_url` is a github.com URL → GitHub API avatar (cached 30d)
-2. (webmentions feature) Fetch resolved `author_url` page → h-card photo → favicon
-3. Raw `github_username` form field → GitHub API avatar
-4. Raw `author_url` domain → DiceBear generated avatar (consistent per domain)
-5. `github_username` → DiceBear generated avatar (consistent per user)
-6. DiceBear from a generic seed (anonymous fallback)
-
----
-
-### POST /api/webmention
-
-Requires the `webmentions` feature (default: on). Incoming W3C webmention. Enqueues background processing.
-
-`Content-Type: application/x-www-form-urlencoded`
-
-| Field | Required | Description |
-|---|---|---|
-| `source` | yes | URL of the page with a backlink. |
-| `target` | yes | URL being linked to. Must match `PUBLIC_TARGET_ORIGIN`. |
-
-Response: 202 Accepted (async processing).
-
-Errors: 400 (invalid URL, origin mismatch, source=target), 503 (backlog full).
-
----
-
-### POST /api/comment/{id}/delete
-
-Self-service comment deletion. Uses the `delete_token` returned from the original submission.
-
-`Content-Type: application/json`
-
-```json
-{ "token": "a1b2c3d4e5f6g7h8" }
-```
-
-Response (200): `{ "success": true }`
-
-Errors: 404 (comment not found or token doesn't match).
-
----
-
-## Auth
-
-All `/api/admin/*` endpoints need either:
-- `Authorization: Bearer <ADMIN_TOKEN>` header, or
-- `admin_token=<ADMIN_TOKEN>` cookie (set via `POST /api/admin/login`)
-
-Token comparison uses `subtle::ConstantTimeEq` (timing-safe).
-
-### POST /api/admin/login
-
-Exchange a token for a session cookie.
-
-`Content-Type: application/json`
-
-```json
-{ "token": "your-admin-token" }
-```
-
-Response (200): `Set-Cookie: admin_token=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000` + `{ "success": true }`
-
-Errors: 401 (wrong token).
-
-### POST /api/admin/logout
-
-Clear the session cookie.
-
-Response (200): `Set-Cookie: admin_token=; Path=/; Max-Age=0` + `{ "success": true }`
-
----
-
-## Admin
-
-All admin endpoints return comment objects with these fields: `id`, `target_path`, `comment_type`, `source_url`, `author_name`, `author_url`, `author_avatar`, `content`, `status`, `parent_id`, `depth`, `honeypot`, `delete_token`, `submitter_ip` (SHA-256 hash, prefix `h:`), `content_hash`, `created_at`.
-
-### GET /api/admin/pending
-
-Pending comments, newest first.
-
-| Param | Type | Default | Description |
-|---|---|---|---|
-| `limit` | int | 50 | Max results (clamped 1-100). |
-| `before` | int | — | Cursor. |
-| `path` | string | — | Filter by target_path. |
-
-Response (200):
-
-```json
-{
-  "comments": [
-    {
-      "id": 7,
-      "target_path": "/blog/hello",
-      "comment_type": "native",
-      "source_url": null,
-      "author_name": "Bob",
-      "author_url": "https://bob.example",
-      "author_avatar": "https://api.dicebear.com/7.x/notionists/svg?seed=bob.example",
-      "content": "<p>Hi!</p>",
-      "status": "pending",
+      "author_avatar": "https://alice.blog/avatar.jpg",
+      "content": "<p>Great post.</p>",
+      "created_at": "2026-07-03 16:40:00",
       "parent_id": null,
       "depth": 0,
-      "honeypot": false,
-      "delete_token": null,
-       "submitter_ip": "h:ab12cd34ef56...",
-      "created_at": "2026-07-03T17:00:00"
-    }
-  ]
-}
-```
-
-Errors: 401.
-
----
-
-### GET /api/admin/comments
-
-List comments by status, with optional path and IP filters.
-
-| Param | Type | Default | Description |
-|---|---|---|---|
-| `status` | string | `pending` | One of: `pending`, `approved`, `spam`, `deleted`, `all`. |
-| `limit` | int | 50 | Max results (clamped 1-100). |
-| `before` | int | — | Cursor. |
-| `path` | string | — | Filter by target_path. |
-| `ip` | string | — | Filter by submitter IP address (requires `STORE_IP_ADDRESS=true`). Enter the raw IP — it is SHA-256 hashed before the DB lookup. |
-| `content_hash` | string | — | Filter by content hash (for duplicate detection). |
-
-Response (200): Same shape as `/api/admin/pending`. Each comment includes all fields plus `content_hash`.
-
-Errors: 401.
-
----
-
-### GET /api/admin/comments/{id}
-
-Fetch a single comment with its ancestor chain. The `parents` array walks from immediate parent up to the root comment. Empty for top-level comments.
-
-Response (200):
-
-```json
-{
-  "comment": { "...all PendingComment fields..." },
-  "parents": [
-    { "...parent comment fields..." },
-    { "...grandparent comment fields..." }
-  ]
-}
-```
-
-Errors: 401, 404.
-
----
-
-### POST /api/admin/moderate
-
-Approve, spam, delete, or revert a comment.
-
-`Content-Type: application/json`
-
-```json
-{ "id": 42, "action": "approved" }
-```
-
-Valid actions: `approved`, `spam`, `deleted`, `pending`.
-
-Response (200): `{ "id": 42, "status": "approved" }`
-
-Errors: 400 (invalid action), 401, 404.
-
----
-
-### POST /api/admin/moderate/batch
-
-Moderate multiple comments in one request. Each action is processed independently — errors for individual items don't affect others.
-
-`Content-Type: application/json`
-
-```json
-{
-  "actions": [
-    { "id": 10, "action": "approved" },
-    { "id": 11, "action": "spam" }
-  ]
-}
-```
-
-Response (200):
-
-```json
-{
-  "results": [
-    { "id": 10, "status": "approved", "error": null },
-    { "id": 11, "status": "spam", "error": null }
-  ]
-}
-```
-
-Errors: 401 (top-level). Individual action failures appear as `error` in each result.
-
----
-
-### GET /api/admin/comments/{id}/urls
-
-List extracted URLs for a specific comment. URLs are extracted from comment content at store time.
-
-Response (200):
-
-```json
-{
-  "comment_id": 42,
-  "urls": [
-    { "id": 1, "comment_id": 42, "url": "https://example.com/page", "domain": "example.com", "url_hash": "h:a1b2..." }
-  ]
-}
-```
-
-Errors: 401.
-
----
-
-### GET /api/admin/urls/lookup
-
-Look up all comments containing a URL or from a domain.
-
-| Param | Description |
-|---|---|
-| `url_hash` | Hash of the normalized URL (returned from `/{id}/urls`). Returns stats + all matching comments. |
-| `domain` | Domain name. Returns all unique URLs from this domain. |
-
-Response (200) for `?url_hash=`:
-
-```json
-{
-  "url": "https://spam.example/buy-now",
-  "domain": "spam.example",
-  "first_seen": "2026-07-01T12:00:00",
-  "last_seen": "2026-07-05T14:00:00",
-  "total_occurrences": 12,
-  "unique_ips": 3,
-  "unique_author_names": ["buy_now_user", "click_me"],
-  "comments": [
-    { "id": 10, "status": "spam", "target_path": "/blog/post-1", "created_at": "..." }
-  ]
-}
-```
-
-Errors: 401, 404 (hash not found).
-
----
-
-### GET /api/admin/authors/lookup
-
-Resolve an author identity and return aggregated stats. Queries by one or more signals.
-
-| Param | Type | Description |
-|---|---|---|
-| `ip` | string | Submitter IP address. |
-| `author_name` | string | Exact author name. |
-| `author_url` | string | Author URL. |
-| `combine` | bool | If true, merge results across all signals with OR (wider net). Default: false (AND, narrower). |
-
-Response (200):
-
-```json
-{
-  "total_comments": 23,
-  "approved": 12,
-  "spam": 8,
-  "pending": 2,
-  "deleted": 1,
-  "first_seen": "2026-01-15T08:30:00",
-  "last_seen": "2026-07-05T14:22:00",
-  "recent_comments": [
-    { "id": 42, "target_path": "/blog/hello", "status": "pending", "created_at": "..." }
-  ]
-}
-```
-
-Returns `{ "total_comments": 0 }` if no match.
-
-Errors: 401.
-
----
-
-### POST /api/admin/comments/context
-
-Fetch context for multiple comments in one call. Reduces N API calls to 1 for batch processing.
-
-`Content-Type: application/json`
-
-```json
-{
-  "comment_ids": [42, 43, 44],
-  "include_parents": true,
-  "include_author_stats": true,
-  "include_urls": false
-}
-```
-
-Response (200):
-
-```json
-{
-  "comments": [
-    {
-      "id": 42,
-      "target_path": "/blog/hello",
-      "comment_type": "native",
-      "author_name": "Alice",
-      "content": "<p>Hi</p>",
-      "status": "pending",
-      "parent_id": null,
-      "depth": 0,
-      "created_at": "2026-07-05T14:00:00",
-      "parents": [
-        { "id": 40, "author_name": "Bob", "depth": 0, "created_at": "..." }
-      ],
-      "author_stats": {
-        "total_comments": 15,
-        "approved": 4,
-        "spam": 8,
-        "pending": 3,
-        "deleted": 0,
-        "first_seen": "2026-06-01T12:00:00"
+      "reactions": {
+        "👍": 5
       }
     }
   ]
 }
 ```
 
-Errors: 401.
+`total` counts approved comments for the path. The `reactions` object contains
+approved reaction counts only.
 
----
+Errors:
+
+- `400` for a missing or invalid path.
+- `429` when the read limit is reached.
+
+### GET /feed.xml
+
+Return an RSS 2.0 feed of approved comments.
+
+Omit `path` for the global feed. Add `path` for one page.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | string | None | Main site path. |
+| `limit` | integer | `50` | Maximum item count. The server clamps it to `1` through `100`. |
+
+The response has this content type:
+
+```text
+application/rss+xml; charset=utf-8
+```
+
+The feed escapes XML text. It converts SQLite timestamps to RFC 822 dates.
+Malformed dates use the Unix epoch. Global item titles include the page path.
+
+### POST /api/comment
+
+Create a native comment.
+
+Content type:
+
+```text
+application/x-www-form-urlencoded
+```
+
+Form fields:
+
+| Field | Required | Description |
+|---|---|---|
+| `target_path` | Yes | Main site path. |
+| `author_name` | Yes, unless `github_username` is set | Display name. |
+| `author_url` | No | Absolute HTTP or HTTPS URL. |
+| `github_username` | No | GitHub login for URL and avatar lookup. |
+| `content` | Yes | HTML input. The server sanitizes it. |
+| `parent_id` | No | Approved parent comment ID. Replies need `MAX_THREAD_DEPTH > 0`. |
+| `website` | No | Honeypot field. A non-empty value marks the comment. |
+| `cf-turnstile-response` | Conditional | Required when Turnstile is enabled. |
+
+The server validates the path, name, and author URL. It sanitizes content and
+then applies the language gate when the gate is enabled.
+
+The default status is `pending`. Set `DEFAULT_COMMENT_STATUS=approved` to
+publish native comments immediately.
+
+Response `201`:
+
+```json
+{
+  "delete_token": "0123456789abcdef",
+  "status": "pending"
+}
+```
+
+The response does not include the comment ID. The ID is available from the
+admin API and moderation webhook.
+
+Errors:
+
+- `400` for validation or Turnstile failure.
+- `413` for a body above `MAX_BODY_SIZE`.
+- `429` for a route or daily limit.
+- `503` when Turnstile verification is not available.
+
+### POST /api/comment/{id}/delete
+
+Set a comment status to `deleted` when the token matches.
+
+Request:
+
+```json
+{
+  "token": "0123456789abcdef"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "success": true
+}
+```
+
+The route uses the native rate limit. It returns `404` when the comment does
+not exist or the token does not match.
+
+### POST /api/comment/{id}/reaction
+
+Create or change a reaction on an approved comment.
+
+Request:
+
+```json
+{
+  "reaction": "👍"
+}
+```
+
+The reaction must be in `REACTIONS_SET`.
+
+The default `REACTIONS_ALLOWED=admin` mode needs the admin token. In
+`REACTIONS_ALLOWED=anyone` mode, the server identifies the caller with a hash
+of the peer IP.
+
+New and changed reactions start as `pending`. A repeated active reaction is a
+no-op. Only approved reactions appear in public counts.
+
+Response `201` for a new or changed reaction:
+
+```json
+{
+  "id": 1,
+  "reaction": "👍",
+  "status": "pending",
+  "changed": true
+}
+```
+
+Response `200` for an active repeated reaction:
+
+```json
+{
+  "id": 1,
+  "reaction": "👍",
+  "status": "pending",
+  "changed": false
+}
+```
+
+Errors:
+
+- `400` for an invalid reaction or an unapproved comment.
+- `401` when admin mode has no valid token.
+- `404` when the comment does not exist.
+
+### DELETE /api/comment/{id}/reaction
+
+Delete the active reaction for the caller and comment.
+
+Response:
+
+```json
+{
+  "success": true
+}
+```
+
+The route returns `success: false` when no active reaction exists.
+The public CORS preflight does not advertise `DELETE`.
+
+### POST /api/webmention
+
+Receive a W3C webmention. This route exists only with the `webmentions`
+feature.
+
+Content type:
+
+```text
+application/x-www-form-urlencoded
+```
+
+Form fields:
+
+| Field | Required | Description |
+|---|---|---|
+| `source` | Yes | Source page URL. |
+| `target` | Yes | Main site URL. Its parsed origin must equal `PUBLIC_TARGET_ORIGIN`. |
+
+The server rejects invalid URLs and equal source and target URLs. It places the
+job in a bounded queue and returns `202`.
+
+Errors:
+
+- `400` for invalid input or an origin mismatch.
+- `413` for a body above `MAX_BODY_SIZE`.
+- `429` for the webmention rate or domain limit.
+- `503` when the worker queue is full.
+
+The worker fetches the source, checks the backlink, parses h-entry data, and
+upserts the comment by source and target path. The first sighting can trigger
+notifications. Update pings do not trigger a new notification.
+
+## Authentication
+
+Protected admin routes accept either a bearer header or a session cookie.
+
+```text
+Authorization: Bearer ADMIN_TOKEN
+```
+
+The login route sets the cookie. The cookie is HttpOnly, uses SameSite=Lax, and
+lasts 30 days.
+
+### POST /api/admin/login
+
+Request:
+
+```json
+{
+  "token": "your-admin-token"
+}
+```
+
+Response `200` sets `admin_token` and returns:
+
+```json
+{
+  "success": true
+}
+```
+
+Wrong tokens return `401`.
+
+### POST /api/admin/logout
+
+Clear the admin session cookie.
+
+Response `200`:
+
+```json
+{
+  "success": true
+}
+```
+
+## Admin API
+
+All routes in this section need admin authentication.
+
+Admin comment objects include:
+
+```text
+id, target_path, comment_type, source_url, author_name, author_url,
+author_avatar, content, status, created_at, parent_id, depth, honeypot,
+delete_token, submitter_ip, submitter_ip_hash, content_hash
+```
+
+The IP fields are present only when IP storage is enabled. `submitter_ip` is the
+raw stored peer IP. `submitter_ip_hash` is its salted or unsalted SHA-256 hash.
+
+### GET /api/admin/pending
+
+List pending comments in newest-first order.
+
+Parameters:
+
+| Parameter | Default | Description |
+|---|---:|---|
+| `limit` | `50` | Maximum result count. |
+| `before` | None | Return IDs below this value. |
+| `path` | None | Limit results to one path. |
+
+### GET /api/admin/paths
+
+List paths that have comments.
+
+### GET /api/admin/comments
+
+List comments with filters.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `status` | `pending` | `pending`, `approved`, `spam`, `deleted`, or `all`. |
+| `limit` | `50` | Maximum result count. |
+| `before` | None | Return IDs below this value. |
+| `path` | None | Limit results to one path. |
+| `ip` | None | Match the stored raw peer IP. |
+| `content_hash` | None | Match normalized content hashes. |
+
+### GET /api/admin/comments/{id}
+
+Return one comment and its ancestor chain.
+
+```json
+{
+  "comment": {
+    "id": 42,
+    "status": "pending"
+  },
+  "parents": [
+    {
+      "id": 40,
+      "status": "approved"
+    }
+  ]
+}
+```
+
+The `parents` list starts with the direct parent and ends at the root.
+
+### POST /api/admin/moderate
+
+Change one comment status.
+
+Request:
+
+```json
+{
+  "id": 42,
+  "action": "approved"
+}
+```
+
+Valid actions are `approved`, `spam`, `deleted`, and `pending`.
+
+The route is limited by `RATE_LIMIT_ADMIN_MODERATE`.
+
+### POST /api/admin/moderate/batch
+
+Change many comment statuses.
+
+Request:
+
+```json
+{
+  "actions": [
+    {
+      "id": 42,
+      "action": "approved"
+    },
+    {
+      "id": 43,
+      "action": "spam"
+    }
+  ]
+}
+```
+
+Each item is processed independently. An item error appears in its result.
+
+### GET /api/admin/comments/{id}/urls
+
+Return URLs extracted from one native comment.
+
+```json
+{
+  "comment_id": 42,
+  "urls": [
+    {
+      "id": 1,
+      "comment_id": 42,
+      "url": "https://example.com/page",
+      "domain": "example.com",
+      "url_hash": "h:a1b2c3"
+    }
+  ]
+}
+```
+
+The extractor reads the original native form HTML. It accepts absolute,
+double-quoted HTTP and HTTPS `href` values.
+
+### GET /api/admin/urls/lookup
+
+Use `url_hash` to find comments that contain one URL. Use `domain` to list URLs
+from one domain.
+
+### GET /api/admin/authors/lookup
+
+Find author activity with one or more signals.
+
+| Parameter | Description |
+|---|---|
+| `ip` | Stored raw peer IP. |
+| `author_name` | Exact author name. |
+| `author_url` | Exact author URL. |
+| `combine` | `true` combines signals with OR. The default uses AND. |
+
+The response contains status counts, first and last timestamps, and recent
+comments.
+
+### POST /api/admin/comments/context
+
+Return context for several comments in one request.
+
+Request:
+
+```json
+{
+  "comment_ids": [42, 43],
+  "include_parents": true,
+  "include_author_stats": true,
+  "include_urls": false
+}
+```
+
+The response can include parent chains, author statistics, and extracted URLs.
+
+### GET /api/admin/reactions
+
+List reactions with comment context.
+
+Parameters:
+
+| Parameter | Default | Description |
+|---|---:|---|
+| `status` | None | `pending`, `approved`, `spam`, `deleted`, or `all`. |
+| `limit` | `50` | Maximum result count. |
+| `before` | None | Return IDs below this value. |
+
+### POST /api/admin/reactions/moderate
+
+Change one reaction status.
+
+Request:
+
+```json
+{
+  "id": 1,
+  "action": "approved"
+}
+```
+
+Valid actions are `approved`, `spam`, `deleted`, and `pending`.
+
+### POST /api/admin/reactions/moderate/batch
+
+Change many reaction statuses. The request and result shape matches comment
+moderation batch requests.
+
+### GET /api/admin/export
+
+Return an export document for backup or migration.
+
+```json
+{
+  "version": 1,
+  "exported_at": "2026-08-07T16:18:40Z",
+  "comments": [],
+  "webmention_seen": [],
+  "comment_urls": [],
+  "github_profiles": [],
+  "comment_reactions": []
+}
+```
+
+The comments array contains all comment columns and all statuses. The reaction
+array contains `id`, `comment_id`, `reaction`, `identifier`, `status`,
+`created_at`, and `updated_at`.
+
+### POST /api/admin/import
+
+Restore an export document.
+
+```sh
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data @backup.json \
+  http://localhost:3000/api/admin/import
+```
+
+The route accepts version `1` and a body up to 16 MiB.
+
+The import process:
+
+- Sorts comments by ID.
+- Restores parent rows before child rows.
+- Re-sanitizes comment content.
+- Checks selected path, type, status, name, URL, parent, and depth values.
+- Upserts webmention state and GitHub profiles.
+- Replaces URL rows for each comment.
+- Restores reaction rows.
+- Skips failed comment and URL rows without stopping the import.
+
+Response:
+
+```json
+{
+  "comments_imported": 42,
+  "comments_skipped": 1,
+  "webmention_seen_imported": 3,
+  "comment_urls_imported": 17,
+  "github_profiles_imported": 5,
+  "comment_reactions_imported": 12
+}
+```
 
 ## Health
 
 ### GET /healthz
 
-Returns 200 with body `ok`.
-
----
+Return `ok` with status `200`.
 
 ## CORS
 
-Public endpoints (`/api/comment`, `/api/webmention`, `/api/comments`) return
-`Access-Control-Allow-Origin` matching the request's `Origin` when it appears
-in `ALLOWED_CORS_ORIGIN`. Multiple origins can be given as a comma-separated
-list — useful for local development alongside production:
+The public router uses `ALLOWED_CORS_ORIGIN`.
 
-```env
-ALLOWED_CORS_ORIGIN=http://localhost:1313,https://your-site.example
+The value can be one origin, a comma-separated list, or `*`.
+Configured origins use a 600 second preflight cache. Wildcard CORS does not set
+a preflight cache value.
+
+The public CORS methods are `GET`, `POST`, and `OPTIONS`.
+Protected admin routes do not advertise CORS.
+
+## Error response
+
+API errors use this shape:
+
+```json
+{
+  "error": "human-readable reason",
+  "code": "rate_limited"
+}
 ```
 
-The special value `*` allows any origin (use only during development/testing).
-
-Admin endpoints don't advertise CORS.
+See [Deployment](deployment.md), [Security](security.md), and
+[Moderation engine](moderation-engine.md).

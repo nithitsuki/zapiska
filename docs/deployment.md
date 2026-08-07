@@ -1,48 +1,205 @@
 # Deployment
 
+zapiska runs as a single process with one SQLite file. Put the process behind a
+TLS reverse proxy for a public deployment.
+
 ## Build
 
-```sh
-# With webmention support (default)
-cargo build --release
+Build with webmention support:
 
-# Comments-only (smaller binary, no webmentions)
+```sh
+cargo build --release
+```
+
+Build a comments-only binary:
+
+```sh
 cargo build --release --no-default-features --features comments
 ```
 
-Binary ends up at `target/release/zapiska`.
+The binary is `target/release/zapiska`.
+
+`rusqlite` uses the bundled SQLite library. A system SQLite development package
+is not required for the application build.
 
 ## Feature flags
 
-The binary can be compiled with or without webmention support:
-
-| Feature | Default | Components |
+| Feature | Default | Result |
 |---|---|---|
-| `comments` | on | Comment submission, threaded read API, moderation dashboard, embed widget, GitHub enrichment |
-| `webmentions` | on | W3C webmention endpoint, background worker, SSRF protection, h-entry/microformats parser |
+| `comments` | Yes | Empty compatibility feature. Comment code remains compiled. |
+| `webmentions` | Yes | Webmention ingress, worker, microformats parsing, and SSRF code. |
 
-Disabling `webmentions` removes the webmention endpoint, worker, SSRF guards, and ~30 transitive dependencies (scraper, html5ever, ipnet). Comment features are unaffected.
+The comments-only command disables the `webmentions` feature.
 
-## Run
+## Environment
+
+Copy the example file:
 
 ```sh
-export ADMIN_TOKEN="a-long-random-secret"
-export GITHUB_TOKEN="ghp_your_github_pat"
-./target/release/zapiska
+cp .env.example .env
 ```
 
-The server binds `127.0.0.1:3000` by default. Put it behind a reverse proxy (nginx, Caddy, Traefik) that handles TLS.
+The server needs `ADMIN_TOKEN`. The other values have defaults.
 
-## nginx example
+WARNING: Keep `ADMIN_TOKEN`, webhook URLs, and Turnstile secrets out of source
+control. A leaked admin token gives access to protected data and actions.
 
-Swap `comments.your-site.example` for the subdomain you host zapiska on, and point the TLS paths at your cert files.
+### Required deployment values
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADMIN_TOKEN` | None | Token for protected admin routes. |
+| `PUBLIC_TARGET_ORIGIN` | `https://nithitsuki.com` | Parsed origin for accepted webmention targets. |
+| `ALLOWED_CORS_ORIGIN` | `https://nithitsuki.com` | One origin, a comma-separated list, or `*`. |
+| `DATABASE_PATH` | `./comments.db` | SQLite file path. |
+| `BIND_ADDR` | `127.0.0.1:3000` | Listen address. |
+
+### Limits and network values
+
+| Variable | Default | Description |
+|---|---:|---|
+| `MAX_CONTENT_LEN` | `2000` | Maximum stored content length in characters. |
+| `MAX_AUTHOR_LEN` | `100` | Maximum author name length in characters. |
+| `MAX_BODY_SIZE` | `8192` | Global request body limit in bytes. |
+| `FETCH_TIMEOUT_MS` | `4000` | Outbound request timeout. |
+| `WORKER_BACKLOG` | `64` | Webmention queue capacity. |
+| `RUST_LOG` | `info` | `tracing` filter. |
+
+### Rate limit values
+
+| Variable | Default | Route |
+|---|---:|---|
+| `RATE_LIMIT_NATIVE` | `50` | Native comments, deletion, and reactions. |
+| `RATE_LIMIT_NATIVE_WINDOW` | `60` | Native limit window in seconds. |
+| `RATE_LIMIT_WEBMENTION` | `30` | Webmention ingress burst. |
+| `RATE_LIMIT_WEBMENTION_WINDOW` | `60` | Webmention limit window in seconds. |
+| `RATE_LIMIT_READ` | `60` | Public comments and RSS. |
+| `RATE_LIMIT_READ_WINDOW` | `60` | Read limit window in seconds. |
+| `RATE_LIMIT_ADMIN_MODERATE` | `10` | Single comment moderation. |
+| `RATE_LIMIT_ADMIN_MODERATE_WINDOW` | `60` | Admin moderation window in seconds. |
+
+The limits use the TCP peer IP. The server does not trust forwarded IP headers.
+
+### Moderation and privacy values
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEFAULT_COMMENT_STATUS` | `pending` | Initial status for native comments. |
+| `MODERATION_WEBHOOK_URL` | Unset | External moderation webhook URL. |
+| `MODERATION_WEBHOOK_MODE` | `async` | `async` or `sync`. |
+| `STORE_IP_ADDRESS` | `false` | Store raw and hashed peer IP values. |
+| `IP_HASH_SECRET` | Unset | Salt for the stored IP hash. |
+| `MAX_COMMENTS_PER_IP_PER_DAY` | `50` | Native comment daily cap. Zero disables the cap. |
+| `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` | `10` | Webmention domain cap. Zero disables the cap. |
+| `HONEYPOT_FIELD` | `website` | Loaded setting. The current form handler reads `website`. |
+
+### Notification values
+
+| Variable | Default | Description |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Unset | Telegram bot token. |
+| `TELEGRAM_CHAT_ID` | Unset | Telegram destination. |
+| `TELEGRAM_API_BASE` | `https://api.telegram.org` | Telegram API base URL. |
+| `SLACK_WEBHOOK_URL` | Unset | Slack incoming webhook URL. |
+| `DISCORD_WEBHOOK_URL` | Unset | Discord incoming webhook URL. |
+| `NOTIFY_BATCH_SECS` | `60` | Notification window. Zero sends immediately. |
+| `NOTIFY_BATCH_THRESHOLD` | `20` | Early flush count. Zero disables early flush. |
+| `NOTIFY_BATCH_GRANULARITY` | `page` | `page` or `global`. |
+
+Telegram needs both Telegram values. Slack and Discord need their webhook URL.
+Notification delivery is asynchronous. It does not change the comment result.
+
+### Reaction values
+
+| Variable | Default | Description |
+|---|---|---|
+| `REACTIONS_ALLOWED` | `admin` | `admin` or `anyone`. |
+| `REACTIONS_SET` | `👍,❤️,😄,😮,😢,😡` | Comma-separated allowed values. |
+
+The `anyone` mode uses a hash of the peer IP. Use it only with additional abuse
+controls.
+
+### Language values
+
+| Variable | Default | Description |
+|---|---|---|
+| `COMMENT_LANG_ALLOWED` | Unset | ISO 639-1 allow list. |
+| `COMMENT_LANG_BLOCKED` | Unset | ISO 639-1 block list. Ignored when an allow list exists. |
+| `COMMENT_LANG_ALLOW_EMOJI` | `always` | `always`, `never`, or `if_unknown`. |
+| `MAX_THREAD_DEPTH` | `0` | Reply depth. The server clamps this value to `0` through `10`. |
+
+The language gate applies to native comments. It does not apply to webmentions.
+
+### Turnstile values
+
+| Variable | Default | Description |
+|---|---|---|
+| `TURNSTILE_ENABLED` | `false` | Require a valid Turnstile token for native comments. |
+| `TURNSTILE_SECRET_KEY` | Unset | Required when Turnstile is enabled. |
+| `TURNSTILE_VERIFY_URL` | Cloudflare siteverify URL | HTTPS endpoint for token checks. |
+
+## Docker Compose
+
+The repository includes `docker-compose.yml`.
+
+```sh
+cp .env.example .env
+docker compose up -d --build
+docker compose ps
+curl http://127.0.0.1:3000/healthz
+```
+
+The compose file:
+
+- Builds the local image.
+- Passes `.env` values to the container.
+- Sets `DATABASE_PATH=/data/comments.db`.
+- Maps host `127.0.0.1:3000` to container port `3000`.
+- Stores data in the `zapiska-data` volume.
+- Runs a health check against `/healthz`.
+- Restarts the container unless it is stopped.
+
+Use these commands:
+
+```sh
+```
+
+`docker compose down` keeps the named volume. Remove the volume only when you
+intend to remove the database.
+
+The compose file builds locally. To use a GHCR image, use `docker run` or an
+image-specific compose file.
+
+## GHCR image
+
+Version tags build `linux/amd64` and `linux/arm64` images.
+
+```sh
+  --name zapiska \
+  -p 127.0.0.1:3000:3000 \
+  -e BIND_ADDR=0.0.0.0:3000 \
+  -e ADMIN_TOKEN=your-secret \
+  -e PUBLIC_TARGET_ORIGIN=https://your-site.example \
+  -e ALLOWED_CORS_ORIGIN=https://your-site.example \
+  -v zapiska-data:/data \
+  ghcr.io/nithitsuki/zapiska:v0.2.0
+```
+
+Public repositories allow anonymous image pulls. Private repositories need a
+GHCR login.
+
+## Reverse proxy
+
+The bare-metal default is `127.0.0.1:3000`. Terminate TLS at the proxy.
+
+### nginx
 
 ```nginx
 server {
     listen 443 ssl http2;
     server_name comments.your-site.example;
 
-    ssl_certificate     /etc/letsencrypt/live/comments.your-site.example/fullchain.pem;
+    ssl_certificate /etc/letsencrypt/live/comments.your-site.example/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/comments.your-site.example/privkey.pem;
 
     location / {
@@ -52,231 +209,126 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
     }
 }
+```
 
-server {
-    listen 80;
-    server_name comments.your-site.example;
-    return 301 https://$host$request_uri;
+### Caddy
+
+```caddy
+comments.your-site.example {
+    reverse_proxy 127.0.0.1:3000
 }
 ```
 
-## systemd service (bare-metal)
+The rate limiter uses the TCP peer address. A reverse proxy can make many
+visitors share one peer address. Use a deployment path that preserves the
+client address when per-client limits matter.
 
-Ready-made template: [`deploy/zapiska.service`](../deploy/zapiska.service).
-Conventions: binary at `/opt/zapiska/zapiska`, env at `/etc/zapiska/zapiska.env`.
+## systemd
+
+The repository includes [`deploy/zapiska.service`](../deploy/zapiska.service).
+It uses this layout:
+
+- Binary: `/opt/zapiska/zapiska`
+- Environment: `/etc/zapiska/zapiska.env`
+- Database: `/opt/zapiska/comments.db`
+
+Install it with:
 
 ```sh
 sudo useradd -r -d /opt/zapiska -s /usr/sbin/nologin zapiska
 sudo install -d -o zapiska -g zapiska /opt/zapiska /etc/zapiska
 sudo cp target/release/zapiska /opt/zapiska/
 sudo cp .env.example /etc/zapiska/zapiska.env
-sudo $EDITOR /etc/zapiska/zapiska.env      # set ADMIN_TOKEN, origins
 sudo cp deploy/zapiska.service /etc/systemd/system/zapiska.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now zapiska
-sudo journalctl -u zapiska -f              # watch the logs
 ```
 
-Environment file (`/etc/zapiska/zapiska.env`) — see [.env.example](../.env.example) for the full list:
+Set the required values before the service starts.
 
-```
-ADMIN_TOKEN=your-secret-here
-GITHUB_TOKEN=ghp_optional_token
-PUBLIC_TARGET_ORIGIN=https://your-site.example
-ALLOWED_CORS_ORIGIN=https://your-site.example
-DATABASE_PATH=/opt/zapiska/comments.db
-RUST_LOG=info
-```
+## OpenRC
 
-## OpenRC service (Alpine / Gentoo)
-
-Ready-made template: [`deploy/zapiska.openrc`](../deploy/zapiska.openrc).
+The repository includes [`deploy/zapiska.openrc`](../deploy/zapiska.openrc).
 
 ```sh
 adduser -S -h /opt/zapiska zapiska
 install -d -o zapiska -g zapiska /opt/zapiska /etc/zapiska
 cp target/release/zapiska /opt/zapiska/
 cp .env.example /etc/zapiska/zapiska.env
-vi /etc/zapiska/zapiska.env                # set ADMIN_TOKEN, origins
 cp deploy/zapiska.openrc /etc/init.d/zapiska
 chmod +x /etc/init.d/zapiska
 rc-update add zapiska default
 rc-service zapiska start
-rc-service zapiska status
 ```
 
-## Docker (recommended)
+## SQLite and backups
 
-Single-command deploy. The repo ships a canonical `docker-compose.yml` that
-builds the image, wires up a persistent volume, healthcheck, and restart
-policy, and passes through every configuration variable from your `.env`:
+The database is one SQLite file. Connections use WAL mode, foreign keys, a
+5000 millisecond busy timeout, and `synchronous = NORMAL`.
+
+For a file backup, stop the service first:
 
 ```sh
-cp .env.example .env       # set ADMIN_TOKEN at minimum
-docker compose up -d       # build + run — that's it
+sudo systemctl stop zapiska
+cp /opt/zapiska/comments.db /backups/comments.db
+cp /opt/zapiska/comments.db-wal /backups/comments.db-wal 2>/dev/null || true
+sudo systemctl start zapiska
 ```
 
-`docker compose up` fails fast with `set ADMIN_TOKEN in your .env file` if
-the token is missing. Everything else has a sane default; uncomment the
-sections you need (notifications, Turnstile, GitHub token).
-
-Useful commands:
+For a live backup, use the authenticated JSON export:
 
 ```sh
-docker compose logs -f zapiska   # follow logs
-docker compose ps                # status incl. health (healthy/unhealthy)
-docker compose down              # stop; the zapiska-data volume survives
-docker compose pull/build        # update the image
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:3000/api/admin/export > backup.json
 ```
 
-Manual `docker run` is also supported — the image has a built-in healthcheck
-against `/healthz`:
+The export includes comments, webmention state, extracted URLs, GitHub
+profiles, and reactions.
+
+## Turnstile
+
+Turnstile is off by default. When enabled, every native comment submission
+needs a valid `cf-turnstile-response` value.
+
+1. Create a Turnstile widget in the Cloudflare dashboard.
+2. Add the main site host and local development hosts.
+3. Set `TURNSTILE_ENABLED=true` and `TURNSTILE_SECRET_KEY`.
+4. Add the public sitekey to the comment form.
+5. Restart zapiska.
+
+The server checks the token with Cloudflare. It returns `400` for a failed
+check and `503` when the verify endpoint is not reachable. The comment is not
+stored in either case.
+
+See [the Turnstile skill](../.skills/configure-turnstile/SKILL.md) for form
+examples.
+
+## Logging
+
+Logs use JSON output from `tracing`. Set `RUST_LOG=debug` for more detail.
+The server redacts the admin, GitHub, Telegram, and Turnstile secret values.
+Review log access because request spans can include the peer IP.
+
+## Updates
+
+From source:
 
 ```sh
-docker build -t zapiska .
-docker run -d \
-  -p 3000:3000 \
-  -e ADMIN_TOKEN=your-secret \
-  -v zapiska-data:/data \
-  zapiska
+cargo build --release
+sudo systemctl restart zapiska
 ```
 
-Updating: `git pull && docker compose up -d --build`.
-
-The container runs as a non-root user (`appuser`), stores SQLite under
-`/data` (a named volume), and binds to `127.0.0.1:3000` on the host by
-default — put it behind a reverse proxy that handles TLS.
-
-### Pre-built images on GHCR
-
-On every `v*` tag, CI builds a multi-arch image (`linux/amd64`,
-`linux/arm64`) and pushes it to **GitHub Container Registry**:
-
-```
-ghcr.io/<owner>/zapiska:<version>     # e.g. ghcr.io/nithitsuki/zapiska:v0.1.0
-ghcr.io/<owner>/zapiska:<major>.<minor>
-ghcr.io/<owner>/zapiska:latest
-```
-
-Usage:
+With Docker:
 
 ```sh
-docker pull ghcr.io/nithitsuki/zapiska:v0.1.0
-docker run -d -p 3000:3000 -e ADMIN_TOKEN=your-secret \
-  -v zapiska-data:/data ghcr.io/nithitsuki/zapiska:v0.1.0
 ```
 
-- For **public** repos the images are pullable anonymously — no login needed.
-- For **private** repos, log in first: `echo $GITHUB_TOKEN | docker login ghcr.io -u <user> --password-stdin`.
-- Images only exist **after a release tag is pushed** — `docker compose up` builds from source instead, which always works.
-
-## SQLite
-
-Database is a single file (`./comments.db` by default). Runs in WAL mode:
-
-```sql
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
-PRAGMA synchronous = NORMAL;
-```
-
-To back it up, copy the file (and the `-wal` file if present).
-
-## GitHub token
-
-Optional. Without it the server uses anonymous GitHub API (60 req/hr). With a PAT the limit goes to 5000/hr. No special scope needed.
-
-Results are cached in `github_profiles` table: 30 days for positive, 1 hour for negative (user doesn't exist).
+Schema creation is idempotent and runs at startup.
 
 ## Health check
 
 ```sh
 curl http://127.0.0.1:3000/healthz
-# -> ok
 ```
 
-## Logging
-
-All output goes to stdout as structured JSON via `tracing`. Redirect to a file:
-
-```sh
-./zapiska >> /var/log/zapiska.log 2>&1
-```
-
-Or use systemd's built-in journal (`journalctl -u zapiska`). Log level is controlled by `RUST_LOG` env var (default `info`). Set to `debug` for verbose output, `warn` for errors only.
-
-Never logs raw `content`, `author_url`, or `ADMIN_TOKEN`. Safe fields: `id`, `target_path`, `status`, `peer_ip`.
-
-## Graceful shutdown
-
-Handles SIGTERM and SIGINT. Stops accepting connections, drains the webmention worker queue, then exits.
-
-## Cloudflare Turnstile (optional bot protection)
-
-Turnstile is **off by default**. When enabled, native comment submissions are rejected unless they include a valid `cf-turnstile-response` token from the Cloudflare Turnstile widget. zapiska verifies the token against Cloudflare's `siteverify` endpoint directly from the Rust backend — no Worker, no extra runtime.
-
-| Variable | Default | Description |
-|---|---|---|
-| `TURNSTILE_ENABLED` | `false` | Master switch. When `false`, the `cf-turnstile-response` field is ignored entirely. |
-| `TURNSTILE_SECRET_KEY` | *(required when enabled)* | The Turnstile secret key from the Cloudflare dashboard. Loaded once at startup, never logged, never written to disk. Startup fails fast if `TURNSTILE_ENABLED=true` and this is unset. |
-| `TURNSTILE_VERIFY_URL` | `https://challenges.cloudflare.com/turnstile/v0/siteverify` | Override for the siteverify endpoint. Use only for tests or proxies. Must be `https://`. |
-
-To enable:
-
-1. Create a widget at https://dash.cloudflare.com → Turnstile. Note the **sitekey** (public) and the **secret**.
-2. Add the widget's allowed hostnames — your main site origin (where the form lives), plus `localhost` and `127.0.0.1` for local dev.
-3. Set `TURNSTILE_ENABLED=true` and `TURNSTILE_SECRET_KEY=<secret>` in zapiska's env.
-4. Add the Turnstile widget to your comment form (see [getting-started.md](getting-started.md) and [../embed/README.md](../embed/README.md)).
-5. Restart zapiska. Submissions without a valid token now return `400 { "code": "turnstile_failed" }`. If zapiska can't reach Cloudflare's siteverify endpoint, it returns `503` and **fails closed** — no comment is stored.
-
-The sitekey is public and lives in your HTML; the secret lives only in zapiska's env / Worker secret store. Keep them separate.
-
-## Script-based moderation
-
-The admin API is designed to be consumed by automated moderation scripts. Typical workflow:
-
-```sh
-# 1. Log in to get a session cookie
-curl -c cookies.txt -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"token":"your-admin-token"}' \
-  http://localhost:3000/api/admin/login
-
-# 2. Fetch pending comments (with parent context via {id} endpoint)
-curl -b cookies.txt http://localhost:3000/api/admin/comments?status=pending
-
-# 3. For each pending comment, fetch its parent chain for context
-curl -b cookies.txt http://localhost:3000/api/admin/comments/42
-
-# 4. Submit moderation decisions in batch
-curl -b cookies.txt -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"actions":[
-    {"id":42,"action":"approved"},
-    {"id":43,"action":"spam"}
-  ]}' \
-  http://localhost:3000/api/admin/moderate/batch
-```
-
-## Updating
-
-```sh
-git pull
-cargo build --release
-
-# systemd
-sudo systemctl restart zapiska
-
-# OpenRC
-sudo rc-service zapiska restart
-
-# Docker
-docker compose up -d --build
-
-# Pre-built image (tagged releases only)
-docker pull ghcr.io/<owner>/zapiska:latest
-docker compose up -d   # or: docker run with the image above
-```
-
-Schema migrations are idempotent and run automatically on startup.
+The response is `ok` with status `200`.

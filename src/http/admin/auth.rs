@@ -2,6 +2,7 @@
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::http::Request;
 use axum::http::header;
 use axum::middleware::Next;
@@ -33,36 +34,40 @@ fn set_cookie_value(token: &str, max_age_secs: i64) -> String {
 
 // ── Auth middleware ──────────────────────────────────────────
 
+/// True when the request carries a valid admin token (Bearer header or
+/// `admin_token` cookie). Shared by the middleware and endpoints that must
+/// honor admin identity without being fully gated (e.g. reactions in
+/// admin-only mode).
+pub(crate) fn request_has_admin_token(state: &AppState, headers: &HeaderMap) -> bool {
+    let expected = state.config.admin_token.as_bytes();
+
+    let header = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let t = header.strip_prefix("Bearer ").unwrap_or("");
+    if !t.is_empty() && validate_token(t.as_bytes(), expected) {
+        return true;
+    }
+
+    let cookie_header = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    extract_cookie(cookie_header, "admin_token")
+        .map(|t| validate_token(t.as_bytes(), expected))
+        .unwrap_or(false)
+}
+
 pub async fn admin_auth(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, AppError> {
-    let expected = state.config.admin_token.as_bytes();
-
-    let token = {
-        let header = req
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let t = header.strip_prefix("Bearer ").unwrap_or("");
-        if !t.is_empty() && validate_token(t.as_bytes(), expected) {
-            return Ok(next.run(req).await);
-        }
-
-        let cookie_header = req
-            .headers()
-            .get("cookie")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        extract_cookie(cookie_header, "admin_token")
-    };
-
-    match token {
-        Some(t) if validate_token(t.as_bytes(), expected) => Ok(next.run(req).await),
-        _ => Err(AppError::Unauthorized),
+    if !request_has_admin_token(&state, req.headers()) {
+        return Err(AppError::Unauthorized);
     }
+    Ok(next.run(req).await)
 }
 
 // ── POST /api/admin/login ───────────────────────────────────

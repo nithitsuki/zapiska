@@ -1,9 +1,9 @@
-# zapiska — single-command deploy
+# zapiska single-command deploy
 #
 #   cp .env.example .env      # then set ADMIN_TOKEN at minimum
-#   docker compose up -d      # build, run, healthcheck, restart policy — done
+#   docker compose up -d      # build, run, health check, and restart policy
 #
-# Every variable resolves from `.env` (or the shell) with sane defaults.
+# Every variable in `.env` is available to the container.
 # `ADMIN_TOKEN` is required: compose refuses to start with a clear message
 # if it's missing.
 
@@ -11,13 +11,16 @@ services:
   zapiska:
     build: .
     image: zapiska:local
+    env_file:
+      - .env
     ports:
       - "127.0.0.1:3000:3000"
     environment:
       # Required — set ADMIN_TOKEN in your .env file
       ADMIN_TOKEN: "${ADMIN_TOKEN:?set ADMIN_TOKEN in your .env file}"
 
-      # Identity — point these at YOUR site
+      # Identity. Set these values to your site.
+      BIND_ADDR: "0.0.0.0:3000"
       PUBLIC_TARGET_ORIGIN: "${PUBLIC_TARGET_ORIGIN:-https://nithitsuki.com}"
       ALLOWED_CORS_ORIGIN: "${ALLOWED_CORS_ORIGIN:-https://nithitsuki.com}"
 

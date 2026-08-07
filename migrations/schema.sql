@@ -68,3 +68,17 @@ CREATE TABLE IF NOT EXISTS github_profiles (
     cached_at   TEXT    NOT NULL DEFAULT (datetime('now')),
     valid       INTEGER NOT NULL DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS comment_reactions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    comment_id  INTEGER NOT NULL REFERENCES comments(id),
+    reaction    TEXT    NOT NULL,
+    identifier  TEXT    NOT NULL,
+    status      TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'approved', 'spam', 'deleted')),
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (comment_id, identifier)
+);
+CREATE INDEX IF NOT EXISTS idx_comment_reactions_read
+    ON comment_reactions(comment_id, status);

@@ -13,13 +13,14 @@ pub struct ApiError {
     info(
         title = "zapiska API",
         description = "zapiska — a note, a comment, a webmention",
-        version = "0.1.0"
+        version = "0.2.0"
     ),
     paths(
         crate::http::healthz,
         crate::http::comment_post::create_comment,
         crate::http::webmention_post::receive_webmention,
         crate::http::comments_read::list_comments,
+        crate::http::feed::feed,
         crate::http::admin::comments::list_pending,
         crate::http::admin::moderate::moderate,
     ),
@@ -28,6 +29,7 @@ pub struct ApiError {
             ApiError,
             crate::http::comments_read::CommentsResponse,
             crate::http::comments_read::CommentJson,
+            crate::http::feed::FeedQuery,
             crate::http::admin::comments::PendingResponse,
             crate::http::admin::comments::PendingComment,
             crate::http::admin::moderate::ModerateRequest,
@@ -50,12 +52,13 @@ pub struct ApiDoc;
     info(
         title = "zapiska API",
         description = "zapiska — a note, a comment, a webmention",
-        version = "0.1.0"
+        version = "0.2.0"
     ),
     paths(
         crate::http::healthz,
         crate::http::comment_post::create_comment,
         crate::http::comments_read::list_comments,
+        crate::http::feed::feed,
         crate::http::admin::comments::list_pending,
         crate::http::admin::moderate::moderate,
     ),
@@ -64,6 +67,7 @@ pub struct ApiDoc;
             ApiError,
             crate::http::comments_read::CommentsResponse,
             crate::http::comments_read::CommentJson,
+            crate::http::feed::FeedQuery,
             crate::http::admin::comments::PendingResponse,
             crate::http::admin::comments::PendingComment,
             crate::http::admin::moderate::ModerateRequest,

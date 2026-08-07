@@ -17,7 +17,7 @@
 //! - [`Digest`] — aggregated view of a batch, shared by all channel
 //!   formatters.
 //! - Per-channel modules (`telegram.rs`, `slack.rs`, `discord.rs`) own their
-//!   wire format, escaping, and message builders.
+//!   wire format and message builders.
 
 mod batcher;
 mod discord;

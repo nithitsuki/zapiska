@@ -59,6 +59,11 @@ async fn start_server() -> (String, AppState) {
         notify_batch_secs: 0,
         notify_batch_threshold: 0,
         notify_batch_granularity: "page".to_string(),
+        reactions_allowed: "admin".to_string(),
+        reactions_set: vec!["👍".to_string()],
+        comment_lang_allowed: Vec::new(),
+        comment_lang_blocked: Vec::new(),
+        comment_lang_allow_emoji: "always".to_string(),
     };
     let notifier = std::sync::Arc::new(zapiska::notify::NotificationBatcher::new(&config));
     let dir = tempdir().unwrap();
@@ -84,6 +89,7 @@ async fn start_server() -> (String, AppState) {
         repo: repo.clone(),
         github: Arc::new(zapiska::github::StubGitHub),
         notifier,
+        language: zapiska::language::LanguageGate::default(),
         #[cfg(feature = "webmentions")]
         wm_sender,
         http_client: http_client.clone(),

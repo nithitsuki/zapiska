@@ -1,112 +1,197 @@
 # Development
 
-## Prerequisites
+## Requirements
 
-- Rust 1.85+ (edition 2024)
-- libsqlite3-dev and pkg-config
+- Rust 1.85 or later.
+- Cargo.
+- A Unix shell for the local service commands.
 
-```sh
-sudo apt-get install libsqlite3-dev pkg-config
-```
+`rusqlite` uses its `bundled` feature. A system SQLite development package is
+not required for the application build.
 
 ## Setup
 
 ```sh
-git clone <repo-url>
+git clone https://github.com/nithitsuki/zapiska.git
 cd zapiska
 cargo build
 ```
 
-## Running tests
+## Run locally
 
 ```sh
-cargo test              # all tests (249 unit + 5 integration)
-cargo test --lib        # unit tests only
-cargo test --test e2e   # e2e integration tests only
-```
-
-Tests use `tempfile::tempdir()` for isolated SQLite databases. No shared state.
-
-## Feature flags
-
-By default both `comments` and `webmentions` features are enabled. To run tests for only one feature:
-
-```sh
-cargo test --no-default-features --features comments     # 193 tests
-cargo test --no-default-features --features webmentions  # 254 tests
-```
-
-The `webmentions` feature adds tests for SSRF protection, microformats parsing, the webmention worker, and the webmention ingress endpoint.
-
-## Linting
-
-```sh
-cargo clippy -- -D warnings
-cargo fmt --check
-```
-
-## CI/CD (GitHub Actions)
-
-`.github/workflows/ci.yml` runs on push to `main` and on PRs:
-
-- **lint** — fmt + clippy (`-D warnings`).
-- **test** — default features, full suite.
-- **test-comments-only** — `--no-default-features --features comments`; catches feature-gate regressions (the `webmentions` feature gates whole modules).
-- On `v*` tags only: **release** builds six cross-platform binaries (linux gnu/musl/arm64, windows msvc, macos arm64/x86_64) and attaches tarballs to the GitHub release; **docker-publish** builds a multi-arch (amd64/arm64) image and pushes `ghcr.io/<repo>:{version}`, `{major}.{minor}`, and `latest`.
-
-`rusqlite` is compiled with the `bundled` feature, so no system SQLite is needed on any runner (or in the Docker build).
-
-## Running locally
-
-```sh
-export ADMIN_TOKEN=test
+export ADMIN_TOKEN=test-token
 cargo run
-# then:
+```
+
+Check the server in another shell:
+
+```sh
 curl http://127.0.0.1:3000/healthz
 curl http://127.0.0.1:3000/swagger-ui/
 ```
 
-## Design notes
+The server loads `.env` from the working directory when the file exists.
 
-### spawn_blocking for SQL
+## Feature builds
 
-SQLite is blocking I/O. Running it on the tokio runtime would block the event loop. Every `Repo` method wraps queries in `spawn_blocking`, moving work to a dedicated thread pool.
+The default build enables `comments` and `webmentions`.
 
-### Separate RepoError
+The `comments` feature is empty at present. It remains in the feature list for
+the comments-only build command.
 
-The DB layer should not know about HTTP status codes. `RepoError` has `Internal` and `NotFound` variants. A `From<RepoError> for AppError` impl maps them to 500/404. Keeps the DB layer testable without axum in scope.
+Build the comments-only variant with:
 
-### Constant-time admin token
+```sh
+cargo build --release --no-default-features --features comments
+```
 
-Naive `==` short-circuits on the first differing byte, leaking the token prefix through timing. `subtle::ConstantTimeEq` compares all bytes regardless of mismatch position. Both values zero-padded to the same length.
+The `webmentions` feature adds the worker, microformats parser, SSRF module,
+webmention ingress, and webmention-specific avatar fetches.
 
-### Custom SSRF redirect policy
+## Tests
 
-An attacker could send a webmention with a `source` URL that redirects to `http://169.254.169.254/` (AWS metadata). The custom policy re-checks each redirect target against the IP blocklist before following.
+Run the default suite:
 
-### Notification channels & batching
+```sh
+RUSTFLAGS="-D warnings" cargo test
+```
 
-`src/notify/` is one module per channel (`telegram.rs`, `slack.rs`, `discord.rs`), each owning its wire format and escaping, plus a shared `batcher.rs` that collects comments into per-page (or global) windows and flushes one digest per window (`NOTIFY_BATCH_SECS`, `NOTIFY_BATCH_THRESHOLD`, `NOTIFY_BATCH_GRANULARITY`). `0` window = immediate delivery. All sends are fire-and-forget tasks with a 10s timeout — a failing channel never affects the request. Adding a channel = new file in `notify/`, a config field, and a branch in `deliver_new_comment` / `deliver_digest_to_channels`.
+Run the comments-only suite:
 
-## Test structure
+```sh
+RUSTFLAGS="-D warnings" cargo test --no-default-features --features comments
+```
 
-- **Unit tests**: inline (`#[cfg(test)] mod tests`) in each module.
-- **Integration tests**: in `tests/e2e.rs`. Real server on a random port, full lifecycle via `reqwest`.
-- **Test helpers** in `src/http/test_support.rs`: `test_state()`, `request()`, `form_request()`.
+The current suite has 342 default-feature tests and 281 comments-only tests.
+The count changes when tests change.
 
-## Adding an endpoint
+The integration targets are:
 
-1. Handler function in `src/http/`.
-2. `#[utoipa::path(...)]` for OpenAPI.
-3. Route to `build_app()` in `src/http/mod.rs`.
-4. Schemas to `src/openapi.rs`.
-5. Tests (inline or in `tests/e2e.rs`).
-6. `cargo clippy -- -D warnings && cargo test`.
+```sh
+cargo test --test e2e
+cargo test --test pentest
+cargo test --test worker_notify
+```
 
-## Adding a config variable
+`worker_notify` is compiled only when `webmentions` is enabled.
 
-1. Field on `Config` in `src/config.rs`.
-2. Parse in `Config::from_env()` with default + validation.
-3. `ConfigError` variant if validation can fail.
-4. Add to the table in `SPEC.md` (configuration section) and `.env.example`.
-5. Test in `config::tests` (defaults, overrides, validation failures, redaction).
+The test suite uses a temporary directory for each SQLite database. Tests do
+not share application data.
+
+## Lint and format
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+```
+
+Run both commands before you stage a change.
+
+## CI
+
+`.github/workflows/ci.yml` runs on pushes to `main`, version tags, and pull
+requests to `main`.
+
+The normal jobs are:
+
+- Format and clippy check.
+- Default build and test.
+- Comments-only build and test.
+
+Version tags also build these targets:
+
+- `x86_64-unknown-linux-gnu`
+- `x86_64-unknown-linux-musl`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-pc-windows-msvc`
+- `aarch64-apple-darwin`
+
+The release job attaches binary archives to the GitHub release. The Docker job
+builds `linux/amd64` and `linux/arm64` images and pushes version, major and
+minor, and `latest` tags to GHCR.
+
+Cargo jobs use `Swatinem/rust-cache`. Docker builds use BuildKit cache mounts
+and a GitHub Actions cache.
+
+## Design rules
+
+### SQLite work
+
+SQLite work is blocking. Repository methods run it inside `spawn_blocking` so
+the Tokio runtime can keep handling network work.
+
+### Repository errors
+
+The repository does not return HTTP status codes. `RepoError` maps to
+`AppError` in the HTTP layer.
+
+### Admin token comparison
+
+The admin token uses `subtle::ConstantTimeEq`. The comparison pads both values
+to the same length before it checks the bytes.
+
+### Webmention fetches
+
+The webmention client checks the source host and resolved addresses before a
+fetch. The redirect policy checks redirect hosts and literal IP addresses.
+The client permits HTTP and HTTPS.
+
+### Notifications
+
+`src/notify/` contains Telegram, Slack, Discord, and batcher modules. The
+batcher stores open windows in memory. Delivery runs in spawned tasks and does
+not change the comment response.
+
+## Test layout
+
+- Inline unit tests live beside the module that they test.
+- HTTP integration tests live in `tests/e2e.rs`.
+- Adversarial input tests live in `tests/pentest.rs`.
+- Webmention notification tests live in `tests/worker_notify.rs`.
+- Shared HTTP helpers live in `src/http/test_support.rs`.
+
+The pentest suite checks HTML and XML injection, unsafe URL schemes, SQL
+payloads, path traversal, CRLF and NUL input, and reaction payloads.
+
+## Add an endpoint
+
+1. Add the handler in `src/http/`.
+2. Add an OpenAPI path with `utoipa`.
+3. Add the route in `build_app`.
+4. Add schemas to `src/openapi.rs` when needed.
+5. Add unit or integration tests.
+6. Run format, clippy, and the affected test suites.
+7. Update `docs/api.md`, `SPEC.md`, and the relevant user guide.
+
+## Add a configuration value
+
+1. Add the field to `Config` in `src/config.rs`.
+2. Parse and validate it in `Config::from_env`.
+3. Add a `ConfigError` variant when invalid input can fail startup.
+4. Add the value to `.env.example` and `SPEC.md`.
+5. Add default, override, validation, and redaction tests.
+6. Update `docs/deployment.md` and any feature guide.
+
+## Documentation rules
+
+Project documentation follows ASD-STE100 Issue 9 as far as the technical
+content allows.
+
+- Use approved words or project technical terms.
+- Use a word with one meaning in one consistent context.
+- Use American English spelling.
+- Keep a multi-word noun to three words when the technical term allows it.
+- Use active voice.
+- Use the imperative form for procedures.
+- Keep procedure sentences to 20 words or fewer.
+- Keep descriptive sentences to 25 words or fewer.
+- Use a vertical list for complex text.
+- Do not use semicolons.
+- Do not use contractions.
+- Use `WARNING` for injury or death risk.
+- Use `CAUTION` for equipment or data damage risk.
+
+Code, environment variable names, endpoint paths, JSON, and quoted product
+terms can use their required technical form. Do not alter a command to satisfy
+a prose rule.

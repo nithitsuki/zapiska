@@ -1,57 +1,64 @@
-# Building a custom moderation engine for zapiska
+# Build a moderation engine
 
-zapiska is deliberately dumb about moderation — it stores comments and exposes APIs. What happens between "comment stored" and "comment approved/spam/deleted" is entirely up to you.
+zapiska stores comments and exposes moderation routes. It does not decide
+whether a comment is spam.
 
-This guide walks through building an external moderation engine that hooks into zapiska's admin API and webhook.
+An external service can receive a webhook, query context, and send a status.
+It can also poll the admin API when webhooks are not suitable.
 
-## How it works
+## Flow
 
+```text
+native comment
+    |
+    +-- zapiska stores the comment
+    +-- optional comment.created webhook
+    +-- moderation service reads context
+    +-- moderation service sends a status
+
+reaction
+    |
+    +-- zapiska stores a pending reaction
+    +-- optional reaction.created webhook
+    +-- moderation service sends a reaction status
 ```
-                 ╔══════════════════════╗
-                 ║    zapiska server    ║
-                 ║                      ║
-                 ║  POST /api/comment ──╫──→ webhook POST (optional)
-                 ║                      ║
-                 ║  GET /api/admin/*  ←─╫── your engine queries context
-                 ║                      ║
-                 ║  POST /api/admin/  ←─╫── your engine sends decision
-                 ║    moderate          ║
-                 ╚══════════════════════╝
-```
 
-1. A comment arrives at `POST /api/comment`. zapiska validates, sanitizes, stores it, extracts URLs.
-2. If `MODERATION_WEBHOOK_URL` is set, zapiska sends a POST to your engine with the enriched payload (includes submitter stats, parent chain, content hash, extracted URLs).
-3. Your engine queries the admin API for context (parent chain, IP history, honeypot flag, author identity, URL cross-references, etc.).
-4. Your engine sends a moderation decision back via `POST /api/admin/moderate` or `POST /api/admin/moderate/batch`.
+Webmentions use the webmention worker. The worker sends admin notifications for
+new mentions, but it does not send the moderation webhook.
 
-The webhook mode is configurable:
-- **Async** (default): fire-and-forget. Your engine calls back whenever it's ready.
-- **Sync**: zapiska waits for your engine's response and applies the returned `action` immediately. The 201 response includes the final status.
+## Configure zapiska
 
-## Step 1: Configure zapiska
+Set these values:
 
 ```env
-# Required: the admin token your engine will use to authenticate
-ADMIN_TOKEN="your-secret-token"
-
-# Notify your engine when new comments arrive
-MODERATION_WEBHOOK_URL="http://localhost:9000/webhook"
-
-# Enable IP storage for spam analysis (SHA-256 hashed before storage — raw IP never touches disk)
+ADMIN_TOKEN=replace-this-value
+MODERATION_WEBHOOK_URL=http://localhost:9000/webhook
+MODERATION_WEBHOOK_MODE=async
 STORE_IP_ADDRESS=true
-
-# Optional: salt the IP hash to prevent rainbow table attacks
-# IP_HASH_SECRET=your-random-secret
-
-# Default status for new comments
-# "pending" = manual review required (safe default)
-# "approved" = auto-publish, your engine can revert if needed
-DEFAULT_COMMENT_STATUS="pending"
+IP_HASH_SECRET=replace-this-value
+DEFAULT_COMMENT_STATUS=pending
 ```
 
-## Step 2: The webhook payload
+The webhook URL is optional. The default mode is `async`.
 
-When a comment is submitted and `MODERATION_WEBHOOK_URL` is configured, zapiska POSTs this JSON to your engine:
+In asynchronous mode, zapiska sends the event and does not wait for a decision.
+The comment stays in its configured initial status until the service calls the
+admin API.
+
+In synchronous mode, the service must return JSON with an `action` value.
+Valid actions are `approved`, `spam`, `deleted`, and `pending`.
+
+```json
+{
+  "action": "approved"
+}
+```
+
+If the webhook fails, zapiska keeps the current status.
+
+## Comment event
+
+The native comment event uses `event: comment.created`.
 
 ```json
 {
@@ -62,362 +69,307 @@ When a comment is submitted and `MODERATION_WEBHOOK_URL` is configured, zapiska 
   "author_name": "Alice",
   "author_url": "https://alice.blog",
   "author_avatar": "https://alice.blog/avatar.jpg",
+  "content": "<p>Great post.</p>",
   "honeypot": false,
   "parent_id": null,
   "depth": 0,
-  "submitter_ip": "h:ab12cd34ef567890...",
-  "delete_token": "a1b2c3d4e5f6g7h8",
+  "submitter_ip": "203.0.113.42",
+  "delete_token": "0123456789abcdef",
+  "content_hash": "h:a1b2c3d4",
+  "is_reply": false,
+  "parents": null,
+  "submitter": {
+    "ip": "203.0.113.42",
+    "total_comments": 4,
+    "approved_comments": 2,
+    "spam_comments": 1,
+    "pending_comments": 1,
+    "deleted_comments": 0,
+    "first_seen": "2026-08-01 10:00:00"
+  },
   "admin_url": "/api/admin/comments/42"
 }
 ```
 
-The webhook is fire-and-forget — zapiska does not wait for a response. Your engine should acknowledge it (200) and process asynchronously.
+The `submitter_ip` value is absent when `STORE_IP_ADDRESS=false`. When IP
+storage is enabled, it is the raw stored peer IP. The event does not include
+`submitter_ip_hash`.
 
-## Step 3: Authenticate
+The `parents` value is an array for a reply and `null` for a top-level comment.
+The event does not contain extracted URL rows. Query those rows with the URL
+route.
 
-All admin API calls need the `ADMIN_TOKEN`:
+## Reaction events
 
+New reactions use `event: reaction.created`.
+
+```json
+{
+  "event": "reaction.created",
+  "id": 7,
+  "comment_id": 42,
+  "reaction": "👍",
+  "status": "pending",
+  "target_path": "/blog/hello",
+  "is_admin": true,
+  "admin_url": "/api/admin/reactions"
+}
 ```
-Authorization: Bearer your-secret-token
+
+Reaction status changes use `event: reaction.status_changed`.
+
+```json
+{
+  "event": "reaction.status_changed",
+  "id": 7,
+  "comment_id": 42,
+  "reaction": "👍",
+  "old_status": "pending",
+  "new_status": "approved",
+  "changed_by": "admin"
+}
 ```
 
-Or get a session cookie:
+## Authenticate
+
+Send the admin token with every protected request:
+
+```text
+Authorization: Bearer replace-this-value
+```
+
+You can use a session cookie instead:
 
 ```sh
 curl -c cookies.txt -X POST \
   -H "Content-Type: application/json" \
-  -d '{"token":"your-secret-token"}' \
+  -d '{"token":"replace-this-value"}' \
   http://localhost:3000/api/admin/login
 ```
 
-## Step 4: Query context
+## Query comment context
 
-Your engine has access to the full admin API. The most useful queries:
-
-### Get the comment with parent chain
+Get a comment and its parent chain:
 
 ```sh
-curl -H "Authorization: Bearer your-secret-token" \
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
   http://localhost:3000/api/admin/comments/42
 ```
 
-Returns the comment and its full ancestor chain. Lets your engine see the whole conversation before deciding.
-
-### Get all comments from the same IP
+List comments by status:
 
 ```sh
-curl -H "Authorization: Bearer your-secret-token" \
-  "http://localhost:3000/api/admin/comments?ip=203.0.113.42&status=all"
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:3000/api/admin/comments?status=pending&limit=50'
 ```
 
-Returns every comment from that IP across all paths and statuses. Useful for building IP reputation.
+Use `status=all` to include approved, spam, and deleted rows.
 
-### Look up author identity across signals
+Find comments by the raw stored IP when `STORE_IP_ADDRESS=true`:
 
 ```sh
-# Find all activity from this IP + author name combination
-curl -H "Authorization: Bearer your-secret-token" \
-  "http://localhost:3000/api/admin/authors/lookup?ip=203.0.113.42&author_name=Alice"
-
-# Wider net: merge across all signals with OR
-curl -H "Authorization: Bearer your-secret-token" \
-  "http://localhost:3000/api/admin/authors/lookup?ip=203.0.113.42&author_url=https://alice.blog&combine=true"
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:3000/api/admin/comments?ip=203.0.113.42&status=all'
 ```
 
-Returns aggregated stats (total, approved, spam, pending, deleted) and recent comments. No database needed on your side.
-
-### Check for duplicate content
+Find repeated content:
 
 ```sh
-# Get the content_hash from the webhook payload, then query
-curl -H "Authorization: Bearer your-secret-token" \
-  "http://localhost:3000/api/admin/comments?content_hash=h:a1b2c3d4e5f6g7h8&status=all"
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:3000/api/admin/comments?content_hash=h:a1b2c3d4&status=all'
 ```
 
-Returns all comments with the same normalized content. Useful for detecting spam that's been copy-pasted across multiple pages.
-
-### Look up URLs across comments
+Find author activity:
 
 ```sh
-# Get URLs for a specific comment
-curl -H "Authorization: Bearer your-secret-token" \
-  "http://localhost:3000/api/admin/comments/42/urls"
-
-# Look up all comments referencing a URL
-curl -H "Authorization: Bearer your-secret-token" \
-  "http://localhost:3000/api/admin/urls/lookup?url_hash=h:a1b2..."
-
-# Look up all URLs from a spam domain
-curl -H "Authorization: Bearer your-secret-token" \
-  "http://localhost:3000/api/admin/urls/lookup?domain=spam.example"
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:3000/api/admin/authors/lookup?author_name=Alice'
 ```
 
-Cross-comment URL tracking without maintaining your own database.
-
-### Bulk context (fetch everything in one call)
+Find URLs from one comment:
 
 ```sh
-curl -X POST -H "Authorization: Bearer your-secret-token" \
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://localhost:3000/api/admin/comments/42/urls
+```
+
+Find comments that contain one URL:
+
+```sh
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:3000/api/admin/urls/lookup?url_hash=h:a1b2c3d4'
+```
+
+Find URLs from one domain:
+
+```sh
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:3000/api/admin/urls/lookup?domain=spam.example'
+```
+
+## Query bulk context
+
+Use one request for several comments:
+
+```sh
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "comment_ids": [42, 43, 44],
+    "comment_ids": [42, 43],
     "include_parents": true,
     "include_author_stats": true,
-    "include_urls": false
+    "include_urls": true
   }' \
   http://localhost:3000/api/admin/comments/context
 ```
 
-Returns each comment with parent chain, author stats, and URLs in a single response. Replaces N individual API calls.
+The response can contain parent chains, author status counts, and URL rows.
 
-### Get pending comments (batch processing)
+## Send decisions
 
-```sh
-curl -H "Authorization: Bearer your-secret-token" \
-  "http://localhost:3000/api/admin/comments?status=pending&limit=50"
-```
-
-Your engine can poll this endpoint on a schedule if you prefer polling over webhooks.
-
-### Filter by status and path
+Change one comment:
 
 ```sh
-curl -H "Authorization: Bearer your-secret-token" \
-  "http://localhost:3000/api/admin/comments?status=all&path=/blog/hello"
-```
-
-## Step 5: Submit moderation decisions
-
-### Single comment
-
-```sh
-curl -X POST -H "Authorization: Bearer your-secret-token" \
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"id":42,"action":"spam"}' \
   http://localhost:3000/api/admin/moderate
 ```
 
-Valid actions: `approved`, `spam`, `deleted`, `pending`.
-
-### Batch (many comments at once)
+Change several comments:
 
 ```sh
-curl -X POST -H "Authorization: Bearer your-secret-token" \
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "actions":[
-      {"id":1,"action":"approved"},
-      {"id":2,"action":"spam"},
-      {"id":3,"action":"deleted"}
+    "actions": [
+      {"id":42,"action":"approved"},
+      {"id":43,"action":"spam"}
     ]
   }' \
   http://localhost:3000/api/admin/moderate/batch
 ```
 
-Each action is processed independently. Errors for individual items don't affect others.
+The batch route processes each item independently. Use it for polling jobs.
 
-## Example 1: Simple Python rules engine
+Moderate reactions with the same route shape:
+
+```sh
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":7,"action":"approved"}' \
+  http://localhost:3000/api/admin/reactions/moderate
+```
+
+## Python rules engine
+
+This small example flags honeypot comments and repeated spam.
 
 ```python
 import requests
 
 API = "http://localhost:3000"
-TOKEN = "your-secret-token"
+TOKEN = "replace-this-value"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 
-def moderate_comment(comment):
-    """Return an action for a single comment, or None to leave as-is."""
-    # Rule: honeypot triggered → spam
+
+def action_for(comment):
     if comment.get("honeypot"):
         return "spam"
 
-    # Rule: submitter with history of spam → spam
-    # (submitter_ip is a SHA-256 hash — the stored value is used directly for lookups)
     ip = comment.get("submitter_ip")
     if ip:
-        resp = requests.get(
+        response = requests.get(
             f"{API}/api/admin/comments",
             params={"ip": ip, "status": "all"},
             headers=HEADERS,
+            timeout=10,
         )
-        ip_comments = resp.json().get("comments", [])
-        spam_ratio = sum(
-            1 for c in ip_comments if c["status"] == "spam"
-        ) / max(len(ip_comments), 1)
-        if spam_ratio > 0.5:
+        history = response.json().get("comments", [])
+        spam_count = sum(item["status"] == "spam" for item in history)
+        if spam_count > len(history) / 2:
             return "spam"
 
-    # Rule: no URL and suspicious content → pending (human review)
-    if not comment.get("author_url") and any(
-        word in comment.get("content", "").lower()
-        for word in ["buy now", "click here", "free money"]
-    ):
-        return "pending"
-
-    # Default: approve
     return "approved"
 
-def poll():
-    while True:
-        resp = requests.get(
-            f"{API}/api/admin/comments",
-            params={"status": "pending", "limit": 20},
-            headers=HEADERS,
-        )
-        comments = resp.json().get("comments", [])
-        if not comments:
-            break
 
-        actions = [
-            {"id": c["id"], "action": moderate_comment(c)}
-            for c in comments
-        ]
+def moderate_pending():
+    response = requests.get(
+        f"{API}/api/admin/comments",
+        params={"status": "pending", "limit": 50},
+        headers=HEADERS,
+        timeout=10,
+    )
+    comments = response.json().get("comments", [])
+    actions = [
+        {"id": item["id"], "action": action_for(item)}
+        for item in comments
+    ]
+    if actions:
         requests.post(
             f"{API}/api/admin/moderate/batch",
             json={"actions": actions},
             headers=HEADERS,
+            timeout=10,
         )
 
-if __name__ == "__main__":
-    poll()
-```
-
-## Example 2: LLM-based moderation
-
-```python
-import json
-import requests
-from openai import OpenAI
-
-API = "http://localhost:3000"
-TOKEN = "your-secret-token"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
-LLM = OpenAI()
-
-SYSTEM_PROMPT = """You moderate blog comments. Respond with exactly one word:
-- "approved" if the comment is constructive and on-topic
-- "spam" if it's promotional, irrelevant, or repetitive
-- "pending" if you're unsure (send to human review)"""
-
-def moderate_via_llm(comment):
-    """Use an LLM to classify a single comment."""
-    resp = LLM.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps({
-                "author": comment["author_name"],
-                "content": comment["content"],
-                "has_url": bool(comment["author_url"]),
-                "honeypot": comment["honeypot"],
-            })},
-        ],
-        temperature=0,
-        max_tokens=10,
-    )
-    return resp.choices[0].message.content.strip().lower()
-
-def poll():
-    while True:
-        resp = requests.get(
-            f"{API}/api/admin/comments",
-            params={"status": "pending", "limit": 5},
-            headers=HEADERS,
-        )
-        comments = resp.json().get("comments", [])
-        if not comments:
-            break
-
-        actions = []
-        for c in comments:
-            action = moderate_via_llm(c)
-            if action in ("approved", "spam", "deleted", "pending"):
-                actions.append({"id": c["id"], "action": action})
-
-        if actions:
-            requests.post(
-                f"{API}/api/admin/moderate/batch",
-                json={"actions": actions},
-                headers=HEADERS,
-            )
 
 if __name__ == "__main__":
-    poll()
+    moderate_pending()
 ```
 
-## Example 3: Webhook server (Flask)
+## LLM moderation
+
+An LLM can return one valid action. Validate the result before sending it to
+zapiska. Keep uncertain results as `pending`.
+
+Do not send the admin token or raw IP data to an external model unless the
+privacy policy allows it.
+
+## Webhook receiver
+
+Return `200` as soon as the receiver stores the event. Process the event in a
+separate task when the moderation work takes time.
 
 ```python
 from flask import Flask, request
 import requests
 
 app = Flask(__name__)
-
 API = "http://localhost:3000"
-TOKEN = "your-secret-token"
+TOKEN = "replace-this-value"
 
-@app.route("/webhook", methods=["POST"])
-def handle_webhook():
-    data = request.json
-    comment_id = data["id"]
 
-    # Fetch full context (parent chain, IP history, etc.)
-    resp = requests.get(
-        f"{API}/api/admin/comments/{comment_id}",
-        headers={"Authorization": f"Bearer {TOKEN}"},
-    )
-    full = resp.json()
-
-    ip = full["comment"].get("submitter_ip")
-    if ip:
-        ip_resp = requests.get(
-            f"{API}/api/admin/comments",
-            params={"ip": ip, "status": "all"},
+@app.post("/webhook")
+def receive():
+    event = request.get_json()
+    if event["event"] == "comment.created":
+        action = "approved"
+        requests.post(
+            f"{API}/api/admin/moderate",
+            json={"id": event["id"], "action": action},
             headers={"Authorization": f"Bearer {TOKEN}"},
+            timeout=10,
         )
-        ip_history = ip_resp.json().get("comments", [])
-    else:
-        ip_history = []
-
-    # Your moderation logic here...
-    action = "approved"  # or "spam", "deleted", "pending"
-
-    requests.post(
-        f"{API}/api/admin/moderate",
-        json={"id": comment_id, "action": action},
-        headers={"Authorization": f"Bearer {TOKEN}"},
-    )
-
     return {"ok": True}, 200
-
-if __name__ == "__main__":
-    app.run(port=9000)
 ```
 
-## Best practices
+## Service rules
 
-### Rate limiting
+The single moderation route has a default limit of 10 requests per 60 seconds.
+The batch route is the better choice for polling.
 
-zapiska rate-limits the admin API by IP (default 10 req / 60s, configurable via `RATE_LIMIT_ADMIN_MODERATE` and `RATE_LIMIT_ADMIN_MODERATE_WINDOW`). Design your engine to batch decisions rather than making one API call per comment. Use `POST /api/admin/moderate/batch` instead of looping over individual `POST /api/admin/moderate` calls. Cache IP lookups locally.
+Keep the admin token in an environment variable. Use HTTPS between the service
+and zapiska when they use different hosts.
 
-### Error handling
-
-If your engine crashes or the webhook fails, comments stay in `pending` status. Nothing is lost — your engine can poll for unmoderated comments on restart. The batch moderate endpoint reports per-item errors so one bad decision doesn't derail the batch.
-
-### Security
-
-Keep your `ADMIN_TOKEN` in environment variables, not in code. Use HTTPS between your engine and zapiska, especially if they're on different machines. If your engine exposes a webhook endpoint, restrict it to only accept requests from zapiska's IP.
-
-### Testing
-
-zapiska's test suite creates isolated SQLite databases. You can write integration tests that start a test instance, submit comments, and verify your engine's decisions are applied. The `DEFAULT_COMMENT_STATUS` config lets you test with both auto-approved and pending workflows.
-
-### Allowed-by-default moderation
-
-Set `DEFAULT_COMMENT_STATUS=approved` to auto-publish every comment immediately. Your engine still receives webhook notifications and can retroactively change a comment's status if your rules detect a problem. This is useful for low-traffic blogs where false negatives (missed spam) are preferable to false positives (legitimate comments stuck in review).
+If the service stops, pending comments remain pending. Poll them after restart.
 
 ## Reference
 
-- [Admin API reference](api.md)
-- [Webhook payload format](api.md#post-apicomment)
-- [Configuration reference](deployment.md)
+- [API reference](api.md)
+- [Deployment reference](deployment.md)
+- [Security notes](security.md)
