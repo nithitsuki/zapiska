@@ -1,0 +1,66 @@
+# zapiska — single-command deploy
+#
+#   cp .env.example .env      # then set ADMIN_TOKEN at minimum
+#   docker compose up -d      # build, run, healthcheck, restart policy — done
+#
+# Every variable resolves from `.env` (or the shell) with sane defaults.
+# `ADMIN_TOKEN` is required: compose refuses to start with a clear message
+# if it's missing.
+
+services:
+  zapiska:
+    build: .
+    image: zapiska:local
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Required — set ADMIN_TOKEN in your .env file
+      ADMIN_TOKEN: "${ADMIN_TOKEN:?set ADMIN_TOKEN in your .env file}"
+
+      # Identity — point these at YOUR site
+      PUBLIC_TARGET_ORIGIN: "${PUBLIC_TARGET_ORIGIN:-https://nithitsuki.com}"
+      ALLOWED_CORS_ORIGIN: "${ALLOWED_CORS_ORIGIN:-https://nithitsuki.com}"
+
+      # Storage
+      DATABASE_PATH: /data/comments.db
+
+      # Moderation
+      DEFAULT_COMMENT_STATUS: "${DEFAULT_COMMENT_STATUS:-pending}"
+      MODERATION_WEBHOOK_URL: "${MODERATION_WEBHOOK_URL:-}"
+      MODERATION_WEBHOOK_MODE: "${MODERATION_WEBHOOK_MODE:-async}"
+      MAX_THREAD_DEPTH: "${MAX_THREAD_DEPTH:-0}"
+      STORE_IP_ADDRESS: "${STORE_IP_ADDRESS:-false}"
+
+      # Spam protection (Cloudflare Turnstile)
+      TURNSTILE_ENABLED: "${TURNSTILE_ENABLED:-false}"
+      TURNSTILE_SECRET_KEY: "${TURNSTILE_SECRET_KEY:-}"
+      TURNSTILE_VERIFY_URL: "${TURNSTILE_VERIFY_URL:-https://challenges.cloudflare.com/turnstile/v0/siteverify}"
+
+      # Admin notifications (Telegram / Slack / Discord)
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+      TELEGRAM_API_BASE: "${TELEGRAM_API_BASE:-https://api.telegram.org}"
+      SLACK_WEBHOOK_URL: "${SLACK_WEBHOOK_URL:-}"
+      DISCORD_WEBHOOK_URL: "${DISCORD_WEBHOOK_URL:-}"
+
+      # Notification batching
+      NOTIFY_BATCH_SECS: "${NOTIFY_BATCH_SECS:-60}"
+      NOTIFY_BATCH_THRESHOLD: "${NOTIFY_BATCH_THRESHOLD:-20}"
+      NOTIFY_BATCH_GRANULARITY: "${NOTIFY_BATCH_GRANULARITY:-page}"
+
+      # GitHub enrichment (optional)
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
+      - zapiska-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  zapiska-data:

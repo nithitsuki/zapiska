@@ -55,14 +55,19 @@ Pick one of:
 ```sh
 git clone https://github.com/nithitsuki/zapiska.git   # or your fork
 cd zapiska
-cp docker-compose-example.yml docker-compose.yml
 cp .env.example .env
 $EDITOR .env               # set ADMIN_TOKEN, PUBLIC_TARGET_ORIGIN, ALLOWED_CORS_ORIGIN
-$EDITOR docker-compose.yml # same env vars go here too (or read from .env)
-docker compose up -d --build
+docker compose up -d       # build + run + healthcheck — one command
 ```
 
-The container binds `0.0.0.0:3000` internally and writes SQLite to `/data`. The example compose file maps that port to **localhost:3000** on the host so you can sit a reverse proxy in front of it without exposing it to the open internet. The `zapiska-data` named volume keeps your DB across restarts.
+The canonical `docker-compose.yml` reads every variable from `.env` (with
+sane defaults) and refuses to start with a clear message if `ADMIN_TOKEN`
+is missing. The container binds `0.0.0.0:3000` internally and writes SQLite
+to `/data`. The compose file maps that port to **localhost:3000** on the
+host so you can sit a reverse proxy in front of it without exposing it to
+the open internet. The `zapiska-data` named volume keeps your DB across
+restarts, and the built-in healthcheck (against `/healthz`) marks the
+container `healthy` once it's ready.
 
 ### Option B: Pre-built binary
 

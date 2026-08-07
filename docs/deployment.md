@@ -91,17 +91,35 @@ DATABASE_PATH=/opt/zapiska/comments.db
 RUST_LOG=info
 ```
 
-## Docker
+## Docker (recommended)
 
-Build the image:
+Single-command deploy. The repo ships a canonical `docker-compose.yml` that
+builds the image, wires up a persistent volume, healthcheck, and restart
+policy, and passes through every configuration variable from your `.env`:
+
+```sh
+cp .env.example .env       # set ADMIN_TOKEN at minimum
+docker compose up -d       # build + run — that's it
+```
+
+`docker compose up` fails fast with `set ADMIN_TOKEN in your .env file` if
+the token is missing. Everything else has a sane default; uncomment the
+sections you need (notifications, Turnstile, GitHub token).
+
+Useful commands:
+
+```sh
+docker compose logs -f zapiska   # follow logs
+docker compose ps                # status incl. health (healthy/unhealthy)
+docker compose down              # stop; the zapiska-data volume survives
+docker compose pull/build        # update the image
+```
+
+Manual `docker run` is also supported — the image has a built-in healthcheck
+against `/healthz`:
 
 ```sh
 docker build -t zapiska .
-```
-
-Run it:
-
-```sh
 docker run -d \
   -p 3000:3000 \
   -e ADMIN_TOKEN=your-secret \
@@ -109,7 +127,11 @@ docker run -d \
   zapiska
 ```
 
-Or use docker-compose (see [docker-compose-example.yml](../docker-compose-example.yml)).
+Updating: `git pull && docker compose up -d --build`.
+
+The container runs as a non-root user (`appuser`), stores SQLite under
+`/data` (a named volume), and binds to `127.0.0.1:3000` on the host by
+default — put it behind a reverse proxy that handles TLS.
 
 ## SQLite
 

@@ -1,6 +1,6 @@
 # 1. Recipe stage to prepare dependency cooking
 FROM rust:1.97.0-alpine AS planner
-RUN apk add --no-cache build-base musl-dev pkgconfig curl sqlite-dev
+RUN apk add --no-cache build-base musl-dev curl
 WORKDIR /app
 RUN cargo install cargo-chef
 COPY . .
@@ -8,7 +8,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # 2. Cacher stage to build and cache dependencies
 FROM rust:1.97.0-alpine AS cacher
-RUN apk add --no-cache build-base musl-dev pkgconfig curl sqlite-dev
+RUN apk add --no-cache build-base musl-dev curl
 WORKDIR /app
 RUN cargo install cargo-chef
 COPY --from=planner /app/recipe.json recipe.json
@@ -16,7 +16,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # 3. Builder stage to build the actual application
 FROM rust:1.97.0-alpine AS builder
-RUN apk add --no-cache build-base musl-dev pkgconfig curl sqlite-dev
+RUN apk add --no-cache build-base musl-dev curl
 WORKDIR /app
 COPY . .
 # Copy pre-compiled dependencies from the cacher stage
@@ -26,7 +26,7 @@ RUN cargo build --release
 # 4. Final minimal runtime stage
 FROM alpine:3.21.3
 
-RUN apk add --no-cache ca-certificates sqlite-libs && \
+RUN apk add --no-cache ca-certificates && \
     addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app
@@ -43,5 +43,8 @@ EXPOSE 3000
 ENV BIND_ADDR=0.0.0.0:3000
 ENV DATABASE_PATH=/data/comments.db
 ENV RUST_LOG=info
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:3000/healthz >/dev/null 2>&1 || exit 1
 
 CMD ["/app/zapiska"]

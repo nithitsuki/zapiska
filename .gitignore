@@ -21,7 +21,7 @@
 !.skills/
 !.skills/**
 !Dockerfile
-!docker-compose-example.yml
+!docker-compose.yml
 !.dockerignore
 !assets/
 !assets/**
