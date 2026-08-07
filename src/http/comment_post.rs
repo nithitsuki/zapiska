@@ -177,6 +177,7 @@ pub async fn create_comment(
         author_url.as_deref(),
         github_username.as_deref(),
         &state.github,
+        #[cfg(feature = "webmentions")]
         &state.http_client,
     )
     .await;
@@ -489,7 +490,7 @@ async fn resolve_avatar(
     raw_author_url: Option<&str>,
     github_username: Option<&str>,
     github: &Arc<dyn GitHubLookup>,
-    http_client: &reqwest::Client,
+    #[cfg(feature = "webmentions")] http_client: &reqwest::Client,
 ) -> Option<String> {
     // Priority 1: If author_url is a GitHub profile, get avatar via API.
     if let Some(url) = resolved_url {
