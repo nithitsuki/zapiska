@@ -17,20 +17,26 @@ SQLite (r2d2 pool, WAL mode, all access via spawn_blocking)
 
 ```
 src/
-  config.rs          Environment config (19 vars)
+  config.rs          Environment config
   error.rs           AppError enum + IntoResponse + Display (6 HTTP status variants)
-  state.rs           AppState: config, pool, repo, github, wm_sender, http_client
+  state.rs           AppState: config, pool, repo, github, wm_sender, http_client, notifier
   sanitize.rs        HTML sanitization via ammonia
   validate.rs        Input validation: target_path, URLs, control chars
   ssrf.rs            Private-IP blocklist, DNS resolve+check (webmentions only)
-  github.rs          GitHubLookup trait + RealGitHub (cached API calls)
+  github.rs          GitHubLookup trait + RealGitHub (cached API calls), GitHub URL parsing
   mf2.rs             Microformats2 parser — h-entry, h-card (webmentions only)
   worker.rs          Webmention worker pipeline — fetch → verify → parse → upsert
   openapi.rs         OpenAPI 3.1 spec, feature-gated for webmention paths
+  notify/
+    mod.rs           Notifier config, digest types, delivery dispatch
+    batcher.rs       Window/threshold batching of notifications
+    telegram.rs      Telegram channel (Bot API, HTML parse mode)
+    slack.rs         Slack channel (incoming webhook, blocks)
+    discord.rs       Discord channel (incoming webhook, markdown)
   db/
     pool.rs          r2d2 SQLite pool + pragmas + migrations
     repo/
-      mod.rs         Data types (Comment, NewComment), CommentsRepo core, row_to_comment
+      mod.rs         Data types (Comment, NewComment), Repo core, row_to_comment
       comments.rs    Comment CRUD: insert, list, moderate, get, threaded chain
       webmentions.rs webmention_seen operations
       github_profiles.rs GitHub profile cache operations
@@ -41,7 +47,12 @@ src/
     comments_read.rs GET /api/comments
     comment_post.rs  POST /api/comment — includes parent_id validation for threading
     webmention_post.rs  POST /api/webmention (webmentions only)
-    admin.rs         Admin auth middleware + all admin endpoints
+    admin/
+      mod.rs         Constant-time token check + route re-exports
+      auth.rs        Admin auth middleware + login/logout
+      comments.rs    Pending queue, filtered listing, single comment + chain
+      moderate.rs    Single + batch moderation, status-change webhook
+      lookup.rs      Author, path, URL, and bulk-context endpoints
     reqwest_client.rs  SSRF-safe reqwest client builder (webmentions only)
     test_support.rs  Shared test helpers
 ```

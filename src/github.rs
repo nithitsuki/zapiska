@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::db::repo::{CommentsRepo, NewGithubProfile};
+use crate::db::repo::{NewGithubProfile, Repo};
 
 /// Profile returned by the GitHub lookup service.
 #[derive(Debug, Clone)]
@@ -26,11 +26,27 @@ impl GitHubLookup for StubGitHub {
     }
 }
 
+/// Extract a GitHub username from a profile URL like
+/// `https://github.com/username`. Returns `None` for non-GitHub hosts or
+/// empty paths.
+pub fn extract_github_username(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    if host != "github.com" && host != "www.github.com" {
+        return None;
+    }
+    let username = parsed.path().trim_start_matches('/').split('/').next()?;
+    if username.is_empty() {
+        return None;
+    }
+    Some(username.to_string())
+}
+
 /// Real implementation backed by the GitHub API + SQLite cache.
 #[derive(Clone)]
 pub struct RealGitHub {
     client: reqwest::Client,
-    repo: CommentsRepo,
+    repo: Repo,
     token: Option<String>,
     /// Base URL for the GitHub API (overridable for tests).
     api_base: String,
@@ -38,7 +54,7 @@ pub struct RealGitHub {
 
 impl RealGitHub {
     pub fn new(
-        repo: CommentsRepo,
+        repo: Repo,
         _timeout_ms: u64,
         token: Option<String>,
         client: reqwest::Client,
@@ -48,7 +64,7 @@ impl RealGitHub {
 
     /// Internal constructor allowing a custom base URL (used in tests).
     pub fn with_base(
-        repo: CommentsRepo,
+        repo: Repo,
         token: Option<String>,
         client: reqwest::Client,
         api_base: &str,
@@ -210,12 +226,12 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn test_repo() -> (CommentsRepo, tempfile::TempDir) {
+    fn test_repo() -> (Repo, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gh_test.db");
         let pool = create_pool(&path.to_string_lossy()).unwrap();
         run_migrations(&pool).unwrap();
-        (CommentsRepo::new(pool), dir)
+        (Repo::new(pool), dir)
     }
 
     #[tokio::test]

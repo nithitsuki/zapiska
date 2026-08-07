@@ -1,9 +1,9 @@
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 
-use super::{CommentsRepo, GithubProfile, NewGithubProfile, RepoError, RepoResult};
+use super::{GithubProfile, NewGithubProfile, Repo, RepoError, RepoResult};
 
-impl CommentsRepo {
+impl Repo {
     pub async fn get_github_profile(&self, login: &str) -> RepoResult<Option<GithubProfile>> {
         let login = login.to_string();
         self.spawn(move |conn| {

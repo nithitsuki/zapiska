@@ -74,6 +74,33 @@ pub struct Config {
     pub rate_limit_admin_moderate_burst: u32,
     /// Rate-limit window (seconds) for admin moderate.
     pub rate_limit_admin_moderate_window_secs: u64,
+    /// Telegram bot token for new-comment notifications (via Bot API).
+    /// Requires `telegram_chat_id`; when both are set, every new comment
+    /// posts a message to the chat. Optional — unset disables Telegram.
+    pub telegram_bot_token: Option<String>,
+    /// Telegram chat ID (numeric or @username) that receives notifications.
+    pub telegram_chat_id: Option<String>,
+    /// Override for the Telegram Bot API base URL. Defaults to the public
+    /// endpoint. Useful for tests or for routing through a proxy.
+    pub telegram_api_base: String,
+    /// Slack Incoming Webhook URL for new-comment notifications.
+    /// Optional — unset disables Slack.
+    pub slack_webhook_url: Option<String>,
+    /// Discord Incoming Webhook URL for new-comment notifications.
+    /// Optional — unset disables Discord.
+    pub discord_webhook_url: Option<String>,
+    /// Notification batching window in seconds. New comments on the same page
+    /// (or site-wide, see `notify_batch_granularity`) arriving inside the
+    /// window are collected into a single digest message instead of one
+    /// message per comment. `0` = send every comment immediately.
+    pub notify_batch_secs: u64,
+    /// Mid-window flush threshold: when the pending batch for a page reaches
+    /// this count, it is flushed immediately with an aggregated message.
+    /// `0` = window-based only (no threshold flush).
+    pub notify_batch_threshold: u32,
+    /// Batch window scoping: "page" = one window per target_path,
+    /// "global" = a single site-wide window.
+    pub notify_batch_granularity: String,
 }
 
 #[derive(Debug, Error)]
@@ -102,6 +129,8 @@ pub enum ConfigError {
     InvalidRateLimitWindow(String),
     #[error("RATE_LIMIT_*_BURST must be a positive integer, got: {0}")]
     InvalidRateLimitBurst(String),
+    #[error("NOTIFY_BATCH_GRANULARITY must be 'page' or 'global', got: {0}")]
+    InvalidNotifyGranularity(String),
 }
 
 fn env_or_default(key: &str, default: &str) -> String {
@@ -270,6 +299,30 @@ impl Config {
         let rate_limit_admin_moderate_window_secs =
             rate_limit_window("RATE_LIMIT_ADMIN_MODERATE_WINDOW", 60)?;
 
+        let telegram_bot_token = env::var("TELEGRAM_BOT_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let telegram_chat_id = env::var("TELEGRAM_CHAT_ID").ok().filter(|s| !s.is_empty());
+        let telegram_api_base = env_or_default("TELEGRAM_API_BASE", "https://api.telegram.org");
+        let slack_webhook_url = env::var("SLACK_WEBHOOK_URL").ok().filter(|s| !s.is_empty());
+        let discord_webhook_url = env::var("DISCORD_WEBHOOK_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        let notify_batch_secs = env_or_default("NOTIFY_BATCH_SECS", "60")
+            .parse::<u64>()
+            .unwrap_or(60);
+        let notify_batch_threshold = env_or_default("NOTIFY_BATCH_THRESHOLD", "20")
+            .parse::<u32>()
+            .unwrap_or(20);
+        let notify_batch_granularity =
+            env_or_default("NOTIFY_BATCH_GRANULARITY", "page").to_lowercase();
+        if notify_batch_granularity != "page" && notify_batch_granularity != "global" {
+            return Err(ConfigError::InvalidNotifyGranularity(
+                notify_batch_granularity,
+            ));
+        }
+
         Ok(Config {
             bind_addr,
             public_target_origin,
@@ -303,6 +356,14 @@ impl Config {
             rate_limit_read_window_secs,
             rate_limit_admin_moderate_burst,
             rate_limit_admin_moderate_window_secs,
+            telegram_bot_token,
+            telegram_chat_id,
+            telegram_api_base,
+            slack_webhook_url,
+            discord_webhook_url,
+            notify_batch_secs,
+            notify_batch_threshold,
+            notify_batch_granularity,
         })
     }
 
@@ -355,6 +416,14 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 rate_limit_read_window_secs: {}, \
                 rate_limit_admin_moderate_burst: {}, \
                 rate_limit_admin_moderate_window_secs: {}, \
+                telegram_bot_token: {}, \
+                telegram_chat_id: {}, \
+                telegram_api_base: {}, \
+                slack_webhook_url: {}, \
+                discord_webhook_url: {}, \
+                notify_batch_secs: {}, \
+                notify_batch_threshold: {}, \
+                notify_batch_granularity: {}, \
                 rust_log: {} \
             }}",
             self.0.bind_addr,
@@ -398,6 +467,18 @@ impl std::fmt::Display for RedactedConfig<'_> {
             self.0.rate_limit_read_window_secs,
             self.0.rate_limit_admin_moderate_burst,
             self.0.rate_limit_admin_moderate_window_secs,
+            if self.0.telegram_bot_token.is_some() {
+                "***"
+            } else {
+                "(unset)"
+            },
+            self.0.telegram_chat_id.as_deref().unwrap_or("(unset)"),
+            self.0.telegram_api_base,
+            self.0.slack_webhook_url.as_deref().unwrap_or("(unset)"),
+            self.0.discord_webhook_url.as_deref().unwrap_or("(unset)"),
+            self.0.notify_batch_secs,
+            self.0.notify_batch_threshold,
+            self.0.notify_batch_granularity,
             self.0.rust_log,
         )
     }
@@ -448,6 +529,14 @@ mod tests {
                 "RATE_LIMIT_READ_WINDOW",
                 "RATE_LIMIT_ADMIN_MODERATE",
                 "RATE_LIMIT_ADMIN_MODERATE_WINDOW",
+                "TELEGRAM_BOT_TOKEN",
+                "TELEGRAM_CHAT_ID",
+                "TELEGRAM_API_BASE",
+                "SLACK_WEBHOOK_URL",
+                "DISCORD_WEBHOOK_URL",
+                "NOTIFY_BATCH_SECS",
+                "NOTIFY_BATCH_THRESHOLD",
+                "NOTIFY_BATCH_GRANULARITY",
             ];
             for var in vars {
                 // SAFETY: held ENV_LOCK prevents concurrent env mutation.
@@ -696,6 +785,110 @@ mod tests {
     }
 
     #[test]
+    fn notifications_disabled_by_default() {
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            let config = Config::from_env().unwrap();
+            assert!(config.telegram_bot_token.is_none());
+            assert!(config.telegram_chat_id.is_none());
+            assert_eq!(config.telegram_api_base, "https://api.telegram.org");
+            assert!(config.slack_webhook_url.is_none());
+        });
+    }
+
+    #[test]
+    fn notifications_loaded_from_env() {
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("TELEGRAM_BOT_TOKEN", "123456:secret"),
+                ("TELEGRAM_CHAT_ID", "@alerts"),
+                ("TELEGRAM_API_BASE", "https://telegram-proxy.example"),
+                (
+                    "SLACK_WEBHOOK_URL",
+                    "https://hooks.slack.com/services/x/y/z",
+                ),
+            ],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.telegram_bot_token.as_deref(), Some("123456:secret"));
+                assert_eq!(config.telegram_chat_id.as_deref(), Some("@alerts"));
+                assert_eq!(config.telegram_api_base, "https://telegram-proxy.example");
+                assert_eq!(
+                    config.slack_webhook_url.as_deref(),
+                    Some("https://hooks.slack.com/services/x/y/z")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn empty_notification_vars_treated_as_none() {
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("TELEGRAM_BOT_TOKEN", ""),
+                ("SLACK_WEBHOOK_URL", ""),
+            ],
+            || {
+                let config = Config::from_env().unwrap();
+                assert!(config.telegram_bot_token.is_none());
+                assert!(config.slack_webhook_url.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn batch_settings_defaults() {
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.notify_batch_secs, 60);
+            assert_eq!(config.notify_batch_threshold, 20);
+            assert_eq!(config.notify_batch_granularity, "page");
+            assert!(config.discord_webhook_url.is_none());
+        });
+    }
+
+    #[test]
+    fn batch_settings_loaded_from_env() {
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("NOTIFY_BATCH_SECS", "300"),
+                ("NOTIFY_BATCH_THRESHOLD", "50"),
+                ("NOTIFY_BATCH_GRANULARITY", "global"),
+                (
+                    "DISCORD_WEBHOOK_URL",
+                    "https://discord.com/api/webhooks/1/abc",
+                ),
+            ],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.notify_batch_secs, 300);
+                assert_eq!(config.notify_batch_threshold, 50);
+                assert_eq!(config.notify_batch_granularity, "global");
+                assert_eq!(
+                    config.discord_webhook_url.as_deref(),
+                    Some("https://discord.com/api/webhooks/1/abc")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn invalid_batch_granularity_rejected() {
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("NOTIFY_BATCH_GRANULARITY", "per-comment"),
+            ],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(err, ConfigError::InvalidNotifyGranularity(_)));
+            },
+        );
+    }
+
+    #[test]
     fn redacted_display_hides_admin_and_github_tokens() {
         let config = Config {
             bind_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -731,6 +924,14 @@ mod tests {
             rate_limit_read_window_secs: 60,
             rate_limit_admin_moderate_burst: 10,
             rate_limit_admin_moderate_window_secs: 60,
+            telegram_bot_token: Some("123456:ABC-secret-token".to_string()),
+            telegram_chat_id: Some("@zapiska_alerts".to_string()),
+            telegram_api_base: "https://api.telegram.org".to_string(),
+            slack_webhook_url: Some("https://hooks.slack.com/services/T0/BBB/xxx".to_string()),
+            discord_webhook_url: Some("https://discord.com/api/webhooks/1/abc".to_string()),
+            notify_batch_secs: 60,
+            notify_batch_threshold: 20,
+            notify_batch_granularity: "page".to_string(),
         };
         let rendered = format!("{}", config.redacted_display());
         assert!(
@@ -753,6 +954,42 @@ mod tests {
         assert!(
             rendered.contains("turnstile_secret_key: ***"),
             "turnstile_secret_key not redacted"
+        );
+        assert!(
+            !rendered.contains("123456:ABC-secret-token"),
+            "telegram_bot_token leaked"
+        );
+        assert!(
+            rendered.contains("telegram_bot_token: ***"),
+            "telegram_bot_token not redacted"
+        );
+        assert!(
+            rendered.contains("telegram_chat_id: @zapiska_alerts"),
+            "telegram_chat_id visible"
+        );
+        assert!(
+            rendered.contains("telegram_api_base: https://api.telegram.org"),
+            "telegram_api_base visible"
+        );
+        assert!(
+            rendered.contains("slack_webhook_url: https://hooks.slack.com/services/T0/BBB/xxx"),
+            "slack_webhook_url visible"
+        );
+        assert!(
+            rendered.contains("discord_webhook_url: https://discord.com/api/webhooks/1/abc"),
+            "discord_webhook_url visible"
+        );
+        assert!(
+            rendered.contains("notify_batch_secs: 60"),
+            "batch secs visible"
+        );
+        assert!(
+            rendered.contains("notify_batch_threshold: 20"),
+            "batch threshold visible"
+        );
+        assert!(
+            rendered.contains("notify_batch_granularity: page"),
+            "batch granularity visible"
         );
         // sanity: normal fields are still visible
         assert!(rendered.contains("127.0.0.1:3000"));

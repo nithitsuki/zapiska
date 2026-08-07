@@ -20,7 +20,7 @@ cargo build
 ## Running tests
 
 ```sh
-cargo test              # all tests (188 unit + 4 e2e)
+cargo test              # all tests (249 unit + 5 integration)
 cargo test --lib        # unit tests only
 cargo test --test e2e   # e2e integration tests only
 ```
@@ -32,8 +32,8 @@ Tests use `tempfile::tempdir()` for isolated SQLite databases. No shared state.
 By default both `comments` and `webmentions` features are enabled. To run tests for only one feature:
 
 ```sh
-cargo test --no-default-features --features comments   # 143 unit + 3 e2e
-cargo test --no-default-features --features webmentions # 188 unit + 4 e2e
+cargo test --no-default-features --features comments     # 193 tests
+cargo test --no-default-features --features webmentions  # 254 tests
 ```
 
 The `webmentions` feature adds tests for SSRF protection, microformats parsing, the webmention worker, and the webmention ingress endpoint.
@@ -59,7 +59,7 @@ curl http://127.0.0.1:3000/swagger-ui/
 
 ### spawn_blocking for SQL
 
-SQLite is blocking I/O. Running it on the tokio runtime would block the event loop. Every `CommentsRepo` method wraps queries in `spawn_blocking`, moving work to a dedicated thread pool.
+SQLite is blocking I/O. Running it on the tokio runtime would block the event loop. Every `Repo` method wraps queries in `spawn_blocking`, moving work to a dedicated thread pool.
 
 ### Separate RepoError
 
@@ -72,6 +72,10 @@ Naive `==` short-circuits on the first differing byte, leaking the token prefix 
 ### Custom SSRF redirect policy
 
 An attacker could send a webmention with a `source` URL that redirects to `http://169.254.169.254/` (AWS metadata). The custom policy re-checks each redirect target against the IP blocklist before following.
+
+### Notification channels & batching
+
+`src/notify/` is one module per channel (`telegram.rs`, `slack.rs`, `discord.rs`), each owning its wire format and escaping, plus a shared `batcher.rs` that collects comments into per-page (or global) windows and flushes one digest per window (`NOTIFY_BATCH_SECS`, `NOTIFY_BATCH_THRESHOLD`, `NOTIFY_BATCH_GRANULARITY`). `0` window = immediate delivery. All sends are fire-and-forget tasks with a 10s timeout — a failing channel never affects the request. Adding a channel = new file in `notify/`, a config field, and a branch in `deliver_new_comment` / `deliver_digest_to_channels`.
 
 ## Test structure
 
@@ -93,5 +97,5 @@ An attacker could send a webmention with a `source` URL that redirects to `http:
 1. Field on `Config` in `src/config.rs`.
 2. Parse in `Config::from_env()` with default + validation.
 3. `ConfigError` variant if validation can fail.
-4. Add to the table in `README.md` and `docs/deployment.md`.
-5. Test in `config::tests`.
+4. Add to the table in `SPEC.md` (configuration section) and `.env.example`.
+5. Test in `config::tests` (defaults, overrides, validation failures, redaction).

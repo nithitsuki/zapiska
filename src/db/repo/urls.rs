@@ -1,7 +1,7 @@
 use rusqlite::params;
 use serde::Serialize;
 
-use super::{CommentsRepo, RepoError, RepoResult};
+use super::{Repo, RepoError, RepoResult};
 
 /// An extracted URL from a comment.
 #[derive(Debug, Clone, Serialize)]
@@ -34,7 +34,7 @@ pub struct UrlCommentRef {
     pub created_at: String,
 }
 
-impl CommentsRepo {
+impl Repo {
     /// Insert extracted URLs for a comment.
     pub async fn insert_urls(
         &self,

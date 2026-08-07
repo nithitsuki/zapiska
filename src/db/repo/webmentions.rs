@@ -1,9 +1,9 @@
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 
-use super::{CommentsRepo, NewWebmentionSeen, RepoError, RepoResult, WebmentionSeen};
+use super::{NewWebmentionSeen, Repo, RepoError, RepoResult, WebmentionSeen};
 
-impl CommentsRepo {
+impl Repo {
     pub async fn get_webmention_seen(
         &self,
         source: &str,

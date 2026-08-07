@@ -10,7 +10,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use zapiska::config::Config;
 use zapiska::db::pool::{create_pool, run_migrations};
-use zapiska::db::repo::CommentsRepo;
+use zapiska::db::repo::Repo;
 use zapiska::http::build_app;
 use zapiska::state::{AppState, Limiter};
 #[cfg(feature = "webmentions")]
@@ -51,12 +51,21 @@ async fn start_server() -> (String, AppState) {
         rate_limit_read_window_secs: 60,
         rate_limit_admin_moderate_burst: 10,
         rate_limit_admin_moderate_window_secs: 60,
+        telegram_bot_token: None,
+        telegram_chat_id: None,
+        telegram_api_base: "https://api.telegram.org".to_string(),
+        slack_webhook_url: None,
+        discord_webhook_url: None,
+        notify_batch_secs: 0,
+        notify_batch_threshold: 0,
+        notify_batch_granularity: "page".to_string(),
     };
+    let notifier = std::sync::Arc::new(zapiska::notify::NotificationBatcher::new(&config));
     let dir = tempdir().unwrap();
     let path = dir.path().join("e2e.db");
     let pool = create_pool(&path.to_string_lossy()).unwrap();
     run_migrations(&pool).unwrap();
-    let repo = CommentsRepo::new(pool.clone());
+    let repo = Repo::new(pool.clone());
 
     let http_client = reqwest::Client::builder().build().unwrap();
 
@@ -74,6 +83,7 @@ async fn start_server() -> (String, AppState) {
         pool,
         repo: repo.clone(),
         github: Arc::new(zapiska::github::StubGitHub),
+        notifier,
         #[cfg(feature = "webmentions")]
         wm_sender,
         http_client: http_client.clone(),
@@ -276,6 +286,7 @@ async fn e2e_webmention_full_lifecycle() {
         "https://nithitsuki.com",
         state.config.max_content_len,
         true,
+        &Arc::new(zapiska::notify::NotificationBatcher::default()),
     )
     .await
     .unwrap();

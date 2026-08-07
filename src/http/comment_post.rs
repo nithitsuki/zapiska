@@ -235,6 +235,23 @@ pub async fn create_comment(
         let _ = state.repo.insert_urls(new_id, urls).await;
     }
 
+    // 9.5 Notify admin channels (Telegram / Slack / Discord) about the new
+    // comment. Batched into digests per NOTIFY_BATCH_SECS; fire-and-forget —
+    // failures are logged, never fail the request.
+    if state.notifier.has_channels() {
+        let info = crate::notify::NewCommentInfo {
+            id: new_id,
+            target_path: target_path.clone(),
+            comment_type: "native".to_string(),
+            author_name: hook_name.clone(),
+            author_url: hook_url.clone(),
+            content: hook_content.clone(),
+            honeypot: is_honeypot,
+            is_reply: parent_id.is_some(),
+        };
+        state.notifier.push(&state.http_client, info);
+    }
+
     // 10. Moderation webhook — either sync (await decision) or async (fire-and-forget).
     let mut final_status = state.config.default_comment_status.clone(); // already applied above
     if let Some(ref webhook_url) = state.config.moderation_webhook_url {
@@ -476,7 +493,7 @@ async fn resolve_avatar(
 ) -> Option<String> {
     // Priority 1: If author_url is a GitHub profile, get avatar via API.
     if let Some(url) = resolved_url {
-        if let Some(username) = extract_github_username(url) {
+        if let Some(username) = crate::github::extract_github_username(url) {
             if let Some(profile) = github.lookup(&username).await {
                 return Some(profile.avatar_url);
             }
@@ -562,20 +579,6 @@ async fn fetch_page_avatar(http_client: &reqwest::Client, url: &Url) -> Option<S
 
     // Fallback to favicon
     crate::avatar::best_favicon(&html, url)
-}
-
-/// Extract a GitHub username from a URL like `https://github.com/username`.
-fn extract_github_username(url: &str) -> Option<String> {
-    let parsed = Url::parse(url).ok()?;
-    let host = parsed.host_str()?;
-    if host != "github.com" && host != "www.github.com" {
-        return None;
-    }
-    let username = parsed.path().trim_start_matches('/').split('/').next()?;
-    if username.is_empty() {
-        return None;
-    }
-    Some(username.to_string())
 }
 
 #[cfg(test)]
@@ -1011,6 +1014,289 @@ mod tests {
             resp.status(),
             503,
             "fail closed when siteverify is unreachable"
+        );
+    }
+
+    // ── Notification tests (Telegram / Slack) ────────────────
+
+    /// Poll the mock server until `n` requests arrive (notifications are
+    /// fire-and-forget tasks, so we can't assert synchronously).
+    async fn wait_for_requests(server: &wiremock::MockServer, n: usize) -> Vec<wiremock::Request> {
+        for _ in 0..100 {
+            let reqs = server.received_requests().await.unwrap_or_default();
+            if reqs.len() >= n {
+                return reqs;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        server.received_requests().await.unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn telegram_notified_on_new_comment() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": {"message_id": 1}})),
+            )
+            .mount(&server)
+            .await;
+
+        let (state, _dir) = helpers::test_state_with_notifications(server.uri(), None);
+        let app = build_app(state.clone());
+        let body = "target_path=/blog/hello&author_name=Alice&content=Great+post!";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            201,
+            "comment stored regardless of notification"
+        );
+
+        let reqs = wait_for_requests(&server, 1).await;
+        assert!(!reqs.is_empty(), "telegram must receive a request");
+        let req = &reqs[0];
+        assert_eq!(req.method, "POST");
+        assert!(
+            req.url
+                .path()
+                .starts_with("/botTESTTOKEN123:test-secret/sendMessage"),
+            "telegram sendMessage endpoint with bot token, got {}",
+            req.url.path()
+        );
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["chat_id"], "@test_alerts");
+        assert_eq!(body["parse_mode"], "HTML");
+        let text = body["text"].as_str().unwrap();
+        assert!(text.contains("/blog/hello"), "path in message: {text}");
+        assert!(text.contains("Alice"), "author in message: {text}");
+        assert!(text.contains("Great post!"), "content in message: {text}");
+        assert!(
+            text.contains("/api/admin/comments/"),
+            "admin path in message: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_notified_on_new_comment() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let (state, _dir) = helpers::test_state_with_notifications(
+            "https://unused.invalid".to_string(),
+            Some(server.uri()),
+        );
+        let app = build_app(state.clone());
+        let body = "target_path=/blog/hello&author_name=Alice&content=Hello+Slack!";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(resp.status(), 201);
+
+        let reqs = wait_for_requests(&server, 1).await;
+        assert!(!reqs.is_empty(), "slack must receive a request");
+        let req = &reqs[0];
+        assert_eq!(req.method, "POST");
+        let payload: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        let text = payload["blocks"][0]["text"]["text"].as_str().unwrap();
+        assert!(text.contains("New comment on `/blog/hello`"), "{text}");
+        assert!(text.contains("Alice"), "{text}");
+        assert!(text.contains("Hello Slack!"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn notification_failure_does_not_affect_comment() {
+        // Both channels fail (500 + unreachable); the comment must still be 201.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let (state, _dir) =
+            helpers::test_state_with_notifications(server.uri(), Some(server.uri()));
+        let app = build_app(state.clone());
+        let body = "target_path=/resilient&author_name=Alice&content=hi";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            201,
+            "notifications must never fail the request"
+        );
+
+        let stored = state.repo.list_pending(10, None, None).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].target_path, "/resilient");
+    }
+
+    #[tokio::test]
+    async fn honeypot_comment_still_notifies_with_flag() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": {"message_id": 1}})),
+            )
+            .mount(&server)
+            .await;
+
+        let (state, _dir) = helpers::test_state_with_notifications(server.uri(), None);
+        let app = build_app(state.clone());
+        let body = "target_path=/honey&author_name=Bot&content=spam&website=spammer.example";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(resp.status(), 201);
+
+        let reqs = wait_for_requests(&server, 1).await;
+        assert!(!reqs.is_empty());
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert!(
+            body["text"].as_str().unwrap().contains("honeypot"),
+            "honeypot flag surfaced in notification"
+        );
+    }
+
+    // ── Batching tests (windowed digests) ────────────────────
+
+    /// Mount a telegram-ok mock and post `comments` to `path`, returning the
+    /// requests the mock server received.
+    async fn post_and_collect(
+        server: &wiremock::MockServer,
+        path: &str,
+        comments: &[(&str, &str)],
+    ) -> Vec<wiremock::Request> {
+        let (state, _dir) = helpers::test_state_with_batcher(2, 0, "page", server.uri(), None);
+        let app = build_app(state.clone());
+
+        for (name, content) in comments {
+            let body = format!("target_path={path}&author_name={name}&content={content}");
+            let resp = app.clone().oneshot(form_request(&body)).await.unwrap();
+            assert_eq!(resp.status(), 201, "comment {name} stored");
+        }
+
+        wait_for_requests(server, 1).await
+    }
+
+    #[tokio::test]
+    async fn batched_comments_produce_single_digest() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": {"message_id": 1}})),
+            )
+            .mount(&server)
+            .await;
+
+        let reqs = post_and_collect(
+            &server,
+            "/blog/hello",
+            &[("Alice", "first"), ("Bob", "second"), ("Carol", "third")],
+        )
+        .await;
+        assert_eq!(reqs.len(), 1, "three comments must produce ONE message");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let text = body["text"].as_str().unwrap();
+        assert!(text.contains("3 new comments on /blog/hello"), "{text}");
+        assert!(
+            text.contains("Alice, Bob, Carol"),
+            "commenters listed: {text}"
+        );
+        assert!(text.contains("first"), "preview present: {text}");
+    }
+
+    #[tokio::test]
+    async fn threshold_flush_mid_window() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": {"message_id": 1}})),
+            )
+            .mount(&server)
+            .await;
+
+        // 10s window, but flush as soon as 2 comments accumulate.
+        let (state, _dir) = helpers::test_state_with_batcher(10, 2, "page", server.uri(), None);
+        let app = build_app(state.clone());
+
+        for (name, content) in [("Alice", "one"), ("Bob", "two"), ("Carol", "three")] {
+            let body = format!("target_path=/blog/hello&author_name={name}&content={content}");
+            let resp = app.clone().oneshot(form_request(&body)).await.unwrap();
+            assert_eq!(resp.status(), 201);
+        }
+
+        // The first two hit the threshold → immediate digest of 2. The third
+        // opens a fresh window (10s); we assert only on the immediate flush.
+        let reqs = wait_for_requests(&server, 1).await;
+        assert_eq!(reqs.len(), 1, "threshold flush must fire immediately");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let text = body["text"].as_str().unwrap();
+        assert!(text.contains("2 new comments on /blog/hello"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn global_granularity_batches_across_pages() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": {"message_id": 1}})),
+            )
+            .mount(&server)
+            .await;
+
+        let (state, _dir) = helpers::test_state_with_batcher(2, 0, "global", server.uri(), None);
+        let app = build_app(state.clone());
+
+        for (path, name) in [("/blog/a", "Alice"), ("/blog/b", "Bob")] {
+            let body = format!("target_path={path}&author_name={name}&content=hello");
+            let resp = app.clone().oneshot(form_request(&body)).await.unwrap();
+            assert_eq!(resp.status(), 201);
+        }
+
+        let reqs = wait_for_requests(&server, 1).await;
+        assert_eq!(reqs.len(), 1, "global window batches both pages");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let text = body["text"].as_str().unwrap();
+        assert!(text.contains("2 new comments on the site"), "{text}");
+        assert!(text.contains("/blog/a"), "both pages previewed: {text}");
+        assert!(text.contains("/blog/b"), "both pages previewed: {text}");
+    }
+
+    #[tokio::test]
+    async fn discord_receives_batched_digest() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let (state, _dir) = helpers::test_state_with_batcher(
+            2,
+            0,
+            "page",
+            "https://unused.invalid".to_string(),
+            Some(server.uri()),
+        );
+        let app = build_app(state.clone());
+
+        let body = "target_path=/blog/hello&author_name=Alice&content=hi";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(resp.status(), 201);
+
+        let reqs = wait_for_requests(&server, 1).await;
+        assert!(!reqs.is_empty(), "discord must receive the digest");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["username"], "zapiska");
+        let content = body["content"].as_str().unwrap();
+        assert!(
+            content.contains("1 new comment on /blog/hello"),
+            "{content}"
+        );
+        assert!(
+            content.contains("/api/admin/pending?path=/blog/hello"),
+            "{content}"
         );
     }
 }

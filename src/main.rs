@@ -3,11 +3,12 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 use zapiska::config::Config;
 use zapiska::db::pool;
-use zapiska::db::repo::CommentsRepo;
+use zapiska::db::repo::Repo;
 use zapiska::github::{GitHubLookup, RealGitHub};
 #[cfg(feature = "webmentions")]
 use zapiska::http::reqwest_client;
 use zapiska::http::{build_app, shutdown};
+use zapiska::notify::NotificationBatcher;
 use zapiska::state::AppState;
 #[cfg(feature = "webmentions")]
 use zapiska::worker;
@@ -39,7 +40,9 @@ async fn main() {
 
     let bind_addr = config.bind_addr;
 
-    let repo = CommentsRepo::new(sqlite_pool.clone());
+    let repo = Repo::new(sqlite_pool.clone());
+
+    let notifier = Arc::new(NotificationBatcher::new(&config));
 
     let github: Arc<dyn GitHubLookup> = Arc::new(RealGitHub::new(
         repo.clone(),
@@ -60,6 +63,7 @@ async fn main() {
         config.public_target_origin.clone(),
         config.max_content_len,
         config.fetch_timeout_ms,
+        notifier.clone(),
     );
 
     let state = AppState {
@@ -67,6 +71,7 @@ async fn main() {
         pool: sqlite_pool,
         repo,
         github,
+        notifier,
         #[cfg(feature = "webmentions")]
         wm_sender,
         http_client,

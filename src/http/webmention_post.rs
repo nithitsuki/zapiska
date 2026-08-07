@@ -169,14 +169,14 @@ mod tests {
     async fn backlog_full_returns_503() {
         use crate::config::Config;
         use crate::db::pool::{create_pool, run_migrations};
-        use crate::db::repo::CommentsRepo;
+        use crate::db::repo::Repo;
 
         let (wm_sender, _rx) = worker::channel(1);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("full.db");
         let pool = create_pool(&path.to_string_lossy()).unwrap();
         run_migrations(&pool).unwrap();
-        let repo = CommentsRepo::new(pool.clone());
+        let repo = Repo::new(pool.clone());
         let state = AppState {
             config: Config {
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -211,10 +211,19 @@ mod tests {
                 rate_limit_read_window_secs: 60,
                 rate_limit_admin_moderate_burst: 10,
                 rate_limit_admin_moderate_window_secs: 60,
+                telegram_bot_token: None,
+                telegram_chat_id: None,
+                telegram_api_base: "https://api.telegram.org".to_string(),
+                slack_webhook_url: None,
+                discord_webhook_url: None,
+                notify_batch_secs: 0,
+                notify_batch_threshold: 0,
+                notify_batch_granularity: "page".to_string(),
             },
             pool,
             repo,
             github: Arc::new(crate::github::StubGitHub),
+            notifier: Arc::new(crate::notify::NotificationBatcher::default()),
             wm_sender,
             http_client: { reqwest::Client::builder().build().unwrap() },
             limiter: Arc::new(Limiter::new()),

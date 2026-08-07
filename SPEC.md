@@ -109,11 +109,41 @@ Everything comes from environment variables at startup. No secrets in code.
 | `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` | `10` | Per-source-domain hourly webmention cap. `0` = unlimited. |
 | `MODERATION_WEBHOOK_URL` | *(unset)* | URL for external moderation webhook. POSTs full enriched payload on each submission. |
 | `MODERATION_WEBHOOK_MODE` | `async` | `async` = fire-and-forget; `sync` = wait for response, apply returned `action`. |
+| `TELEGRAM_BOT_TOKEN` | *(unset)* | Telegram bot token (via @BotFather). Together with `TELEGRAM_CHAT_ID`, a message is sent for every new comment. |
+| `TELEGRAM_CHAT_ID` | *(unset)* | Telegram chat ID (numeric or `@username`) that receives new-comment alerts. |
+| `TELEGRAM_API_BASE` | `https://api.telegram.org` | Override for the Telegram Bot API base URL (tests / proxies). |
+| `SLACK_WEBHOOK_URL` | *(unset)* | Slack Incoming Webhook URL; new comments are posted to the channel. |
+| `DISCORD_WEBHOOK_URL` | *(unset)* | Discord Incoming Webhook URL; new comments are posted to the channel. |
+| `NOTIFY_BATCH_SECS` | `60` | Batching window in seconds. Comments arriving within the window are collected into one digest message per page. `0` = send every comment immediately. |
+| `NOTIFY_BATCH_THRESHOLD` | `20` | Mid-window flush: when a page's pending batch reaches this count, it is flushed immediately as an aggregated digest. `0` = window-based only. |
+| `NOTIFY_BATCH_GRANULARITY` | `page` | `page` = one window per `target_path`; `global` = a single site-wide window. |
 | `DEFAULT_COMMENT_STATUS` | `pending` | Initial moderation status. `pending` = requires review; `approved` = auto-publish. |
 | `MAX_THREAD_DEPTH` | `0` | Maximum nesting depth for replies. `0` = nesting disabled. Clamped 0-10. |
 | `RUST_LOG` | `info` | `tracing` filter directive. |
 
 Startup fails fast if `ADMIN_TOKEN` is unset.
+
+### Admin notifications
+
+zapiska can alert an admin when new comments arrive (native or webmention). Unlike the moderation webhook — which is a *moderation decision channel* — these are one-way notifications:
+
+- **Telegram**: requires both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. A message (HTML parse mode) with the commenter, content preview (300 chars, HTML stripped), honeypot flag, and the admin path is sent to `POST {TELEGRAM_API_BASE}/bot{token}/sendMessage`.
+- **Slack**: `SLACK_WEBHOOK_URL` receives a blocks-format payload with the same content.
+- **Discord**: `DISCORD_WEBHOOK_URL` receives a markdown `content` payload (posted as user `zapiska`).
+
+#### Batching
+
+By default (`NOTIFY_BATCH_SECS=60`) notifications are **batched**, so a comment flood produces a handful of messages rather than one per comment (the "10+, 100+, 1k+" pattern). Behavior:
+
+- The first comment on a page opens a window; subsequent comments on that page within the window are counted silently.
+- When the window closes, ONE digest is sent per channel: "6 new comments on /blog/hello · By: Alice, Bob, Carol +3 more · First: Alice: "…"" with a link to the admin pending queue.
+- If `NOTIFY_BATCH_THRESHOLD` (default 20) is reached mid-window, the batch is flushed immediately as an aggregated digest.
+- `NOTIFY_BATCH_GRANULARITY=global` switches to a single site-wide window (digests mix pages).
+- `NOTIFY_BATCH_SECS=0` restores immediate per-comment delivery.
+
+The batcher is in-memory; batches still open at shutdown are lost (same tradeoff as the in-memory rate limiter). For webmentions, only the *first* sighting of a `source` URL is batched — update pings are silent.
+
+All delivery is **fire-and-forget**: each channel is sent on its own spawned task with a 10s timeout; failures are logged at `warn` and never affect the comment submission.
 
 ---
 

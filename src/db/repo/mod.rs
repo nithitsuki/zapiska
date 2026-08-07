@@ -95,11 +95,11 @@ pub struct NewGithubProfile {
 // ── Repository ──────────────────────────────────────────────
 
 #[derive(Clone)]
-pub struct CommentsRepo {
+pub struct Repo {
     pool: SqlitePool,
 }
 
-impl CommentsRepo {
+impl Repo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
@@ -172,12 +172,12 @@ mod tests {
     use crate::db::pool::run_migrations;
     use tempfile::tempdir;
 
-    fn setup_repo() -> (CommentsRepo, tempfile::TempDir) {
+    fn setup_repo() -> (Repo, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let path = dir.path().join("repo_test.db");
         let pool = create_pool(&path.to_string_lossy()).unwrap();
         run_migrations(&pool).unwrap();
-        (CommentsRepo::new(pool), dir)
+        (Repo::new(pool), dir)
     }
 
     // ── Comment tests ──

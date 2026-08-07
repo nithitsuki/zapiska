@@ -6,8 +6,9 @@ use reqwest::Client;
 
 use crate::config::Config;
 use crate::db::pool::SqlitePool;
-use crate::db::repo::CommentsRepo;
+use crate::db::repo::Repo;
 use crate::github::GitHubLookup;
+use crate::notify::NotificationBatcher;
 #[cfg(feature = "webmentions")]
 use crate::worker::JobSender;
 
@@ -15,8 +16,10 @@ use crate::worker::JobSender;
 pub struct AppState {
     pub config: Config,
     pub pool: SqlitePool,
-    pub repo: CommentsRepo,
+    pub repo: Repo,
     pub github: Arc<dyn GitHubLookup>,
+    /// Notification channels (Telegram / Slack / Discord) with batching.
+    pub notifier: Arc<NotificationBatcher>,
     #[cfg(feature = "webmentions")]
     pub wm_sender: JobSender,
     /// Shared HTTP client (used for all outbound requests: GitHub enrichment,

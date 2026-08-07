@@ -6,7 +6,7 @@ pub(crate) mod helpers {
 
     use crate::config::Config;
     use crate::db::pool::{create_pool, run_migrations};
-    use crate::db::repo::CommentsRepo;
+    use crate::db::repo::Repo;
     use crate::github::{GitHubLookup, StubGitHub};
     use crate::state::AppState;
     use crate::state::Limiter;
@@ -48,50 +48,62 @@ pub(crate) mod helpers {
         let path = dir.path().join("test.db");
         let pool = create_pool(&path.to_string_lossy()).expect("pool");
         run_migrations(&pool).expect("migrations");
-        let repo = CommentsRepo::new(pool.clone());
+        let repo = Repo::new(pool.clone());
         #[cfg(feature = "webmentions")]
         let (wm_sender, rx) = worker::channel(64);
         #[cfg(feature = "webmentions")]
         worker::spawn_worker(rx);
 
+        let config = Config {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            public_target_origin: "https://nithitsuki.com".to_string(),
+            allowed_cors_origin: "https://nithitsuki.com".to_string(),
+            admin_token: "test".to_string(),
+            database_path: ":memory:".to_string(),
+            github_token: None,
+            max_content_len: 2000,
+            max_author_len: 100,
+            max_body_size: 8192,
+            fetch_timeout_ms: 4000,
+            worker_backlog: 64,
+            rust_log: "info".to_string(),
+            honeypot_field: "website".to_string(),
+            max_comments_per_ip_per_day: 50,
+            max_webmentions_per_domain_per_hour: 10,
+            store_ip_address: false,
+            ip_hash_secret: None,
+            moderation_webhook_url: None,
+            moderation_webhook_mode: "async".to_string(),
+            default_comment_status: "pending".to_string(),
+            max_thread_depth: 0,
+            turnstile_enabled,
+            turnstile_secret_key: turnstile_secret,
+            turnstile_verify_url,
+            rate_limit_native_burst: 50,
+            rate_limit_native_window_secs: 60,
+            rate_limit_webmention_burst: 30,
+            rate_limit_webmention_window_secs: 60,
+            rate_limit_read_burst: 60,
+            rate_limit_read_window_secs: 60,
+            rate_limit_admin_moderate_burst: 10,
+            rate_limit_admin_moderate_window_secs: 60,
+            telegram_bot_token: None,
+            telegram_chat_id: None,
+            telegram_api_base: "https://api.telegram.org".to_string(),
+            slack_webhook_url: None,
+            discord_webhook_url: None,
+            notify_batch_secs: 0,
+            notify_batch_threshold: 0,
+            notify_batch_granularity: "page".to_string(),
+        };
+        let notifier = Arc::new(crate::notify::NotificationBatcher::new(&config));
+
         let state = AppState {
-            config: Config {
-                bind_addr: "127.0.0.1:0".parse().unwrap(),
-                public_target_origin: "https://nithitsuki.com".to_string(),
-                allowed_cors_origin: "https://nithitsuki.com".to_string(),
-                admin_token: "test".to_string(),
-                database_path: ":memory:".to_string(),
-                github_token: None,
-                max_content_len: 2000,
-                max_author_len: 100,
-                max_body_size: 8192,
-                fetch_timeout_ms: 4000,
-                worker_backlog: 64,
-                rust_log: "info".to_string(),
-                honeypot_field: "website".to_string(),
-                max_comments_per_ip_per_day: 50,
-                max_webmentions_per_domain_per_hour: 10,
-                store_ip_address: false,
-                ip_hash_secret: None,
-                moderation_webhook_url: None,
-                moderation_webhook_mode: "async".to_string(),
-                default_comment_status: "pending".to_string(),
-                max_thread_depth: 0,
-                turnstile_enabled,
-                turnstile_secret_key: turnstile_secret,
-                turnstile_verify_url,
-                rate_limit_native_burst: 50,
-                rate_limit_native_window_secs: 60,
-                rate_limit_webmention_burst: 30,
-                rate_limit_webmention_window_secs: 60,
-                rate_limit_read_burst: 60,
-                rate_limit_read_window_secs: 60,
-                rate_limit_admin_moderate_burst: 10,
-                rate_limit_admin_moderate_window_secs: 60,
-            },
+            config,
             pool,
             repo,
             github,
+            notifier,
             #[cfg(feature = "webmentions")]
             wm_sender,
             http_client: reqwest::Client::builder()
@@ -100,6 +112,44 @@ pub(crate) mod helpers {
             limiter: Arc::new(Limiter::new()),
         };
 
+        (state, dir)
+    }
+
+    /// Like `test_state` but with Telegram and Slack notifications pointed at
+    /// the given endpoints (typically wiremock servers). Notifications are
+    /// immediate (`NOTIFY_BATCH_SECS = 0`).
+    pub fn test_state_with_notifications(
+        telegram_api_base: String,
+        slack_webhook_url: Option<String>,
+    ) -> (AppState, TempDir) {
+        let (mut state, dir) = test_state();
+        state.config.telegram_bot_token = Some("TESTTOKEN123:test-secret".to_string());
+        state.config.telegram_chat_id = Some("@test_alerts".to_string());
+        state.config.telegram_api_base = telegram_api_base;
+        state.config.slack_webhook_url = slack_webhook_url;
+        state.notifier = Arc::new(crate::notify::NotificationBatcher::new(&state.config));
+        (state, dir)
+    }
+
+    /// Like `test_state` but with batched notifications: the given window and
+    /// threshold, Telegram pointed at `telegram_api_base`, plus Discord when
+    /// `discord_webhook_url` is provided.
+    pub fn test_state_with_batcher(
+        batch_secs: u64,
+        batch_threshold: u32,
+        granularity: &str,
+        telegram_api_base: String,
+        discord_webhook_url: Option<String>,
+    ) -> (AppState, TempDir) {
+        let (mut state, dir) = test_state();
+        state.config.telegram_bot_token = Some("TESTTOKEN123:test-secret".to_string());
+        state.config.telegram_chat_id = Some("@test_alerts".to_string());
+        state.config.telegram_api_base = telegram_api_base;
+        state.config.notify_batch_secs = batch_secs;
+        state.config.notify_batch_threshold = batch_threshold;
+        state.config.notify_batch_granularity = granularity.to_string();
+        state.config.discord_webhook_url = discord_webhook_url;
+        state.notifier = Arc::new(crate::notify::NotificationBatcher::new(&state.config));
         (state, dir)
     }
 

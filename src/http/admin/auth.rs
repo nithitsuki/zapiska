@@ -1,0 +1,102 @@
+//! Admin authentication: Bearer-header or cookie token check, login/logout.
+
+use axum::Json;
+use axum::extract::State;
+use axum::http::Request;
+use axum::http::header;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
+
+use super::validate_token;
+use crate::error::AppError;
+use crate::state::AppState;
+
+fn extract_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
+    for pair in cookie_header.split(';') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next()?.trim();
+        let val = parts.next()?;
+        if key.eq_ignore_ascii_case(name) {
+            return Some(val.trim());
+        }
+    }
+    None
+}
+
+fn set_cookie_value(token: &str, max_age_secs: i64) -> String {
+    format!(
+        "admin_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        token, max_age_secs
+    )
+}
+
+// ── Auth middleware ──────────────────────────────────────────
+
+pub async fn admin_auth(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, AppError> {
+    let expected = state.config.admin_token.as_bytes();
+
+    let token = {
+        let header = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let t = header.strip_prefix("Bearer ").unwrap_or("");
+        if !t.is_empty() && validate_token(t.as_bytes(), expected) {
+            return Ok(next.run(req).await);
+        }
+
+        let cookie_header = req
+            .headers()
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        extract_cookie(cookie_header, "admin_token")
+    };
+
+    match token {
+        Some(t) if validate_token(t.as_bytes(), expected) => Ok(next.run(req).await),
+        _ => Err(AppError::Unauthorized),
+    }
+}
+
+// ── POST /api/admin/login ───────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub token: String,
+}
+
+pub async fn login(
+    State(state): State<AppState>,
+    Json(body): Json<LoginRequest>,
+) -> Result<Response, AppError> {
+    let expected = state.config.admin_token.as_bytes();
+    let actual = body.token.as_bytes();
+
+    if !validate_token(actual, expected) {
+        return Err(AppError::Unauthorized);
+    }
+
+    let cookie = set_cookie_value(&body.token, 2592000);
+
+    let mut resp = Json(serde_json::json!({"success": true})).into_response();
+    resp.headers_mut()
+        .insert(header::SET_COOKIE, cookie.parse().unwrap());
+    Ok(resp)
+}
+
+// ── POST /api/admin/logout ──────────────────────────────────
+
+pub async fn logout() -> Response {
+    let cookie = set_cookie_value("", 0);
+    let mut resp = Json(serde_json::json!({"success": true})).into_response();
+    resp.headers_mut()
+        .insert(header::SET_COOKIE, cookie.parse().unwrap());
+    resp
+}

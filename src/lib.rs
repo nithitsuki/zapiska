@@ -8,6 +8,7 @@ pub mod http;
 pub mod ip_hash;
 #[cfg(feature = "webmentions")]
 pub mod mf2;
+pub mod notify;
 pub mod openapi;
 pub mod sanitize;
 #[cfg(feature = "webmentions")]

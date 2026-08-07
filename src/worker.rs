@@ -4,10 +4,11 @@ use reqwest::Client;
 use tokio::sync::mpsc;
 use url::Url;
 
-use crate::db::repo::{CommentsRepo, NewComment, NewWebmentionSeen};
+use crate::db::repo::{NewComment, NewWebmentionSeen, Repo};
 use crate::github::{GitHubLookup, Profile};
 use crate::http::reqwest_client::{FetchError, fetch_url};
 use crate::mf2::{ParsedMention, has_backlink, parse_h_entry};
+use crate::notify::{NewCommentInfo, NotificationBatcher};
 use crate::sanitize;
 use crate::ssrf::registrable_domain;
 
@@ -53,14 +54,16 @@ pub fn spawn_worker(mut rx: JobReceiver) {
 }
 
 /// Spawn the background worker that processes webmention jobs.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_worker_for_state(
     mut rx: JobReceiver,
-    repo: CommentsRepo,
+    repo: Repo,
     client: Client,
     github: Arc<dyn GitHubLookup>,
     target_origin: String,
     max_content_len: usize,
     _timeout_ms: u64,
+    notifier: Arc<NotificationBatcher>,
 ) {
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -72,6 +75,7 @@ pub fn spawn_worker_for_state(
                 &target_origin,
                 max_content_len,
                 false,
+                &notifier,
             )
             .await
             {
@@ -86,14 +90,16 @@ pub fn spawn_worker_for_state(
 
 /// Process a single webmention job. Exposed as `pub` so integration tests can
 /// call it directly. `allow_loopback` relaxes the SSRF check for mock servers.
+#[allow(clippy::too_many_arguments)]
 pub async fn process_job(
     job: &WebmentionJob,
-    repo: &CommentsRepo,
+    repo: &Repo,
     client: &Client,
     github: &Arc<dyn GitHubLookup>,
     target_origin: &str,
     max_content_len: usize,
     allow_loopback: bool,
+    notifier: &Arc<NotificationBatcher>,
 ) -> Result<(), WorkerError> {
     let target_path = derive_target_path(&job.target, target_origin)?;
 
@@ -153,6 +159,9 @@ pub async fn process_job(
     };
 
     // 7. Upsert into comments table. Webmentions are always top-level.
+    //    Only the *first* sighting of a source is a new comment — later pings
+    //    are updates and shouldn't spam the admin notification channels.
+    let is_new = repo.get_comment_by_source(&job.source).await?.is_none();
     let comment_id = repo
         .upsert_by_source(NewComment {
             target_path,
@@ -171,6 +180,25 @@ pub async fn process_job(
             content_hash: None,
         })
         .await?;
+
+    // 7.5 Notify admin channels about the new mention (batched digests).
+    if is_new && notifier.has_channels() {
+        if let Ok(Some(comment)) = repo.get_comment(comment_id).await {
+            notifier.push(
+                client,
+                NewCommentInfo {
+                    id: comment.id,
+                    target_path: comment.target_path,
+                    comment_type: "webmention".to_string(),
+                    author_name: comment.author_name,
+                    author_url: comment.author_url,
+                    content: comment.content,
+                    honeypot: false,
+                    is_reply: false,
+                },
+            );
+        }
+    }
 
     // 8. Record in webmention_seen as alive.
     repo.upsert_webmention_seen(NewWebmentionSeen {
@@ -233,26 +261,12 @@ async fn resolve_github(
     github: &Arc<dyn GitHubLookup>,
 ) -> (String, Option<String>) {
     if let Some(url) = author_url
-        && let Some(username) = extract_github_username(url)
+        && let Some(username) = crate::github::extract_github_username(url)
         && let Some(Profile { name, avatar_url }) = github.lookup(&username).await
     {
         return (name, Some(avatar_url));
     }
     (author_name.to_string(), None)
-}
-
-/// Extract GitHub username from a URL like `https://github.com/username`.
-fn extract_github_username(url: &str) -> Option<String> {
-    let parsed = Url::parse(url).ok()?;
-    let host = parsed.host_str()?;
-    if host != "github.com" && host != "www.github.com" {
-        return None;
-    }
-    let username = parsed.path().trim_start_matches('/').split('/').next()?;
-    if username.is_empty() {
-        return None;
-    }
-    Some(username.to_string())
 }
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -275,7 +289,7 @@ fn derive_target_path(target: &str, target_origin: &str) -> Result<String, Worke
 }
 
 /// Handle a 410 Gone source: mark as gone in webmention_seen and delete the comment.
-async fn handle_gone_source(job: &WebmentionJob, repo: &CommentsRepo) {
+async fn handle_gone_source(job: &WebmentionJob, repo: &Repo) {
     let _ = repo
         .upsert_webmention_seen(NewWebmentionSeen {
             source: job.source.clone(),
