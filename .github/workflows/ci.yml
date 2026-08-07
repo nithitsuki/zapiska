@@ -15,11 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --check
       - name: Clippy
@@ -29,29 +28,116 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --verbose
       - name: Run tests
         run: cargo test --verbose
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, test]
+  # Feature-combo job: the `webmentions` feature gates whole modules
+  # (worker, SSRF, mf2, avatar). The comments-only build catches
+  # feature-gate regressions the default build can't see.
+  test-comments-only:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (comments only)
+        run: cargo build --no-default-features --features comments --verbose
+      - name: Run tests (comments only)
+        run: cargo test --no-default-features --features comments --verbose
+
+  # ── Release: cross-platform binaries, attached to the GitHub release ──
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test, test-comments-only]
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-x86_64-musl
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            apt: musl-tools
+          - name: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            apt: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross C toolchain (linux)
+        if: runner.os == 'Linux' && matrix.apt != ''
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Point bundled sqlite at the cross compiler (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       - name: Build release binary
-        run: cargo build --release --verbose
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/zapiska.exe dist/ 2>/dev/null || \
+            cp target/${{ matrix.target }}/release/zapiska dist/
+          cp README.md dist/
+          tar -czf zapiska-${{ matrix.name }}.tar.gz -C dist .
       - name: Upload release
         uses: softprops/action-gh-release@v3
         with:
-          files: target/release/zapiska
+          files: zapiska-*.tar.gz
           generate_release_notes: true
+
+  # ── Release: multi-arch Docker image on GHCR ──
+  docker-publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test, test-comments-only]
+    permissions:
+      packages: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

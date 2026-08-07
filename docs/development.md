@@ -45,6 +45,17 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
+## CI/CD (GitHub Actions)
+
+`.github/workflows/ci.yml` runs on push to `main` and on PRs:
+
+- **lint** — fmt + clippy (`-D warnings`).
+- **test** — default features, full suite.
+- **test-comments-only** — `--no-default-features --features comments`; catches feature-gate regressions (the `webmentions` feature gates whole modules).
+- On `v*` tags only: **release** builds six cross-platform binaries (linux gnu/musl/arm64, windows msvc, macos arm64/x86_64) and attaches tarballs to the GitHub release; **docker-publish** builds a multi-arch (amd64/arm64) image and pushes `ghcr.io/<repo>:{version}`, `{major}.{minor}`, and `latest`.
+
+`rusqlite` is compiled with the `bundled` feature, so no system SQLite is needed on any runner (or in the Docker build).
+
 ## Running locally
 
 ```sh
