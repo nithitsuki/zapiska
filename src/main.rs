@@ -188,7 +188,7 @@ fn check_db_quick(pool: &pool::SqlitePool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_db_quick, is_public_bind};
+    use super::{check_db_quick, is_public_bind, public_bind_warning};
     use zapiska::db::pool::{create_pool, run_migrations};
 
     #[test]

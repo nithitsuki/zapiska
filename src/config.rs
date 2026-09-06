@@ -125,6 +125,14 @@ pub struct Config {
     /// emoji-only comments pass), "never" (emoji-heavy rejected), or
     /// "if_unknown" (emoji-heavy pass, other undetectable text rejected).
     pub comment_lang_allow_emoji: String,
+    /// Whether the server sits behind a trusted reverse proxy that sets
+    /// client-IP headers. When `false` (default), `X-Forwarded-For`,
+    /// `X-Real-IP`, and `Forwarded` are ignored and rate limits, quotas, and
+    /// IP hashes key on the TCP peer address (spoof-proof). Set to `true`
+    /// only when a proxy you control overwrites those headers — then the
+    /// leftmost `X-Forwarded-For` entry (else `X-Real-IP`, else `Forwarded
+    /// for=`) identifies the client. See `src/http/peer.rs`.
+    pub trust_proxy: bool,
 }
 
 #[derive(Debug, Error)]
@@ -275,6 +283,7 @@ impl Default for Config {
             comment_lang_allowed: Vec::new(),
             comment_lang_blocked: Vec::new(),
             comment_lang_allow_emoji: "always".to_string(),
+            trust_proxy: false,
         }
     }
 }
@@ -582,6 +591,7 @@ impl Config {
             comment_lang_allowed,
             comment_lang_blocked,
             comment_lang_allow_emoji,
+            trust_proxy: env_bool("TRUST_PROXY", defaults.trust_proxy),
         })
     }
 
@@ -648,6 +658,7 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 comment_lang_allowed: {:?}, \
                 comment_lang_blocked: {:?}, \
                 comment_lang_allow_emoji: {}, \
+                trust_proxy: {}, \
                 rust_log: {} \
             }}",
             self.0.bind_addr,
@@ -718,6 +729,7 @@ impl std::fmt::Display for RedactedConfig<'_> {
             self.0.comment_lang_allowed,
             self.0.comment_lang_blocked,
             self.0.comment_lang_allow_emoji,
+            self.0.trust_proxy,
             self.0.rust_log,
         )
     }
@@ -779,6 +791,7 @@ mod tests {
         "COMMENT_LANG_ALLOWED",
         "COMMENT_LANG_BLOCKED",
         "COMMENT_LANG_ALLOW_EMOJI",
+        "TRUST_PROXY",
     ];
 
     struct EnvCleaner {
@@ -1279,6 +1292,27 @@ mod tests {
     }
 
     #[test]
+    fn trust_proxy_defaults_off_and_parses_bool() {
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            assert!(
+                !Config::from_env().unwrap().trust_proxy,
+                "proxy headers must be ignored unless TRUST_PROXY is set"
+            );
+        });
+        for val in ["true", "TRUE", "1"] {
+            with_env(&[("ADMIN_TOKEN", "test"), ("TRUST_PROXY", val)], || {
+                assert!(
+                    Config::from_env().unwrap().trust_proxy,
+                    "TRUST_PROXY={val} must enable proxy-header trust"
+                );
+            });
+        }
+        with_env(&[("ADMIN_TOKEN", "test"), ("TRUST_PROXY", "false")], || {
+            assert!(!Config::from_env().unwrap().trust_proxy);
+        });
+    }
+
+    #[test]
     fn redacted_display_hides_admin_and_github_tokens() {
         let config = Config {
             bind_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -1328,6 +1362,7 @@ mod tests {
             comment_lang_blocked: Vec::new(),
             comment_lang_allow_emoji: "always".to_string(),
             db_quick_check: true,
+            trust_proxy: false,
         };
         let rendered = format!("{}", config.redacted_display());
         assert!(

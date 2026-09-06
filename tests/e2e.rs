@@ -320,7 +320,8 @@ async fn e2e_rate_limit_blocks_flood_native() {
         ("content", "spam"),
     ]);
 
-    // Burst is 50 (see governor_config(60, 50) in layers.rs). Send 51 requests total.
+    // Burst is 50 (see governor_config(burst, window_secs, trust_proxy) in
+    // layers.rs; e2e overrides only the burst). Send 51 requests total.
     let burst = 50;
     for _ in 0..burst {
         let resp = client

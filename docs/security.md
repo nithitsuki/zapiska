@@ -61,14 +61,35 @@ log. Do not put the token in source control.
 ## Rate limits
 
 Rate limits use the TCP peer address. The server does not trust
-`X-Forwarded-For`.
+Client identity comes from one seam (`src/http/peer.rs`): the TCP peer
+address, normalized so IPv4-mapped IPv6 (`::ffff:1.2.3.4`) canonicalizes to
+By default the server does not trust `X-Forwarded-For`, `X-Real-IP`, or
+`Forwarded` — spoofed headers are ignored. Set `TRUST_PROXY=true` only when
+a reverse proxy you control overwrites those headers; the server then reads
+the leftmost `X-Forwarded-For` entry, else `X-Real-IP`, else the first
+`Forwarded for=`, else the peer. Behind a proxy without `TRUST_PROXY`,
+every visitor shares the proxy's address and one quota.
 
-| Route group | Default burst | Default window |
-|---|---:|---:|
-| Native comment submission, deletion, and reactions | 50 | 60 seconds |
-| Webmention ingress | 30 | 60 seconds |
-| Public comments and RSS | 60 | 60 seconds |
-| Single comment moderation | 10 | 60 seconds |
+Upgrade note: IPv4-mapped peers (`::ffff:a.b.c.d`, seen on non-default
+dual-stack binds) now key and hash as plain IPv4. The in-memory per-IP
+daily caps reset on the upgrade restart (as on any restart). Anyone-mode
+reaction identifiers stored under the old mapped hash no longer match —
+affected users re-react and the orphaned rows stay. With
+`STORE_IP_ADDRESS=true`, new `submitter_ip_hash` rows use the normalized
+form while history keeps the mapped form. No code migration is provided:
+this bites only non-default dual-stack binds combined with anyone-mode
+reactions or IP storage.
+
+| Route group | Default burst | Default window | Sustained |
+|---|---:|---:|---:|
+| Native comment submission, deletion, and reactions | 100 | 60 seconds | 1.67/s |
+| Webmention ingress | 60 | 60 seconds | 1.00/s |
+| Public comments and RSS | 300 | 60 seconds | 5.00/s |
+| Single comment moderation | 30 | 60 seconds | 0.50/s |
+| Login, batch moderation, reaction moderation, export (own bucket each) | 30 | 60 seconds | 0.50/s |
+
+<!-- RATE-LIMITS: native=100/60 webmention=60/60 read=300/60 admin=30/60 -->
+
 
 The native comment, deletion, and reaction routes share the native limit. The
 comments and RSS routes share the read limit. The single moderation route has
@@ -76,6 +97,10 @@ the admin moderation limit. The login, batch moderation, single reaction
 moderation, and export routes share those same admin moderation values with
 their own per-route buckets.
 Other admin routes do not have this governor.
+
+Both the governor 429s and the handler-side quota 429s return the documented
+JSON shape (`{"error", "code": "rate_limited"}`) with a `Retry-After`
+header. See [API](api.md).
 
 The in-memory limiter also applies these caps:
 

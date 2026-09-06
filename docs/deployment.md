@@ -221,9 +221,16 @@ comments.your-site.example {
 }
 ```
 
-The rate limiter uses the TCP peer address. A reverse proxy can make many
-visitors share one peer address. Use a deployment path that preserves the
-client address when per-client limits matter.
+The rate limiter keys on one normalized client identity per request
+(`src/http/peer.rs`): the TCP peer address, with IPv4-mapped IPv6
+canonicalized to IPv4. A reverse proxy makes many visitors share one peer
+address and one quota. Set `TRUST_PROXY=true` only when the proxy
+overwrites the client-IP headers — the server then reads the leftmost
+`X-Forwarded-For` entry, else `X-Real-IP`, else the first `Forwarded for=`,
+else the peer. The edge must overwrite, not append: with append-only
+forwarding any client can send its own `X-Forwarded-For` and pick another
+client's identity and quota. (`proxy_set_header` in the nginx snippet above
+overwrites; confirm the same for any other edge before enabling the flag.)
 
 ## systemd
 

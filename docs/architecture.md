@@ -228,6 +228,12 @@ the protected admin group after it, so admin responses never advertise CORS.
 The ordering invariant is that function boundary, covered by a test that
 asserts every listed admin path lacks CORS headers.
 
+Client identity (`src/http/peer.rs`) resolves the caller to one normalized
+peer address per request (IPv4-mapped addresses canonicalize to IPv4).
+Governors (via `ClientIdentityExtractor`), the in-memory `Limiter`, and IP
+hashing all consume that identity, so proxy handling (`TRUST_PROXY`) flips
+in one place without touching handlers.
+
 The public router also contains health, embed, Swagger, and session routes.
 The protected admin route group is merged after the CORS layer. Admin routes
 do not advertise CORS.

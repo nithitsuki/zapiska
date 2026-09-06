@@ -3,6 +3,7 @@ pub(crate) mod comment_post;
 pub(crate) mod comments_read;
 pub(crate) mod feed;
 mod layers;
+pub(crate) mod peer;
 pub(crate) mod reactions;
 #[cfg(feature = "webmentions")]
 pub mod reqwest_client;
@@ -285,6 +286,52 @@ mod tests {
             429,
             "mapped and plain loopback must share one bucket"
         );
+    }
+
+    #[tokio::test]
+    async fn xff_spoof_ignored_for_identity_when_trust_proxy_unset() {
+        // 02-B2: with TRUST_PROXY unset (default), a spoofed X-Forwarded-For
+        // must not change the stored identity — the TCP peer is used.
+        let (mut state, _dir) = test_state();
+        state.config.store_ip_address = true;
+        let app = build_app(state.clone());
+        let mut req = helpers::form_request(
+            "/api/comment",
+            "target_path=/spoof&author_name=S&content=hi",
+        );
+        req.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("9.9.9.9"));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 201);
+        let pending = state.repo.list_pending(10, None, None).await.unwrap();
+        let c = pending.iter().find(|c| c.target_path == "/spoof").unwrap();
+        assert_eq!(c.submitter_ip.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn xff_honored_for_identity_when_trust_proxy_set() {
+        // With TRUST_PROXY set, the leftmost X-Forwarded-For entry identifies
+        // the client for quotas, hashes, and stored IPs.
+        let (mut state, _dir) = test_state();
+        state.config.store_ip_address = true;
+        state.config.trust_proxy = true;
+        let app = build_app(state.clone());
+        let mut req = helpers::form_request(
+            "/api/comment",
+            "target_path=/proxied&author_name=P&content=hi",
+        );
+        req.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("9.9.9.9, 10.0.0.1"),
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 201);
+        let pending = state.repo.list_pending(10, None, None).await.unwrap();
+        let c = pending
+            .iter()
+            .find(|c| c.target_path == "/proxied")
+            .unwrap();
+        assert_eq!(c.submitter_ip.as_deref(), Some("9.9.9.9"));
     }
 
     #[tokio::test]
@@ -656,19 +703,6 @@ mod tests {
         assert!(methods.contains("POST"));
     }
 
-            use tower_governor::key_extractor::PeerIpKeyExtractor;
-
-                .key_extractor(PeerIpKeyExtractor)
-                .finish()
-                .expect("valid")
-        };
-
-        let app = Router::new()
-            .route(
-                "/api/comment",
-                axum::routing::post(|| async {
-                    (axum::http::StatusCode::NOT_IMPLEMENTED, "not implemented")
-                })
     // ── GET /api/comments tests ─────────────────────────────
 
     async fn seed_comment(state: &AppState, path: &str, author: &str, status: &str) {

@@ -139,6 +139,25 @@ All notable changes to zapiska are documented here. The format follows
   defaults (100/60/300/30, not the stale 50/30/60/10) with sustained-rate
   columns and login/batch/export rows. A config-level test re-derives the
   tables from `Config::default`, so doc/code drift fails the suite.
+- One client-identity seam (`src/http/peer.rs`): each request resolves to a
+  single normalized peer address (IPv4-mapped IPv6 canonicalizes to IPv4)
+  consumed by the governors, the in-memory `Limiter`, and IP hashing
+  (submission, anyone-mode reactions, import re-derivation). A client on a
+  mapped address no longer gets a double quota or a mismatched hash.
+- New `TRUST_PROXY` flag (default `false`): unset, `X-Forwarded-For`,
+  `X-Real-IP`, and `Forwarded` are ignored (spoof-proof); set, the leftmost
+  `X-Forwarded-For` entry (else `X-Real-IP`, else `Forwarded for=`) identifies
+  the client. Enable only behind a proxy you control that overwrites those
+  headers.
+- Upgrade note (client-identity normalization): `::ffff:a.b.c.d` peers now
+  key and hash as `a.b.c.d`. The in-memory per-IP daily caps reset on the
+  upgrade restart (as on any restart), so no quota action is needed.
+  Anyone-mode reaction identifiers stored under the old mapped hash no
+  longer match — affected users re-react and the orphaned rows stay. With
+  `STORE_IP_ADDRESS=true`, new `submitter_ip_hash` rows use the normalized
+  form while history keeps the mapped form. No code migration is provided:
+  this bites only non-default dual-stack binds combined with anyone-mode
+  reactions or IP storage.
 
 ## [0.2.0] - 2026-08-07
 
