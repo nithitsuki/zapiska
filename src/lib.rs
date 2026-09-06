@@ -15,6 +15,7 @@ pub mod ip_hash;
 pub mod language;
 #[cfg(feature = "webmentions")]
 pub mod mf2;
+pub mod moderation;
 pub mod notify;
 pub mod openapi;
 pub mod sanitize;

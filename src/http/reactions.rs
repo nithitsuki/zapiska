@@ -20,6 +20,7 @@ use serde::Deserialize;
 use crate::error::AppError;
 use crate::http::admin::request_has_admin_token;
 use crate::http::peer::ClientIdentity;
+use crate::moderation::ModerationSink as _;
 use crate::state::AppState;
 
 /// Identifier used for admin reactions (in either mode).
@@ -88,48 +89,28 @@ pub async fn add_reaction(
         .await?;
 
     // Notify the moderation engine (async or sync, like comments).
+    // One payload builder + one sink with sync/async adapters (shared with
+    // native comments); the `action` whitelist is the `Status` parse.
     let mut final_status = "pending".to_string();
     if let Some(ref webhook_url) = state.config.moderation_webhook_url {
-        let payload = serde_json::json!({
-            "event": "reaction.created",
-            "id": reaction_id,
-            "comment_id": comment_id,
-            "reaction": body.reaction,
-            "status": "pending",
-            "target_path": comment.target_path,
-            "is_admin": is_admin,
-            "admin_url": "/api/admin/reactions",
-        });
+        let payload = crate::moderation::reaction_created_payload(
+            reaction_id,
+            comment_id,
+            &body.reaction,
+            &comment.target_path,
+            is_admin,
+        );
+        let sink = crate::moderation::WebhookSink::created_sink(&state.http_client, webhook_url);
         if state.config.moderation_webhook_mode == "sync" {
-            match state
-                .http_client
-                .post(webhook_url)
-                .json(&payload)
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await
-            {
-                Ok(r) if r.status().is_success() => {
-                    if let Ok(decision) = r.json::<serde_json::Value>().await {
-                        if let Some(action) = decision["action"].as_str() {
-                            if matches!(action, "approved" | "spam" | "deleted" | "pending") {
-                                let _ =
-                                    state.repo.update_reaction_status(reaction_id, action).await;
-                                final_status = action.to_string();
-                            }
-                        }
-                    }
-                }
-                Ok(r) => tracing::warn!(
-                    webhook = %webhook_url, status = %r.status(),
-                    "sync reaction webhook returned error"
-                ),
-                Err(e) => {
-                    tracing::warn!(webhook = %webhook_url, err = %e, "sync reaction webhook failed")
-                }
+            if let Some(decision) = sink.decide(&payload).await {
+                let _ = state
+                    .repo
+                    .update_reaction_status(reaction_id, decision.as_str())
+                    .await;
+                final_status = decision.to_string();
             }
         } else {
-            crate::http::webhook::fire(&state.http_client, webhook_url, payload, 10);
+            sink.emit(payload);
         }
     }
 
@@ -554,6 +535,52 @@ mod tests {
         assert_eq!(
             body["comments"][0]["reactions"],
             serde_json::json!({"👍": 1})
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_webhook_invalid_action_keeps_reaction_pending() {
+        // M7: an invalid sync decision is ignored at the HTTP layer (not just
+        // in the unit-tested parser) — the row stays pending, no event.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"action": "publish"})),
+            )
+            .mount(&server)
+            .await;
+
+        let (mut state, _dir) = helpers::test_state();
+        state.config.moderation_webhook_url = Some(format!("{}/hook", server.uri()));
+        state.config.moderation_webhook_mode = "sync".to_string();
+        let id = seed_approved(&state).await;
+        let app = build_app(state.clone());
+
+        let resp = app
+            .oneshot(reaction_request(
+                axum::http::Method::POST,
+                &format!("/api/comment/{id}/reaction"),
+                Some(r#"{"reaction":"👍"}"#),
+                true,
+                [127, 0, 0, 1],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(body["status"], "pending", "invalid action ignored");
+        assert_eq!(
+            state
+                .repo
+                .list_reactions(Some("pending"), 10, None)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "row stays pending"
         );
     }
 

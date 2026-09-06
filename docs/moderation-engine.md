@@ -130,6 +130,57 @@ Reaction status changes use `event: reaction.status_changed`.
 }
 ```
 
+Comment status changes use `event: comment.status_changed`, with the same
+shape minus the reaction fields:
+
+```json
+{
+  "event": "comment.status_changed",
+  "id": 42,
+  "old_status": "pending",
+  "new_status": "approved",
+  "changed_by": "admin"
+}
+```
+
+Every moderation path emits exactly one event per actual change: single
+moderate, batch moderate (each item independently), self-service delete by
+token (`changed_by: "self"`), and reaction moderate (single and batch).
+A same-status change is a no-op and emits nothing. `changed_by` is `admin`
+for admin API calls, `webhook` for sync-webhook decisions, and `self` for
+owner deletes.
+
+## Status machine
+
+The four statuses (`pending`, `approved`, `spam`, `deleted`) form one
+machine: `deleted` is terminal except via admin re-approve. Only the admin
+API may move a row out of `deleted`; the sync webhook can never revive a
+deleted row (its decision is ignored for those rows); owners may only delete
+live rows, never revive or re-queue them.
+
+Re-approving a self-deleted comment through the admin API clears its delete
+token in the same commit, so the old token cannot delete the revived
+comment. The flip side is intentional: an admin revive resurrects
+self-deleted content and the cleared token stays dead — there is no
+`deleted_by` column recording who deleted what.
+
+Pending→approved reaction approvals compare-and-swap on the reviewed emoji:
+pass the seen value as `expected_emoji` (`POST
+/api/admin/reactions/moderate` and each batch item accept it); a stale value
+is rejected with 400 so the moderator re-reads instead of approving
+sight-unseen, while an absent value approves whatever is currently stored,
+as before. Approvals from `spam`/`deleted` are explicit overrides and use a
+plain write. Two overlapping approves of the same pending reaction admit one
+winner — the loser gets the same 400 instead of emitting a duplicate event.
+
+A same-status change is a no-op: it performs no write (so `updated_at` is
+left alone, unlike the old always-write path) and emits no event (the old
+reaction-moderate path emitted even when nothing changed).
+
+Sync `*.created` decisions apply to just-created (hence live) rows only, so
+they stay on the plain write path; folding them into the machine is T19's
+hookup point, not this change.
+
 ## Authenticate
 
 Send the admin token with every protected request:
@@ -254,6 +305,8 @@ curl -X POST \
 ```
 
 The batch route processes each item independently. Use it for polling jobs.
+Each changed item emits one `comment.status_changed` event, like the single
+route; unchanged and failed items emit nothing.
 Over the throttle budget the batch routes answer `429` with a `Retry-After`
 header but a plain-text body (not the JSON error shape): polling jobs must
 read the headers, not parse the body.
@@ -267,6 +320,11 @@ curl -X POST \
   -d '{"id":7,"action":"approved"}' \
   http://localhost:3000/api/admin/reactions/moderate
 ```
+
+Pass the reviewed emoji as `expected_emoji` to guard the approve
+(`{"id":7,"action":"approved","expected_emoji":"👍"}`); a stale value
+answers 400 so the moderator re-reads. Batch items accept the same optional
+field per item.
 
 ## Python rules engine
 

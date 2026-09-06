@@ -66,6 +66,12 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Fixed
 
+- Batch comment moderation now emits one `comment.status_changed` event per
+  changed item (the documented engine polling path previously fired
+  nothing), and self-service delete by token emits one as well (previously
+  silent). Same-status changes emit nothing on every path. Re-approving a
+  self-deleted comment through the admin API clears its delete token in the
+  same commit, so the old token cannot delete the revived comment.
 - Closed the unauthenticated SSRF hole in native-comment avatar fetch:
   `author_url` pages are now fetched through `SafeFetcher`
   (`src/fetch.rs`), the single guarded door also used by webmention
@@ -203,6 +209,21 @@ All notable changes to zapiska are documented here. The format follows
   list plus total plus reaction counts per request the same way. Import stays
   per-row. Follow-up (not fixed here): pool `max_size`/`get_timeout` (B-12)
   — pool acquisition still waits without a timeout.
+- Moderation is now one status machine (`src/moderation.rs`): a `Status`
+  enum (`pending`/`approved`/`spam`/`deleted`, parsed at the boundary,
+  stored as text as before) replaces the five hand-written action
+  whitelists, and `Moderation::transition` owns validity, the status write,
+  and the webhook emission. `deleted` is terminal except via admin
+  re-approve (the webhook can never revive, owners can only delete); an
+  admin revive clears the delete token in the same commit. One
+  `ModerationSink` (async fire + 10 s sync decision adapters) with one
+  payload builder replaces the two copy-pasted sync loops and four
+  hand-built payloads; event schemas are unchanged. Pending→approved
+  reaction approvals compare-and-swap on the reviewed emoji (`expected_emoji`
+  on the single and batch reaction routes: stale values are rejected with
+  400, absent behaves as before), so an emoji change racing an approval keeps
+  the new emoji pending; approvals from `spam`/`deleted` are explicit
+  overrides via plain write.
 
 ## [0.2.0] - 2026-08-07
 

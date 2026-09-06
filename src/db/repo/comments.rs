@@ -507,6 +507,31 @@ impl Repo {
             .await
     }
 
+    /// Set a comment's moderation status, optionally retiring its delete
+    /// token in the SAME `BEGIN IMMEDIATE` commit (T16/B10: an admin revive
+    /// out of `deleted` must never leave a torn approved-with-live-token
+    /// row). Single-step callers pass `clear_delete_token = false`.
+    pub async fn set_comment_status(
+        &self,
+        id: i64,
+        status: &str,
+        clear_delete_token: bool,
+    ) -> RepoResult<()> {
+        let status = status.to_string();
+        self.with_tx(move |tx| {
+            update_status_on_conn(tx, id, &status)?;
+            if clear_delete_token {
+                tx.execute(
+                    "UPDATE comments SET delete_token = NULL WHERE id = ?1",
+                    params![id],
+                )
+                .map_err(RepoError::from)?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn get_comment(&self, id: i64) -> RepoResult<Option<Comment>> {
         self.spawn(move |conn| {
             let sql = select_comments("id = ?1", "id ASC");

@@ -12,6 +12,7 @@ use crate::db::repo::NewComment;
 use crate::error::AppError;
 use crate::github::GitHubLookup;
 use crate::http::peer::ClientIdentity;
+use crate::moderation::ModerationSink as _;
 use crate::sanitize;
 use crate::state::AppState;
 use crate::validate;
@@ -267,7 +268,7 @@ pub async fn create_comment(
         let url = webhook_url.clone();
         let is_sync = state.config.moderation_webhook_mode == "sync";
 
-        // Build enriched payload
+        // Build enriched payload (one builder; auth/payload shape unchanged).
         let submitter_stats = if let Some(ref ip) = hook_ip {
             state.repo.submitter_stats(ip).await.ok()
         } else {
@@ -286,61 +287,42 @@ pub async fn create_comment(
             })).collect::<Vec<_>>()
         });
 
-        let payload = serde_json::json!({
-            "event": "comment.created",
-            "id": new_id, "target_path": target_path, "comment_type": "native",
-            "author_name": hook_name, "author_url": hook_url, "author_avatar": hook_avatar,
-            "content": hook_content,
-            "honeypot": is_honeypot, "parent_id": parent_id, "depth": depth,
-            "submitter_ip": hook_ip, "delete_token": delete_token_str,
-            "content_hash": hook_content_hash, "is_reply": parent_id.is_some(),
-            "parents": parents,
-            "submitter": { "ip": hook_ip, "total_comments": total, "approved_comments": approved,
-                "spam_comments": spam, "pending_comments": pending, "deleted_comments": deleted,
-                "first_seen": first_seen },
-            "admin_url": format!("/api/admin/comments/{}", new_id),
-        });
+        let payload = crate::moderation::comment_created_payload(
+            &crate::moderation::CommentCreated {
+                id: new_id,
+                target_path,
+                comment_type: "native",
+                author_name: &hook_name,
+                author_url: hook_url.as_deref(),
+                author_avatar: hook_avatar.as_deref(),
+                content: &hook_content,
+                honeypot: is_honeypot,
+                parent_id,
+                depth,
+                submitter_ip: hook_ip.as_deref(),
+                delete_token: &delete_token_str,
+                content_hash: hook_content_hash.as_deref(),
+                is_reply: parent_id.is_some(),
+                parents,
+                submitter_total: total,
+                submitter_approved: approved,
+                submitter_spam: spam,
+                submitter_pending: pending,
+                submitter_deleted: deleted,
+                submitter_first_seen: first_seen.as_deref(),
+            },
+            &format!("/api/admin/comments/{new_id}"),
+        );
 
+        // One sink, two adapters: sync awaits the decision, async fires.
+        let sink = crate::moderation::WebhookSink::created_sink(&client, &url);
         if is_sync {
-            // Sync: wait for the webhook to respond with a decision.
-            match client
-                .post(&url)
-                .json(&payload)
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await
-            {
-                Ok(r) if r.status().is_success() => {
-                    if let Ok(decision) = r.json::<serde_json::Value>().await {
-                        if let Some(action) = decision["action"].as_str() {
-                            if matches!(action, "approved" | "spam" | "deleted" | "pending") {
-                                let _ = state.repo.update_status(new_id, action).await;
-                                final_status = action.to_string();
-                            }
-                        }
-                    }
-                }
-                Ok(r) => {
-                    tracing::warn!(webhook = %url, status = %r.status(), "sync webhook returned error")
-                }
-                Err(e) => tracing::warn!(webhook = %url, err = %e, "sync webhook failed"),
+            if let Some(decision) = sink.decide(&payload).await {
+                let _ = state.repo.update_status(new_id, decision.as_str()).await;
+                final_status = decision.to_string();
             }
         } else {
-            // Async: fire-and-forget.
-            tokio::spawn(async move {
-                match client
-                    .post(&url)
-                    .json(&payload)
-                    .timeout(std::time::Duration::from_secs(10))
-                    .send()
-                    .await
-                {
-                    Ok(r) => {
-                        tracing::debug!(webhook = %url, status = %r.status(), "moderation webhook notified")
-                    }
-                    Err(e) => tracing::warn!(webhook = %url, err = %e, "moderation webhook failed"),
-                }
-            });
+            sink.emit(payload);
         }
     }
 
@@ -383,7 +365,19 @@ pub async fn delete_comment(
     axum::extract::Path(id): axum::extract::Path<i64>,
     Json(body): Json<DeleteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let deleted = state.repo.delete_by_token(id, &body.token).await?;
+    // Self-delete goes through the status machine so the engine sees exactly
+    // one `comment.status_changed` event (previously silent).
+    let sink = state
+        .config
+        .moderation_webhook_url
+        .as_ref()
+        .map(|url| crate::moderation::WebhookSink::status_sink(&state.http_client, url));
+    let sink_ref = sink
+        .as_ref()
+        .map(|s| s as &dyn crate::moderation::ModerationSink);
+    let deleted =
+        crate::moderation::Moderation::self_delete_comment(&state.repo, sink_ref, id, &body.token)
+            .await?;
     if deleted {
         tracing::info!(id, "comment deleted via self-service token");
         Ok(Json(serde_json::json!({"success": true})))
@@ -1468,6 +1462,172 @@ mod tests {
         assert!(
             content.contains("/api/admin/pending?path=/blog/hello"),
             "{content}"
+        );
+    }
+
+    // ── T16 self-delete status machine ───────────────────────
+
+    async fn wait_for_moderation(
+        server: &wiremock::MockServer,
+        n: usize,
+    ) -> Vec<wiremock::Request> {
+        for _ in 0..100 {
+            let reqs = server.received_requests().await.unwrap_or_default();
+            if reqs.len() >= n {
+                return reqs;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        server.received_requests().await.unwrap_or_default()
+    }
+
+    fn delete_request(id: i64, token: &str) -> axum::http::Request<axum::body::Body> {
+        helpers::json_request(
+            axum::http::Method::POST,
+            &format!("/api/comment/{id}/delete"),
+            &format!(r#"{{"token":"{token}"}}"#),
+        )
+    }
+
+    #[tokio::test]
+    async fn self_delete_fires_status_changed() {
+        // Previously silent: the engine never saw owner deletes.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let (mut state, _dir) = helpers::test_state();
+        state.config.moderation_webhook_url = Some(format!("{}/hook", server.uri()));
+        let id = state
+            .repo
+            .insert_comment(crate::db::repo::NewComment {
+                target_path: "/t16-del".to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "T16".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "hi".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: Some("tok-del".to_string()),
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        // json_request adds an admin Bearer header; the delete route ignores
+        // it (public route), so reuse is safe.
+        let app = build_app(state.clone());
+        let resp = app.oneshot(delete_request(id, "tok-del")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            state.repo.get_comment(id).await.unwrap().unwrap().status,
+            "deleted"
+        );
+        let reqs = wait_for_moderation(&server, 1).await;
+        assert_eq!(reqs.len(), 1, "self-delete must fire status_changed");
+        let p: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(p["event"], "comment.status_changed");
+        assert_eq!(p["id"], id);
+        assert_eq!(p["old_status"], "pending");
+        assert_eq!(p["new_status"], "deleted");
+        assert_eq!(p["changed_by"], "self");
+    }
+
+    #[tokio::test]
+    async fn self_delete_wrong_token_is_404_without_event() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let (mut state, _dir) = helpers::test_state();
+        state.config.moderation_webhook_url = Some(format!("{}/hook", server.uri()));
+        let id = state
+            .repo
+            .insert_comment(crate::db::repo::NewComment {
+                target_path: "/t16-delbad".to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "T16".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "hi".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: Some("tok-ok".to_string()),
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        let app = build_app(state);
+        let resp = app.oneshot(delete_request(id, "tok-wrong")).await.unwrap();
+        assert_eq!(resp.status(), 404);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "failed delete must not emit"
+        );
+    }
+
+    #[tokio::test]
+    async fn double_self_delete_is_404_without_second_event() {
+        // M7: deleting an already-deleted row 404s like a wrong token and
+        // emits nothing further — exactly one event for the whole lifecycle.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let (mut state, _dir) = helpers::test_state();
+        state.config.moderation_webhook_url = Some(format!("{}/hook", server.uri()));
+        let id = state
+            .repo
+            .insert_comment(crate::db::repo::NewComment {
+                target_path: "/t16-deldbl".to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "T16".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "hi".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: Some("tok-dbl".to_string()),
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        let app = build_app(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(delete_request(id, "tok-dbl"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let resp = app.oneshot(delete_request(id, "tok-dbl")).await.unwrap();
+        assert_eq!(resp.status(), 404, "second delete of a deleted row 404s");
+        let reqs = wait_for_moderation(&server, 1).await;
+        assert_eq!(reqs.len(), 1, "exactly one event across both deletes");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1,
+            "no second event"
         );
     }
 }

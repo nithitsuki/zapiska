@@ -145,6 +145,9 @@ Response `200`:
 The route uses the native rate limit. It returns `404` when the comment does
 not exist or the token does not match.
 
+A successful delete emits one `comment.status_changed` event
+(`old_status` → `deleted`, `changed_by: "self"`).
+
 ### POST /api/comment/{id}/reaction
 
 Create or change a reaction on an approved comment.
@@ -366,6 +369,9 @@ Valid actions are `approved`, `spam`, `deleted`, and `pending`.
 
 The route is limited by `RATE_LIMIT_ADMIN_MODERATE`.
 
+Each actual change emits one `comment.status_changed` webhook event;
+a same-status change is a no-op and emits nothing.
+
 ### POST /api/admin/moderate/batch
 
 Change many comment statuses.
@@ -388,6 +394,7 @@ Request:
 ```
 
 Each item is processed independently. An item error appears in its result.
+Each changed item emits one `comment.status_changed` event.
 
 ### GET /api/admin/comments/{id}/urls
 
@@ -474,10 +481,19 @@ Request:
 
 Valid actions are `approved`, `spam`, `deleted`, and `pending`.
 
+Each actual change emits one `reaction.status_changed` event.
+
+The request accepts an optional `expected_emoji` carrying the reviewed emoji.
+A stale value answers `400` so the moderator re-reads instead of approving sight-unseen.
+
 ### POST /api/admin/reactions/moderate/batch
 
 Change many reaction statuses. The request and result shape matches comment
 moderation batch requests.
+
+Each changed reaction emits one `reaction.status_changed` event. Approvals
+compare-and-swap on the reviewed emoji, so an emoji change racing an
+approval keeps the new emoji pending.
 
 ### GET /api/admin/export
 
