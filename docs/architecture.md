@@ -26,6 +26,8 @@ src/
   config.rs             Environment configuration
   error.rs              HTTP and repository errors
   state.rs              Shared application state
+  identity.rs           Author identity normalization (native + import)
+  ingress.rs            Native submission pipeline (CommentIngress)
   language.rs           Native comment language gate
   sanitize.rs           HTML cleaning, hashes, and URL extraction
   validate.rs            Path, URL, and field checks
@@ -88,24 +90,40 @@ The `comments` feature is empty. The comments-only build disables
 
 ## Native comment flow
 
-The native flow has this sequence:
+`CommentIngress::submit` (`src/ingress.rs`) owns the 13-step native flow
+with effect seams (`Notify`, the T16 `ModerationSink`, `UrlStore` — each
+with in-memory fakes in tests). The HTTP handler (`comment_post.rs`) is a
+thin adapter: form → `SubmitRequest` → `submit` → response. The sequence is:
 
-1. The handler reads a form-encoded request.
-2. Route rate limiting and the request body limit run before the handler.
-3. The handler checks the honeypot, Turnstile, and the daily IP cap.
-4. The handler validates the path, name, and author URL.
-5. The handler sanitizes the content with `ammonia`.
-6. The language gate checks the sanitized content when configured.
-7. The handler resolves the author name, URL, and avatar.
-8. The handler checks the parent comment when `parent_id` is present.
-9. The repository stores the comment with its configured initial status.
-10. The handler extracts double-quoted absolute HTTP and HTTPS URLs from the
-    original form content.
-11. The notification batcher receives a new comment event.
-12. The moderation webhook receives the event when configured.
+1. Honeypot flag (reads `config.honeypot_field`, fallback `website`; the
+   served widget emits the configured name via server-side substitution).
+2. Turnstile verification when enabled (fail-closed).
+3. Per-IP daily cap (flagged submissions consume quota too).
+4. Validation of the path, author identity (shared `identity` rules with
+   import: `Cc` + bidi/format spoof chars stripped, `github_username`
+   shape-checked before URL interpolation, `MAX_AUTHOR_LEN` enforced),
+   and author URL (absolute HTTP/HTTPS with a host).
+5. Content hash on the RAW input (moderation lookup key, never a constraint).
+6. Sanitization with `ammonia` plus truncation to `MAX_CONTENT_LEN`.
+7. Language gate on the SANITIZED content when configured (hard block).
+8. Author name, URL, and avatar resolution (GitHub enrichment).
+9. Parent comment check when `parent_id` is present.
+10. Delete-token generation (128-bit CSPRNG) and peer IP/hash capture.
+11. Atomic store: comment row, initial status, and extracted-URL rows in ONE
+    `BEGIN IMMEDIATE` commit (T15 unit). URL extraction reads the SANITIZED
+    content, so URLs inside stripped tags never become rows.
+12. Admin notification (batched digest or immediate).
+13. Moderation webhook through the ONE shared T16 `deliver` adapter (sync
+    awaits the decision and applies it on the plain write path; async emits).
 
 The content hash helps a moderation service find repeated content. The server
-does not reject duplicate content by hash.
+does not reject duplicate content by hash, and there are no idempotency keys:
+two identical concurrent POSTs store two rows (B9, deliberate — the engine
+dedups post-hoc via `content_hash` lookup).
+
+Follow-ups (not fixed here): language-gate quarantine tier (B6 — the gate
+stays a hard block) and Unicode body-limit parity (B7 — non-ASCII authors
+hit `MAX_BODY_SIZE` before `MAX_CONTENT_LEN`; ~680 emoji chars effective).
 
 ## Threaded replies
 

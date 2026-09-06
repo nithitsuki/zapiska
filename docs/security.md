@@ -138,13 +138,34 @@ Process restart clears the in-memory counters.
 
 ## Delete tokens
 
-The server creates a 16 character hexadecimal delete token for each native
-comment. The current generator uses a standard library hash of the peer
-address, time, and process counter. It is not a cryptographic token.
+The server creates a 32 character hexadecimal delete token (128-bit,
+OS CSPRNG) for each native comment. Tokens take no inputs — they are not
+derived from the peer address or time — so they cannot be cracked offline
+by narrowing an (IP, time) window. Uniqueness is statistical.
 
 The deletion route uses the native rate limit and returns the same `404` result
-for a missing comment and a wrong token. A future release should replace the
-token generator with a cryptographically secure random source.
+for a missing comment and a wrong token. Re-approving a self-deleted comment
+through the admin API clears its delete token in the same commit.
+
+## Webhook authentication
+
+Outbound moderation webhooks (comment/reaction `*.created` in both async
+and sync modes, plus every `*.status_changed` event) can carry an HMAC
+signature. Set `WEBHOOK_SIGNING_SECRET` to enable it; empty or unset sends
+the historical unsigned body.
+
+When set, each POST carries:
+
+```text
+X-Zapiska-Timestamp: 1786000000
+X-Zapiska-Signature: v1=<hex HMAC-SHA256(secret, "<timestamp>.<raw JSON body>")>
+```
+
+The consumer recomputes over the received bytes, compares in constant time,
+and rejects timestamps outside ±300 seconds (replay window), plus any
+unsigned or tampered body. With no secret configured, consumers accept
+everything (backwards compatible). See `src/http/webhook.rs` for the exact
+scheme and `docs/moderation-engine.md` for the consumer sketch.
 
 ## Turnstile
 
@@ -202,14 +223,24 @@ The server checks these values:
 - `target_path` starts with `/`, has no `//`, `..`, backslash, or control code,
   and has a maximum length of 1024 characters.
 - `author_url` is an absolute HTTP or HTTPS URL with a host.
-- `author_name` has control codes removed, leading and trailing spaces removed,
-  and a maximum length of `MAX_AUTHOR_LEN`.
+- `author_name` has control codes AND bidi/format spoof characters removed
+  (U+202E overrides, U+200B zero-width, isolates — see `src/identity.rs`),
+  leading and trailing spaces removed, and a maximum length of
+  `MAX_AUTHOR_LEN` (native rejects over-long; import clamps).
+- `github_username` is shape-checked before URL interpolation: 1–39 chars,
+  ASCII alphanumeric or single hyphens, never leading/trailing — hostile
+  values are a `400`, never part of a `github.com` URL or avatar seed.
 - `content` is sanitized and limited to `MAX_CONTENT_LEN` characters.
 - `comment_type` and `status` use SQLite check constraints.
 - A webmention target has the same parsed origin as `PUBLIC_TARGET_ORIGIN`.
 
-The native handler reads `website` as the honeypot field. The
-`HONEYPOT_FIELD` setting is loaded but does not change that field name.
+The ingress reads the CONFIGURED honeypot field (`HONEYPOT_FIELD`, fallback
+`website`). When the operator renames the trap, the served widget emits the
+new name automatically (server-side substitution into `/embed/comments.js`),
+and the legacy `website` value is inert — filling it does not flag. The
+served script carries an ETag over (file bytes, trap name), so browsers
+revalidate after a rename instead of reusing a stale trap name for the rest
+of the hour-long `max-age` window.
 
 ## Import safety
 
@@ -225,8 +256,9 @@ the database rejects a row. Keep export files private.
 
 ## URL extraction
 
-Native comment URL extraction reads the original form content. It does not read
-the sanitized or truncated content.
+Native comment URL extraction reads the SANITIZED content (post-`ammonia`).
+URLs inside stripped tags (`<script>`, disallowed elements) never become
+rows — only links that survive into the stored HTML are indexed.
 
 The extractor accepts only case-insensitive, double-quoted `href="..."` values
 with absolute HTTP or HTTPS URLs. It removes fragments, lowercases the result,

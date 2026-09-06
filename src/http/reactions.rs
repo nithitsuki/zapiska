@@ -88,9 +88,9 @@ pub async fn add_reaction(
         .upsert_reaction(comment_id, &body.reaction, &identifier)
         .await?;
 
-    // Notify the moderation engine (async or sync, like comments).
-    // One payload builder + one sink with sync/async adapters (shared with
-    // native comments); the `action` whitelist is the `Status` parse.
+    // Notify the moderation engine through the ONE shared T16 adapter
+    // (T19 dedup point with native comments): sync awaits the decision,
+    // async emits. Signed when a secret is configured (S3).
     let mut final_status = "pending".to_string();
     if let Some(ref webhook_url) = state.config.moderation_webhook_url {
         let payload = crate::moderation::reaction_created_payload(
@@ -100,17 +100,20 @@ pub async fn add_reaction(
             &comment.target_path,
             is_admin,
         );
-        let sink = crate::moderation::WebhookSink::created_sink(&state.http_client, webhook_url);
-        if state.config.moderation_webhook_mode == "sync" {
-            if let Some(decision) = sink.decide(&payload).await {
-                let _ = state
-                    .repo
-                    .update_reaction_status(reaction_id, decision.as_str())
-                    .await;
-                final_status = decision.to_string();
-            }
-        } else {
-            sink.emit(payload);
+        let sink = crate::moderation::WebhookSink::created_sink_signed(
+            &state.http_client,
+            webhook_url,
+            state.config.webhook_signing_secret.clone(),
+        );
+        if let Some(decision) = sink
+            .deliver(&payload, state.config.moderation_webhook_mode == "sync")
+            .await
+        {
+            let _ = state
+                .repo
+                .update_reaction_status(reaction_id, decision.as_str())
+                .await;
+            final_status = decision.to_string();
         }
     }
 
@@ -646,5 +649,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn reaction_created_emission_is_signed_through_shared_sink() {
+        // T19(e) behavioral: the reaction path emits through the same signed
+        // T16 sink as native comments — one implementation serves both.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let (mut state, _dir) = helpers::test_state();
+        state.config.moderation_webhook_url = Some(format!("{}/hook", server.uri()));
+        state.config.webhook_signing_secret = Some("s3cr3t".to_string());
+        let id = seed_approved(&state).await;
+        let app = build_app(state);
+        let resp = app
+            .oneshot(reaction_request(
+                axum::http::Method::POST,
+                &format!("/api/comment/{id}/reaction"),
+                Some(r#"{"reaction":"👍"}"#),
+                true,
+                [127, 0, 0, 1],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+        let mut reqs = Vec::new();
+        for _ in 0..100 {
+            reqs = server.received_requests().await.unwrap_or_default();
+            if !reqs.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(reqs.len(), 1, "reaction.created emitted exactly once");
+        let ts = reqs[0]
+            .headers
+            .get(crate::http::webhook::TIMESTAMP_HEADER)
+            .expect("timestamp header via shared sink");
+        let sig = reqs[0]
+            .headers
+            .get(crate::http::webhook::SIGNATURE_HEADER)
+            .expect("signature header via shared sink");
+        assert!(crate::http::webhook::verify_body(
+            "s3cr3t",
+            Some(ts.to_str().unwrap()),
+            Some(sig.to_str().unwrap()),
+            &reqs[0].body,
+            crate::http::webhook::timestamp_now()
+        ));
     }
 }

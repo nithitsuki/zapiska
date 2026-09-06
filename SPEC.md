@@ -84,6 +84,7 @@ The server reads environment variables at startup.
 | `IP_HASH_SECRET` | Unset | Salt for the IP hash. |
 | `MODERATION_WEBHOOK_URL` | Unset | External moderation webhook. |
 | `MODERATION_WEBHOOK_MODE` | `async` | `async` or `sync`. |
+| `WEBHOOK_SIGNING_SECRET` | Unset | HMAC secret signing every webhook body (`X-Zapiska-Timestamp` + `X-Zapiska-Signature`); unset sends unsigned bodies. |
 | `DEFAULT_COMMENT_STATUS` | `pending` | Initial native comment status. |
 | `MAX_THREAD_DEPTH` | `0` | Reply depth. Clamped to `0` through `10`. |
 | `TELEGRAM_BOT_TOKEN` | Unset | Telegram bot token. |
@@ -116,8 +117,9 @@ Rate limit variables are:
 | `RATE_LIMIT_ADMIN_MODERATE` | `30` |
 | `RATE_LIMIT_ADMIN_MODERATE_WINDOW` | `60` |
 
-`HONEYPOT_FIELD` is loaded from the environment. The current native handler
-uses the `website` field regardless of this value.
+`HONEYPOT_FIELD` names the trap field (default `website`). The ingress flags a
+submission when the CONFIGURED field is non-empty; the served widget emits
+that name automatically, and any other trap-looking field is inert.
 
 ## Data model
 
@@ -187,21 +189,27 @@ cf-turnstile-response=token
 
 ### Processing
 
-1. Apply the native rate limit and body limit.
-2. Check Turnstile when enabled.
-3. Check the per-IP daily cap.
-4. Validate the target path and author fields.
-5. Compute the content hash.
-6. Sanitize and truncate content.
-7. Apply the language gate when enabled.
-8. Resolve author and avatar data.
-9. Check the parent comment.
-10. Store the row.
-11. Extract native comment URLs.
-12. Queue notifications.
-13. Send the moderation webhook.
+`CommentIngress::submit` owns the 13 steps in exactly this order:
 
-The content hash supports moderation lookup. It does not reject duplicate rows.
+1. Flag the honeypot (configured field, fallback `website`).
+2. Apply the native rate limit and body limit.
+3. Check Turnstile when enabled.
+4. Check the per-IP daily cap.
+5. Validate the target path and author fields (`github_username` shape
+   checked before URL interpolation; bidi/format spoof chars stripped).
+6. Compute the content hash on the raw input.
+7. Sanitize and truncate content.
+8. Apply the language gate to the sanitized text when enabled.
+9. Resolve author and avatar data.
+10. Check the parent comment.
+11. Mint the delete token (128-bit CSPRNG) and capture peer IP data.
+12. Store the row, initial status, and extracted-URL rows (from the
+    sanitized content) in one commit.
+13. Queue notifications, then send the moderation webhook (sync awaits the
+    decision; async emits). Signed when `WEBHOOK_SIGNING_SECRET` is set.
+
+The content hash supports moderation lookup. It does not reject duplicate rows,
+and there are no idempotency keys: identical concurrent POSTs store one row each.
 
 ### Response
 
@@ -209,10 +217,12 @@ The server returns `201` with:
 
 ```json
 {
-  "delete_token": "0123456789abcdef",
+  "delete_token": "0123456789abcdef0123456789abcdef",
   "status": "pending"
 }
 ```
+
+The delete token is 32 lowercase hex characters (128-bit CSPRNG).
 
 The status can be `pending`, `approved`, `spam`, or `deleted` after a sync
 moderation decision.
@@ -225,7 +235,7 @@ The response does not include the comment ID.
 
 ```json
 {
-  "token": "0123456789abcdef"
+  "token": "0123456789abcdef0123456789abcdef"
 }
 ```
 

@@ -93,7 +93,12 @@ The widget supplies reply forms. Create a top-level form on the main site.
 </form>
 ```
 
-The server reads `website` as the honeypot field.
+The server reads the CONFIGURED honeypot field (`HONEYPOT_FIELD`, default
+`website`). The widget's reply forms emit the configured name automatically
+(the server substitutes it into the served `/embed/comments.js`), so widget
+users never set this by hand. Custom top-level forms MUST use the configured
+name: with `HONEYPOT_FIELD=company`, name the hidden input `company` —
+`website` is inert and filling it does not flag.
 
 The response contains `delete_token` and `status`. It does not contain the new
 comment ID.

@@ -11,6 +11,8 @@ pub mod error;
 pub mod fetch;
 pub mod github;
 pub mod http;
+pub mod identity;
+pub mod ingress;
 pub mod ip_hash;
 pub mod language;
 #[cfg(feature = "webmentions")]

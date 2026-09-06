@@ -266,6 +266,64 @@ All notable changes to zapiska are documented here. The format follows
   limits (4096 / 3000 characters) with the same shrink-cheapest-first policy
   Discord already had; the moderation footer survives every shrink stage.
   Digest content and grouping are unchanged.
+- Native submission is now one deep module (`CommentIngress::submit` in
+  `src/ingress.rs`, placed at the crate root beside `moderation` because
+  both HTTP and storage depend on the pipeline, never the reverse): the
+  300-line handler thins to form→`submit`→response while `Ingress` owns the
+  13-step ordering (honeypot → Turnstile → daily cap → validate → hash-on-raw
+  → sanitize → language gate on sanitized text → author/avatar resolve →
+  parent check → T15 atomic store → notify → moderation sink) behind `Notify`
+  / `ModerationSink` (T16's, via its one shared sync/async `deliver`
+  adapter — the comment and reaction `if sync/else emit` duplications
+  collapse to one line each) / `UrlStore` effect seams with in-memory fakes
+  in tests. Ordering invariants are pinned: the content hash reflects the
+  raw input, the language gate sees sanitized text, and URL rows come from
+  the sanitized content only (URLs inside tags ammonia strips no longer
+  persist — B12 fixed). Double submits still store twice with one shared
+  hash (B9, deliberate: no idempotency keys — the engine dedups post-hoc
+  via `content_hash` lookup). Follow-ups left open: language-gate
+  quarantine tier (B6, hard block stays) and Unicode body-limit parity (B7,
+  ~680-emoji math documented, not fixed); sync-webhook decisions still apply
+  on the plain write path (no machine transition event).
+- Honeypot detection honors `HONEYPOT_FIELD` (fallback `website`): the
+  configured field flags, any other trap-looking field is inert. The widget
+  emits the configured name via server-side substitution into the served
+  `/embed/comments.js` (the alternative — accepting both names — would keep
+  the old name live as an unflagged bypass), and reply forms now actually
+  send the trap value (previously created but never serialized, so JS
+  replies could never trip it). `HONEYPOT_FIELD` is restricted to 1–64 chars
+  of `[A-Za-z0-9_-]` at startup (anything else refuses boot rather than
+  shipping a broken widget). The served script carries an ETag over (file
+  bytes, trap name): renames change the ETag and clients revalidate
+  (`If-None-Match` → `304`), so the hour-long `max-age` cache turns over
+  correctly instead of reusing a stale trap name blindly.
+- Author identity is one shared module (`src/identity.rs`, crate root so
+  native and import share it without HTTP↔storage inversion): control AND
+  bidi/format spoof characters (U+202E overrides, U+200B zero-width,
+  isolates — ZWJ/ZWNJ deliberately kept for emoji) strip from names,
+  `github_username` is shape-checked (1–39 chars, alphanumeric or single
+  hyphens, never leading/trailing) before URL interpolation (hostile values
+  are a `400`, never part of a URL), `MAX_AUTHOR_LEN` applies everywhere
+  (the import path's hardcoded `100` is gone — over-long backup rows clamp,
+  live input rejects), and `validate_http_url` now enforces the host its
+  docs always claimed (defense in depth over the `url` crate's empty-host
+  parse errors). Native/import parity is pinned by a table test.
+- Delete tokens are 128-bit CSPRNG secrets (32 lowercase hex chars from the
+  OS RNG via the `getrandom` crate — now a direct dependency, already
+  vendored transitively, so no new audit surface — zero inputs, not derived
+  from peer address or time), replacing
+  the deterministic 64-bit `DefaultHasher` token that was crackable offline
+  over the (IP, time) window. Uniqueness is statistical; the delete route
+  stays rate-limited with same-404 semantics. An OS RNG failure aborts the
+  submission with a 500 (fail-closed — no weak token is ever minted).
+- Moderation webhooks can be HMAC-signed (additive `WEBHOOK_SIGNING_SECRET`,
+  empty/unset sends the historical unsigned body): every emission — async
+  and sync, `*.created` and `*.status_changed` — carries
+  `X-Zapiska-Timestamp` and `X-Zapiska-Signature: v1=<hex>` (HMAC-SHA256 over
+  `"<timestamp>.<raw JSON body>"`, no new dependencies — built on `sha2` +
+  `subtle`). Consumers recompute, compare in constant time, and enforce a
+  ±300 s replay window; a secret-holding consumer rejects unsigned or
+  tampered bodies (see `docs/moderation-engine.md` for the verify sketch).
 
 ## [0.2.0] - 2026-08-07
 

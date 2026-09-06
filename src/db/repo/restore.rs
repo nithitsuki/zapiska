@@ -82,6 +82,11 @@ pub struct RestoreInput {
     /// THIS server's `MAX_CONTENT_LEN` (for content re-sanitization).
     /// Must be set: `0` would truncate every restored comment to empty.
     pub max_content_len: usize,
+    /// THIS server's `MAX_AUTHOR_LEN` (for author-name clamping). Shared with
+    /// the native pipeline via `crate::identity` (S2) — the old hardcoded
+    /// `100` is gone; a lowered limit clamps backup rows instead of dropping
+    /// them, while live input is rejected (intentional divergence).
+    pub max_author_len: usize,
     /// Explicit overwrite policy for id collisions (B-21): `false` refuses
     /// when an exported id holds different live data, `true` overwrites.
     /// Maps from the import body's `"force"` field.
@@ -143,6 +148,12 @@ impl Repo {
             input.max_content_len > 0,
             "RestoreInput::max_content_len must be > 0"
         );
+        // Sibling guard: `max_author_len: 0` would clamp every restored
+        // author name to empty (and then skip the row as nameless).
+        debug_assert!(
+            input.max_author_len > 0,
+            "RestoreInput::max_author_len must be > 0"
+        );
         self.check_restore_overlap(&input).await?;
         let mut report = RestoreReport::default();
         let mut saw_salted_identities = false;
@@ -200,6 +211,7 @@ impl Repo {
                 normalize_comment_for_compare(
                     c,
                     input.max_content_len,
+                    input.max_author_len,
                     input.ip_hash_secret.as_deref(),
                 )
                 .map(|normalized| (c.id, normalized))
@@ -264,7 +276,9 @@ impl Repo {
         comments.sort_by_key(|c| c.id);
         for mut c in comments {
             let id = c.id;
-            if let Err(e) = validate_imported_comment(&mut c, input.max_content_len) {
+            if let Err(e) =
+                validate_imported_comment(&mut c, input.max_content_len, input.max_author_len)
+            {
                 tracing::warn!(id, err = %e, "import skipped invalid comment");
                 report.comments_skipped += 1;
                 continue;
@@ -517,10 +531,11 @@ fn select_reactions_by_ids(
 fn normalize_comment_for_compare(
     c: &Comment,
     max_content_len: usize,
+    max_author_len: usize,
     ip_hash_secret: Option<&str>,
 ) -> Option<Comment> {
     let mut out = c.clone();
-    if validate_imported_comment(&mut out, max_content_len).is_err() {
+    if validate_imported_comment(&mut out, max_content_len, max_author_len).is_err() {
         return None;
     }
     if let Some(ref raw) = out.submitter_ip {
@@ -537,7 +552,15 @@ fn normalize_comment_for_compare(
 /// Validate a comment from an untrusted import document. Defense in depth:
 /// even though the endpoint is admin-only, imported content is re-sanitized
 /// and every field is re-checked exactly as a native submission would be.
-fn validate_imported_comment(c: &mut Comment, max_content_len: usize) -> Result<(), String> {
+/// Author policy is the SHARED [`crate::identity`] rule (S2): bidi/format
+/// spoof chars strip like native, empty rejects like native, over-long
+/// CLAMPS to `max_author_len` (historical data survives a lowered limit;
+/// live input rejects instead).
+fn validate_imported_comment(
+    c: &mut Comment,
+    max_content_len: usize,
+    max_author_len: usize,
+) -> Result<(), String> {
     if c.id <= 0 {
         return Err("id must be a positive integer".to_string());
     }
@@ -551,15 +574,7 @@ fn validate_imported_comment(c: &mut Comment, max_content_len: usize) -> Result<
     ) {
         return Err(format!("invalid status '{}'", c.status));
     }
-    c.author_name = crate::validate::strip_control_chars(&c.author_name)
-        .trim()
-        .to_string();
-    if c.author_name.is_empty() {
-        return Err("author_name must not be empty".to_string());
-    }
-    if c.author_name.chars().count() > 100 {
-        c.author_name = c.author_name.chars().take(100).collect();
-    }
+    c.author_name = crate::identity::import_author_name(&c.author_name, max_author_len)?;
     if let Some(ref u) = c.author_url {
         crate::validate::validate_http_url(u).map_err(|e| e.to_string())?;
     }
@@ -742,6 +757,7 @@ mod t17_restore_tests {
     fn input() -> RestoreInput {
         RestoreInput {
             max_content_len: 2000,
+            max_author_len: 100,
             ..RestoreInput::default()
         }
     }
@@ -1048,6 +1064,7 @@ mod t17_restore_tests {
             for i in 100..120 {
                 let mut doc = RestoreInput {
                     max_content_len: 2000,
+                    max_author_len: 100,
                     ..RestoreInput::default()
                 };
                 let mut c = comment(i, "approved");
@@ -1149,34 +1166,34 @@ mod t17_restore_tests {
     #[test]
     fn valid_comment_passes() {
         let mut c = sample();
-        assert!(validate_imported_comment(&mut c, 2000).is_ok());
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_ok());
     }
 
     #[test]
     fn invalid_status_and_type_rejected() {
         let mut c = sample();
         c.status = "evil".to_string();
-        assert!(validate_imported_comment(&mut c, 2000).is_err());
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_err());
         let mut c = sample();
         c.comment_type = "spam".to_string();
-        assert!(validate_imported_comment(&mut c, 2000).is_err());
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_err());
     }
 
     #[test]
     fn parent_id_must_precede_comment() {
         let mut c = sample();
         c.parent_id = Some(43);
-        assert!(validate_imported_comment(&mut c, 2000).is_err());
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_err());
         let mut c = sample();
         c.parent_id = Some(41);
-        assert!(validate_imported_comment(&mut c, 2000).is_ok());
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_ok());
     }
 
     #[test]
     fn content_is_resanitized_and_truncated() {
         let mut c = sample();
         c.content = format!("<script>alert(1)</script>{}", "x".repeat(5000));
-        assert!(validate_imported_comment(&mut c, 2000).is_ok());
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_ok());
         assert!(!c.content.contains("<script>"), "script stripped on import");
         assert!(c.content.chars().count() <= 2000, "truncated to max len");
     }
@@ -1185,8 +1202,30 @@ mod t17_restore_tests {
     fn control_chars_stripped_from_author_name() {
         let mut c = sample();
         c.author_name = "Bad\x00Guy".to_string();
-        assert!(validate_imported_comment(&mut c, 2000).is_ok());
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_ok());
         assert_eq!(c.author_name, "BadGuy");
+    }
+
+    #[test]
+    fn bidi_spoof_chars_stripped_from_author_name_on_import() {
+        // S2 parity: import cleans exactly like native (shared identity fn).
+        let mut c = sample();
+        c.author_name = "ab\u{202E}cd\u{200B}".to_string();
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_ok());
+        assert_eq!(c.author_name, "abcd");
+    }
+
+    #[test]
+    fn author_name_clamps_to_configured_max_author_len() {
+        // RED (S2): the old path hardcoded 100 regardless of MAX_AUTHOR_LEN.
+        let mut c = sample();
+        c.author_name = "b".repeat(60);
+        assert!(validate_imported_comment(&mut c, 2000, 50).is_ok());
+        assert_eq!(c.author_name.chars().count(), 50);
+        let mut c = sample();
+        c.author_name = "b".repeat(60);
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_ok());
+        assert_eq!(c.author_name.chars().count(), 60);
     }
 
     #[test]
@@ -1211,10 +1250,10 @@ mod t17_restore_tests {
     fn invalid_path_and_url_rejected() {
         let mut c = sample();
         c.target_path = "no-slash".to_string();
-        assert!(validate_imported_comment(&mut c, 2000).is_err());
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_err());
         let mut c = sample();
         c.author_url = Some("javascript:alert(1)".to_string());
-        assert!(validate_imported_comment(&mut c, 2000).is_err());
+        assert!(validate_imported_comment(&mut c, 2000, 100).is_err());
     }
 
     #[test]
@@ -1303,6 +1342,20 @@ mod t17_restore_tests {
         // sanitize every restored comment to empty — fail loud in debug.
         let (repo, _dir) = setup_repo();
         let _ = repo.restore(RestoreInput::default()).await;
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    #[should_panic(expected = "max_author_len")]
+    async fn restore_zero_max_author_len_panics_in_debug() {
+        // Sibling of the G4.2 guard: an unset max_author_len would clamp
+        // every restored author name to empty — fail loud in debug.
+        let (repo, _dir) = setup_repo();
+        let input = RestoreInput {
+            max_content_len: 2000,
+            ..RestoreInput::default()
+        };
+        let _ = repo.restore(input).await;
     }
 
     #[tokio::test]

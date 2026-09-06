@@ -309,6 +309,9 @@
 
     var honeypot = document.createElement('input');
     honeypot.type = 'text';
+    // The server substitutes the configured HONEYPOT_FIELD name into this
+    // line when serving the script (see comments_js): honest browsers always
+    // emit the active trap name. Default 'website' matches the server default.
     honeypot.name = 'website';
     honeypot.tabIndex = -1;
     honeypot.autocomplete = 'off';
@@ -377,6 +380,9 @@
                  '&author_name=' + encodeURIComponent(authorName) +
                  '&content=' + encodeURIComponent(content) +
                  '&parent_id=' + parentId;
+      // Honeypot: always send the (server-configured) trap field — humans
+      // leave it empty, bots fill it and get flagged server-side.
+      body += '&' + encodeURIComponent(honeypot.name) + '=' + encodeURIComponent(honeypot.value);
       if (urlInput.value.trim()) {
         body += '&author_url=' + encodeURIComponent(urlInput.value.trim());
       }

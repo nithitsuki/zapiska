@@ -37,11 +37,13 @@ pub struct ModerateResult {
 /// The `*.status_changed` sink for this request, if a webhook is configured.
 /// One sink per request (not per item): every batch item emits through it.
 fn status_sink(state: &AppState) -> Option<WebhookSink> {
-    state
-        .config
-        .moderation_webhook_url
-        .as_ref()
-        .map(|url| WebhookSink::status_sink(&state.http_client, url))
+    state.config.moderation_webhook_url.as_ref().map(|url| {
+        WebhookSink::status_sink_signed(
+            &state.http_client,
+            url,
+            state.config.webhook_signing_secret.clone(),
+        )
+    })
 }
 
 pub async fn moderate_batch(

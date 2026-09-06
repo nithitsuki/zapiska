@@ -91,7 +91,7 @@ The limits use the TCP peer IP. The server does not trust forwarded IP headers.
 | `IP_HASH_SECRET` | Unset | Salt for the stored IP hash. |
 | `MAX_COMMENTS_PER_IP_PER_DAY` | `50` | Native comment daily cap. Zero disables the cap. |
 | `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` | `10` | Webmention domain cap. Zero disables the cap. |
-| `HONEYPOT_FIELD` | `website` | Loaded setting. The current form handler reads `website`. |
+| `HONEYPOT_FIELD` | `website` | Trap field name: 1–64 chars of `[A-Za-z0-9_-]` (anything else refuses boot). The served widget emits the configured name automatically; custom top-level forms must use it — any other trap-looking field is inert. |
 
 ### Notification values
 

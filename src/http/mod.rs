@@ -65,19 +65,70 @@ async fn admin_dashboard() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../embed/admin.html"))
 }
 
-async fn comments_js() -> (
-    axum::http::StatusCode,
-    [(&'static str, &'static str); 2],
-    &'static str,
-) {
-    (
-        axum::http::StatusCode::OK,
-        [
-            ("content-type", "application/javascript"),
-            ("cache-control", "public, max-age=3600"),
-        ],
-        include_str!("../../embed/comments.js"),
-    )
+/// ETag over the served widget bytes AND the active trap name: renaming the
+/// field changes the ETag, so no URL-scheme change is needed for cache
+/// turnover — `max-age` stays, revalidation is correct.
+fn embed_etag(field: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(include_str!("../../embed/comments.js"));
+    h.update([0u8]);
+    h.update(field.as_bytes());
+    format!("\"{:x}\"", h.finalize())
+}
+
+async fn comments_js(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    // S1 widget decision: server-side substitution (not "accept both
+    // fields"). The trap name is a deployment secret of sorts — accepting
+    // both the legacy and configured names would keep the OLD name live as
+    // an unflagged bypass AND double-flag honest cached clients. Instead the
+    // served script carries the active name, so browsers always emit the
+    // right field; the handler treats any other trap-looking field as inert.
+    // Substitution targets the one marked line in embed/comments.js; the
+    // file on disk keeps the 'website' default so direct file use still
+    // matches the default config.
+    const MARKER: &str = "honeypot.name = 'website'";
+    let field = state.config.honeypot_field.trim();
+    let field = if field.is_empty() { "website" } else { field };
+    // Escape for a single-quoted JS string (names are operator config, not
+    // attacker input, but a stray quote must not break the script).
+    let escaped = field.replace('\\', "\\\\").replace('\'', "\\'");
+    let replacement = format!("honeypot.name = '{escaped}'");
+    let js = include_str!("../../embed/comments.js");
+    let body = if field == "website" {
+        js.to_string()
+    } else {
+        js.replace(MARKER, &replacement)
+    };
+    let etag = embed_etag(field);
+    let mut out_headers = axum::http::HeaderMap::new();
+    out_headers.insert(
+        "content-type",
+        "application/javascript"
+            .parse()
+            .expect("static header valid"),
+    );
+    out_headers.insert(
+        "cache-control",
+        "public, max-age=3600".parse().expect("static header valid"),
+    );
+    out_headers.insert("etag", etag.parse().expect("hex etag is header-valid"));
+    // Correct revalidation for the 1h stale-JS window: a client holding the
+    // previous trap name revalidates instead of reusing it blindly.
+    if headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .is_some_and(|v| v.as_bytes() == etag.as_bytes())
+    {
+        return (
+            axum::http::StatusCode::NOT_MODIFIED,
+            out_headers,
+            String::new(),
+        );
+    }
+    (axum::http::StatusCode::OK, out_headers, body)
 }
 
 #[utoipa::path(
@@ -180,6 +231,115 @@ mod tests {
             ))))
             .body(Body::from(body))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn embed_js_carries_default_honeypot_name() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/embed/comments.js"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let js = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            js.contains("honeypot.name = 'website'"),
+            "default trap name"
+        );
+        assert!(
+            js.contains("encodeURIComponent(honeypot.name)"),
+            "trap value must be submitted with the reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_js_substitutes_configured_honeypot_name() {
+        // S1 widget half: HONEYPOT_FIELD=company rewrites the served script
+        // so browsers emit the active trap name.
+        let (mut state, _dir) = test_state();
+        state.config.honeypot_field = "company".to_string();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/embed/comments.js"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let js = String::from_utf8(body.to_vec()).unwrap();
+        assert!(js.contains("honeypot.name = 'company'"), "substituted name");
+        assert!(
+            !js.contains("honeypot.name = 'website'"),
+            "no stale default"
+        );
+        // Valid names carry no quoting: the substituted line must be exactly
+        // the assignment with zero escapes (the server's backslash/quote
+        // escaping stays as defense in depth, but must never fire here).
+        let line = js
+            .lines()
+            .find(|l| l.contains("honeypot.name"))
+            .expect("trap line present");
+        assert_eq!(
+            line, "    honeypot.name = 'company';",
+            "unescaped line: {line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_js_etag_tracks_field_and_revalidates() {
+        // 1h-stale-JS fix: the ETag covers (file bytes, trap name), so a
+        // rename changes it and clients revalidate instead of reusing the
+        // old trap name blindly.
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .clone()
+            .oneshot(request(axum::http::Method::GET, "/embed/comments.js"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let etag_default = resp
+            .headers()
+            .get("etag")
+            .expect("etag present")
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let (mut renamed, _dir) = test_state();
+        renamed.config.honeypot_field = "company".to_string();
+        let app = build_app(renamed);
+        let resp = app
+            .clone()
+            .oneshot(request(axum::http::Method::GET, "/embed/comments.js"))
+            .await
+            .unwrap();
+        let etag_company = resp
+            .headers()
+            .get("etag")
+            .expect("etag present")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(etag_default, etag_company, "rename must change the ETag");
+
+        // Matching If-None-Match revalidates to 304 with an empty body.
+        let mut req = request(axum::http::Method::GET, "/embed/comments.js");
+        req.headers_mut().insert(
+            axum::http::header::IF_NONE_MATCH,
+            etag_company.parse().unwrap(),
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 304);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(body.is_empty(), "304 carries no body");
     }
 
     #[tokio::test]

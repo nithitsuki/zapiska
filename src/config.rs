@@ -45,6 +45,12 @@ pub struct Config {
     pub moderation_webhook_url: Option<String>,
     /// Webhook mode: "async" (fire-and-forget, default) or "sync" (wait for response).
     pub moderation_webhook_mode: String,
+    /// Optional HMAC secret signing every outbound moderation-webhook body
+    /// (both async and sync emissions). Empty/unset = unsigned (backwards
+    /// compatible). When set, each POST carries `X-Zapiska-Timestamp` and
+    /// `X-Zapiska-Signature` headers (see `src/http/webhook.rs`); a consumer
+    /// holding the secret rejects unsigned or tampered bodies. Additive only.
+    pub webhook_signing_secret: Option<String>,
     /// Default moderation status for new comments.
     /// `"pending"` = manual review required (default).
     /// `"approved"` = auto-approve (posts appear immediately).
@@ -175,6 +181,8 @@ pub enum ConfigError {
     InvalidLangCode(String),
     #[error("COMMENT_LANG_ALLOW_EMOJI must be 'always', 'never', or 'if_unknown', got: {0}")]
     InvalidEmojiPolicy(String),
+    #[error("HONEYPOT_FIELD must be 1-64 chars of [A-Za-z0-9_-], got: {0}")]
+    InvalidHoneypotField(String),
 }
 
 fn env_or_default(key: &str, default: &str) -> String {
@@ -250,6 +258,7 @@ impl Default for Config {
             ip_hash_secret: None,
             moderation_webhook_url: None,
             moderation_webhook_mode: "async".to_string(),
+            webhook_signing_secret: None,
             default_comment_status: "pending".to_string(),
             max_thread_depth: 0,
             turnstile_enabled: false,
@@ -376,6 +385,18 @@ impl Config {
         let rust_log = env_or_default("RUST_LOG", &defaults.rust_log);
 
         let honeypot_field = env_or_default("HONEYPOT_FIELD", &defaults.honeypot_field);
+        // Fail-closed: the configured name is substituted into the served
+        // widget JS inside a single-quoted string. Anything outside
+        // [A-Za-z0-9_-]{1,64} (an operator typo, a tag, a newline) must refuse
+        // boot rather than ship a broken or breakable widget.
+        if honeypot_field.len() > 64
+            || honeypot_field.is_empty()
+            || !honeypot_field
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(ConfigError::InvalidHoneypotField(honeypot_field));
+        }
         let max_comments_per_ip_per_day = env_or_default(
             "MAX_COMMENTS_PER_IP_PER_DAY",
             &defaults.max_comments_per_ip_per_day.to_string(),
@@ -397,6 +418,9 @@ impl Config {
             .filter(|s| !s.is_empty());
         let moderation_webhook_mode =
             env_or_default("MODERATION_WEBHOOK_MODE", &defaults.moderation_webhook_mode);
+        let webhook_signing_secret = env::var("WEBHOOK_SIGNING_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
         let default_comment_status =
             env_or_default("DEFAULT_COMMENT_STATUS", &defaults.default_comment_status);
         let max_thread_depth =
@@ -565,6 +589,7 @@ impl Config {
             ip_hash_secret,
             moderation_webhook_url,
             moderation_webhook_mode,
+            webhook_signing_secret,
             default_comment_status,
             max_thread_depth,
             turnstile_enabled,
@@ -632,6 +657,7 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 ip_hash_secret: {}, \
                 moderation_webhook_url: {}, \
                 moderation_webhook_mode: {}, \
+                webhook_signing_secret: {}, \
                 default_comment_status: {}, \
                 max_thread_depth: {}, \
                 turnstile_enabled: {}, \
@@ -687,6 +713,11 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 .map(redact_webhook_url)
                 .unwrap_or("(unset)".to_string()),
             self.0.moderation_webhook_mode,
+            if self.0.webhook_signing_secret.is_some() {
+                "***"
+            } else {
+                "(unset)"
+            },
             self.0.default_comment_status,
             self.0.max_thread_depth,
             self.0.turnstile_enabled,
@@ -765,6 +796,7 @@ mod tests {
         "IP_HASH_SECRET",
         "MODERATION_WEBHOOK_URL",
         "MODERATION_WEBHOOK_MODE",
+        "WEBHOOK_SIGNING_SECRET",
         "DEFAULT_COMMENT_STATUS",
         "MAX_THREAD_DEPTH",
         "TURNSTILE_ENABLED",
@@ -1292,6 +1324,92 @@ mod tests {
     }
 
     #[test]
+    fn webhook_signing_secret_defaults_unset_and_loads() {
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            assert!(
+                Config::from_env().unwrap().webhook_signing_secret.is_none(),
+                "unsigned by default (backwards compatible)"
+            );
+        });
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("WEBHOOK_SIGNING_SECRET", "s3cr3t"),
+            ],
+            || {
+                assert_eq!(
+                    Config::from_env()
+                        .unwrap()
+                        .webhook_signing_secret
+                        .as_deref(),
+                    Some("s3cr3t")
+                );
+            },
+        );
+        with_env(
+            &[("ADMIN_TOKEN", "test"), ("WEBHOOK_SIGNING_SECRET", "")],
+            || {
+                assert!(
+                    Config::from_env().unwrap().webhook_signing_secret.is_none(),
+                    "empty secret means unsigned"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn webhook_signing_secret_redacted_in_display() {
+        let config = Config {
+            webhook_signing_secret: Some("s3cr3t".to_string()),
+            ..Config::default()
+        };
+        let rendered = format!("{}", config.redacted_display());
+        assert!(!rendered.contains("s3cr3t"), "signing secret leaked");
+        assert!(
+            rendered.contains("webhook_signing_secret: ***"),
+            "signing secret not redacted: {rendered}"
+        );
+    }
+
+    #[test]
+    fn honeypot_field_restricted_to_safe_names() {
+        // Fail-closed: hostile or typo'd names must refuse boot, not ship a
+        // broken widget (</script>/newline breakout class).
+        let mut bads: Vec<String> = [
+            "x</script><script>alert(1)</script>",
+            "a\nb",
+            "a'b",
+            "a\"b",
+            "a\\b",
+            "a b",
+            "",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        bads.push("a".repeat(65));
+        for bad in &bads {
+            with_env(&[("ADMIN_TOKEN", "test"), ("HONEYPOT_FIELD", bad)], || {
+                let err = Config::from_env().unwrap_err();
+                assert!(
+                    matches!(err, ConfigError::InvalidHoneypotField(_)),
+                    "HONEYPOT_FIELD={bad:?} must fail, got: {err}"
+                );
+            });
+        }
+        let mut goods: Vec<String> = ["website", "company", "a-b_c9"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        goods.push("a".repeat(64));
+        for good in &goods {
+            with_env(&[("ADMIN_TOKEN", "test"), ("HONEYPOT_FIELD", good)], || {
+                assert_eq!(Config::from_env().unwrap().honeypot_field, *good);
+            });
+        }
+    }
+
+    #[test]
     fn trust_proxy_defaults_off_and_parses_bool() {
         with_env(&[("ADMIN_TOKEN", "test")], || {
             assert!(
@@ -1334,6 +1452,7 @@ mod tests {
             ip_hash_secret: None,
             moderation_webhook_url: None,
             moderation_webhook_mode: "async".to_string(),
+            webhook_signing_secret: None,
             default_comment_status: "pending".to_string(),
             max_thread_depth: 0,
             turnstile_enabled: true,

@@ -123,6 +123,7 @@ pub async fn import(
         export_salted: body.ip_hash_salted,
         ip_hash_secret: state.config.ip_hash_secret.clone(),
         max_content_len: state.config.max_content_len,
+        max_author_len: state.config.max_author_len,
         force: body.force,
     };
     match state.repo.restore(input).await {

@@ -1,21 +1,20 @@
+//! Thin HTTP adapter for native comment submission (T19): form →
+//! [`SubmitRequest`] → [`Ingress::submit`] → response. All pipeline ordering
+//! lives in [`crate::ingress`]; this file owns only HTTP mapping (form
+//! deserialization incl. the flattened honeypot map) and the self-delete
+//! route (which goes through the T16 machine).
+
 use axum::Form;
 use axum::Json;
 use axum::extract::State;
 use serde::Deserialize;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::net::IpAddr;
-use std::sync::Arc;
-use url::Url;
+use std::collections::HashMap;
 
-use crate::db::repo::NewComment;
 use crate::error::AppError;
-use crate::github::GitHubLookup;
 use crate::http::peer::ClientIdentity;
-use crate::moderation::ModerationSink as _;
-use crate::sanitize;
+use crate::ingress::{BatcherNotify, Ingress, RealUrlStore, SubmitCtx, SubmitRequest};
+use crate::moderation::WebhookSink;
 use crate::state::AppState;
-use crate::validate;
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct CommentForm {
@@ -34,7 +33,16 @@ pub struct CommentForm {
     /// Honeypot field — bots auto-fill this, humans don't see it.
     /// When non-empty, the submission is stored with `honeypot = 1`.
     /// The moderation system decides what to do with flagged comments.
+    /// This is the DEFAULT name: when `HONEYPOT_FIELD` renames the trap,
+    /// this field is inert and the configured name arrives via `extra`.
     pub website: Option<String>,
+    /// Any other form fields — notably the CONFIGURED honeypot value when
+    /// `HONEYPOT_FIELD != website`. serde cannot name a dynamic field, so
+    /// the map carries it and [`crate::ingress::honeypot_filled`] resolves
+    /// it against config at submission time (S1).
+    #[serde(default, flatten)]
+    #[schema(value_type = Object)]
+    pub extra: HashMap<String, String>,
     /// Cloudflare Turnstile token rendered by the widget in the browser.
     /// Required when `TURNSTILE_ENABLED=true`; ignored otherwise.
     /// Field name matches the widget's automatic hidden input.
@@ -59,298 +67,54 @@ pub async fn create_comment(
     peer: ClientIdentity,
     Form(form): Form<CommentForm>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), AppError> {
-    // ── Honeypot check ────────────────────────────────────────
-    // If the honeypot field is filled, the comment is still stored but
-    // flagged for moderator review. The moderation system decides what to do.
-    let is_honeypot = !form.website.as_deref().unwrap_or("").trim().is_empty();
-    if is_honeypot {
-        tracing::info!(ip = %peer.ip(), "honeypot triggered, comment flagged");
-    }
-
-    // ── Turnstile verification (optional) ─────────────────────
-    // When disabled, the form field is ignored entirely and the comment
-    // proceeds as if Turnstile weren't configured.
-    if state.config.turnstile_enabled {
-        let token = form.cf_turnstile_response.as_deref().unwrap_or("").trim();
-        if token.is_empty() {
-            return Err(AppError::TurnstileFailed(
-                "turnstile token missing".to_string(),
-            ));
-        }
-        let secret = state.config.turnstile_secret_key.as_deref().expect(
-            "turnstile_enabled implies turnstile_secret_key is Some (enforced in Config::from_env)",
-        );
-        match crate::turnstile::verify(
+    // Signed T16 sink (S3) when a webhook URL is configured; None skips the
+    // moderation half of step 13. Owned here so the borrow lives long enough
+    // for the submit call below.
+    let sink_owned = state.config.moderation_webhook_url.as_ref().map(|url| {
+        WebhookSink::created_sink_signed(
             &state.http_client,
-            &state.config.turnstile_verify_url,
-            secret,
-            token,
-            Some(&peer.ip()),
+            url,
+            state.config.webhook_signing_secret.clone(),
         )
-        .await
-        {
-            Ok(result) if result.success => {
-                tracing::debug!(ip = %peer.ip(), "turnstile verification passed");
-            }
-            Ok(result) => {
-                tracing::info!(
-                    ip = %peer.ip(),
-                    codes = ?result.error_codes,
-                    "turnstile verification rejected token"
-                );
-                return Err(AppError::TurnstileFailed(
-                    "turnstile verification failed".to_string(),
-                ));
-            }
-            Err(e) => {
-                // Fail closed: if we can't reach Cloudflare, we reject rather
-                // than silently allow unverified comments through.
-                tracing::warn!(err = %e, "turnstile siteverify request failed");
-                return Err(AppError::ServiceUnavailable(
-                    "turnstile verification unavailable".to_string(),
-                ));
-            }
-        }
-    }
-
-    // ── Per-IP daily cap ──────────────────────────────────────
-    if state.config.max_comments_per_ip_per_day > 0 {
-        let key = peer.limiter_key();
-        if !state
-            .limiter
-            .check_and_increment(&key, state.config.max_comments_per_ip_per_day)
-        {
-            return Err(AppError::RateLimited {
-                retry_after_secs: 86400,
-                reason: format!(
-                    "daily comment limit ({}) reached for this IP",
-                    state.config.max_comments_per_ip_per_day
-                ),
-            });
-        }
-    }
-
-    // Treat empty optional fields as None
-    let author_url = form.author_url.filter(|u| !u.trim().is_empty());
-    let github_username = form.github_username.filter(|u| !u.trim().is_empty());
-
-    // 1. Validate
-    let target_path = &form.target_path;
-    validate::validate_target_path(target_path)
-        .map_err(|e| AppError::BadRequest(format!("invalid target_path: {e}")))?;
-
-    let mut author_name = validate::strip_control_chars(&form.author_name);
-    author_name = author_name.trim().to_string();
-    if author_name.is_empty() && github_username.is_none() {
-        return Err(AppError::BadRequest(
-            "author_name must not be empty (or provide github_username)".to_string(),
-        ));
-    }
-    if author_name.chars().count() > state.config.max_author_len {
-        return Err(AppError::BadRequest(format!(
-            "author_name exceeds max length of {} chars",
-            state.config.max_author_len
-        )));
-    }
-
-    if let Some(ref url) = author_url {
-        validate::validate_http_url(url)
-            .map_err(|e| AppError::BadRequest(format!("invalid author_url: {e}")))?;
-    }
-
-    // 2. Compute content hash for dedup detection.
-    let content_hash = Some(sanitize::content_hash(&form.content));
-
-    // 3. Sanitize content
-    let content = sanitize::sanitize_html(&form.content, state.config.max_content_len);
-
-    // 3.5 Language gate (opt-in via COMMENT_LANG_ALLOWED/BLOCKED). Hard
-    // reject: the comment is never stored.
-    if state.language.is_enabled() {
-        if let Err(e) = state.language.check(&content) {
-            return Err(AppError::BadRequest(format!("comment rejected: {e}")));
-        }
-    }
-
-    // 4. Resolve author info
-    let (resolved_name, resolved_url) = resolve_author(
-        author_url.as_deref(),
-        github_username.as_deref(),
-        author_name,
-        &state.github,
-    )
-    .await;
-
-    // 4. Resolve avatar with best-effort approach
-    let resolved_avatar = resolve_avatar(
-        &resolved_url,
-        author_url.as_deref(),
-        github_username.as_deref(),
-        &state.github,
-        #[cfg(feature = "webmentions")]
-        &state.http_client,
-    )
-    .await;
-
-    // 6. Resolve parent for nesting
-    let (parent_id, depth) = resolve_parent(&form.parent_id, target_path, &state).await?;
-
-    // 5. Generate delete token for self-service deletion.
-    let delete_token = generate_delete_token(&peer.ip());
-    let delete_token_str = delete_token.clone();
-
-    // 6. Optionally store submitter IP and hash for spam analysis.
-    let (submitter_ip, submitter_ip_hash) = if state.config.store_ip_address {
-        let raw = peer.ip().to_string();
-        let hash = crate::ip_hash::hash_ip(&peer.ip(), state.config.ip_hash_secret.as_deref());
-        (Some(raw), Some(hash))
-    } else {
-        (None, None)
+    });
+    let sink_ref = sink_owned
+        .as_ref()
+        .map(|s| s as &dyn crate::moderation::ModerationSink);
+    let notify = BatcherNotify {
+        client: &state.http_client,
+        batcher: &state.notifier,
     };
-
-    // 7. Store comment + auto-approve status + extracted URLs in ONE
-    // transaction (T15 unit of work): a storage failure rolls everything
-    // back instead of leaving a torn comment-without-URLs. Clone values
-    // needed for the webhook payload later.
-    let hook_content = content.clone();
-    let hook_name = resolved_name.clone();
-    let hook_url = resolved_url.clone();
-    let hook_avatar = resolved_avatar.clone();
-    let hook_ip = submitter_ip.clone();
-    let hook_content_hash = content_hash.clone();
-    let extracted_urls = sanitize::extract_urls(&form.content);
-    let auto_approve = state.config.default_comment_status == "approved";
-    let new_id = state
-        .repo
-        .create_native_comment(
-            NewComment {
-                target_path: target_path.clone(),
-                comment_type: "native".to_string(),
-                source_url: None,
-                author_name: resolved_name,
-                author_url: resolved_url,
-                author_avatar: resolved_avatar,
-                content,
-                parent_id,
-                depth,
-                honeypot: is_honeypot,
-                delete_token: Some(delete_token),
-                submitter_ip,
-                submitter_ip_hash,
-                content_hash,
-            },
-            auto_approve,
-            extracted_urls,
-        )
-        .await?;
-
-    // 9.5 Notify admin channels (Telegram / Slack / Discord) about the new
-    // comment. Batched into digests per NOTIFY_BATCH_SECS; fire-and-forget —
-    // failures are logged, never fail the request.
-    if state.notifier.has_channels() {
-        let info = crate::notify::NewCommentInfo {
-            id: new_id,
-            target_path: target_path.clone(),
-            comment_type: "native".to_string(),
-            author_name: hook_name.clone(),
-            author_url: hook_url.clone(),
-            content: hook_content.clone(),
-            honeypot: is_honeypot,
-            is_reply: parent_id.is_some(),
-        };
-        state.notifier.push(&state.http_client, info);
-    }
-
-    // 10. Moderation webhook — either sync (await decision) or async (fire-and-forget).
-    let mut final_status = state.config.default_comment_status.clone(); // already applied above
-    if let Some(ref webhook_url) = state.config.moderation_webhook_url {
-        let client = state.http_client.clone();
-        let url = webhook_url.clone();
-        let is_sync = state.config.moderation_webhook_mode == "sync";
-
-        // Build enriched payload (one builder; auth/payload shape unchanged).
-        let submitter_stats = if let Some(ref ip) = hook_ip {
-            state.repo.submitter_stats(ip).await.ok()
-        } else {
-            None
-        };
-        let parent_chain = if parent_id.is_some() {
-            state.repo.get_comment_chain(new_id).await.ok().flatten()
-        } else {
-            None
-        };
-        let (total, approved, spam, pending, deleted, first_seen) =
-            submitter_stats.unwrap_or((0, 0, 0, 0, 0, None));
-        let parents = parent_chain.map(|(_, chain)| {
-            chain.into_iter().map(|p| serde_json::json!({
-                "id": p.id, "author_name": p.author_name, "content": p.content, "depth": p.depth,
-            })).collect::<Vec<_>>()
-        });
-
-        let payload = crate::moderation::comment_created_payload(
-            &crate::moderation::CommentCreated {
-                id: new_id,
-                target_path,
-                comment_type: "native",
-                author_name: &hook_name,
-                author_url: hook_url.as_deref(),
-                author_avatar: hook_avatar.as_deref(),
-                content: &hook_content,
-                honeypot: is_honeypot,
-                parent_id,
-                depth,
-                submitter_ip: hook_ip.as_deref(),
-                delete_token: &delete_token_str,
-                content_hash: hook_content_hash.as_deref(),
-                is_reply: parent_id.is_some(),
-                parents,
-                submitter_total: total,
-                submitter_approved: approved,
-                submitter_spam: spam,
-                submitter_pending: pending,
-                submitter_deleted: deleted,
-                submitter_first_seen: first_seen.as_deref(),
-            },
-            &format!("/api/admin/comments/{new_id}"),
-        );
-
-        // One sink, two adapters: sync awaits the decision, async fires.
-        let sink = crate::moderation::WebhookSink::created_sink(&client, &url);
-        if is_sync {
-            if let Some(decision) = sink.decide(&payload).await {
-                let _ = state.repo.update_status(new_id, decision.as_str()).await;
-                final_status = decision.to_string();
-            }
-        } else {
-            sink.emit(payload);
-        }
-    }
-
-    tracing::debug!(id = new_id, status = %final_status, "comment stored");
-
+    let urls = RealUrlStore;
+    let ctx = SubmitCtx {
+        config: &state.config,
+        repo: &state.repo,
+        github: &state.github,
+        language: &state.language,
+        limiter: &state.limiter,
+        http_client: &state.http_client,
+        peer_ip: peer.ip(),
+        peer_limiter_key: peer.limiter_key(),
+        notify: &notify,
+        urls: &urls,
+        moderation_sink: sink_ref,
+        moderation_is_sync: state.config.moderation_webhook_mode == "sync",
+    };
+    let req = SubmitRequest {
+        target_path: form.target_path,
+        author_name: form.author_name,
+        author_url: form.author_url,
+        github_username: form.github_username,
+        content: form.content,
+        parent_id: form.parent_id,
+        website: form.website,
+        extra_fields: form.extra,
+        turnstile_token: form.cf_turnstile_response,
+    };
+    let stored = Ingress::submit(req, &ctx).await?;
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "delete_token": delete_token_str, "status": final_status })),
+        Json(serde_json::json!({ "delete_token": stored.delete_token, "status": stored.status })),
     ))
-}
-
-/// Generate a random hex token for self-service comment deletion.
-/// Uses a hash of the client identity IP, current time, and a monotonic counter.
-/// Not cryptographically secure, but sufficient for anonymous comment deletion
-/// (the delete endpoint is rate-limited).
-fn generate_delete_token(ip: &IpAddr) -> String {
-    let mut hasher = DefaultHasher::new();
-    ip.hash(&mut hasher);
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .hash(&mut hasher);
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    COUNTER
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        .hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
 }
 
 // ── POST /api/comment/{id}/delete ───────────────────────────
@@ -366,12 +130,15 @@ pub async fn delete_comment(
     Json(body): Json<DeleteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Self-delete goes through the status machine so the engine sees exactly
-    // one `comment.status_changed` event (previously silent).
-    let sink = state
-        .config
-        .moderation_webhook_url
-        .as_ref()
-        .map(|url| crate::moderation::WebhookSink::status_sink(&state.http_client, url));
+    // one `comment.status_changed` event (previously silent). Signed like
+    // every other emission when a secret is configured (S3).
+    let sink = state.config.moderation_webhook_url.as_ref().map(|url| {
+        WebhookSink::status_sink_signed(
+            &state.http_client,
+            url,
+            state.config.webhook_signing_secret.clone(),
+        )
+    });
     let sink_ref = sink
         .as_ref()
         .map(|s| s as &dyn crate::moderation::ModerationSink);
@@ -386,199 +153,6 @@ pub async fn delete_comment(
             "comment not found or token doesn't match".to_string(),
         ))
     }
-}
-
-/// Validate and resolve the parent_id for a new comment.
-/// Returns (parent_id_to_store, computed_depth).
-///
-/// Rules:
-/// - If `form_parent_id` is None: top-level comment (parent_id = None, depth = 0).
-/// - If `form_parent_id` is Some(id):
-///   - Parent must exist, be approved, and belong to the same target_path.
-///   - Parent's depth must be < max_thread_depth.
-///   - Reply depth = parent.depth + 1.
-/// - If max_thread_depth is 0, nesting is disabled entirely.
-async fn resolve_parent(
-    form_parent_id: &Option<i64>,
-    target_path: &str,
-    state: &AppState,
-) -> Result<(Option<i64>, i64), AppError> {
-    let Some(pid) = form_parent_id else {
-        return Ok((None, 0));
-    };
-    let pid = *pid;
-
-    let max_depth = state.config.max_thread_depth;
-    if max_depth == 0 {
-        return Err(AppError::BadRequest(
-            "threaded replies are disabled on this server".to_string(),
-        ));
-    }
-
-    let parent = state
-        .repo
-        .get_comment(pid)
-        .await?
-        .ok_or_else(|| AppError::BadRequest(format!("parent comment {pid} not found")))?;
-
-    if parent.status != "approved" {
-        return Err(AppError::BadRequest(format!(
-            "parent comment {pid} is not approved (status: {})",
-            parent.status
-        )));
-    }
-
-    if parent.target_path != target_path {
-        return Err(AppError::BadRequest(format!(
-            "parent comment {pid} belongs to a different page ('{}'), not '{target_path}'",
-            parent.target_path
-        )));
-    }
-
-    if parent.depth >= max_depth {
-        return Err(AppError::BadRequest(format!(
-            "nesting depth exceeded: parent comment {pid} is at depth {}, max allowed is {max_depth}",
-            parent.depth
-        )));
-    }
-
-    let depth = parent.depth + 1;
-    Ok((Some(pid), depth))
-}
-
-async fn resolve_author(
-    author_url: Option<&str>,
-    github_username: Option<&str>,
-    cleaned_name: String,
-    github: &Arc<dyn GitHubLookup>,
-) -> (String, Option<String>) {
-    // Priority 1: user provided their own website — always use it.
-    if let Some(url) = author_url {
-        return (cleaned_name, Some(url.to_string()));
-    }
-
-    // Priority 2: no author_url, but github_username given — derive URL.
-    if let Some(gh) = github_username {
-        let gh = gh.trim();
-        if !gh.is_empty() {
-            let github_url = Some(format!("https://github.com/{gh}"));
-            // If form name was empty, try to fetch from GitHub API first.
-            if cleaned_name.is_empty() {
-                if let Some(profile) = github.lookup(gh).await {
-                    return (profile.name, github_url);
-                }
-                return (gh.to_string(), github_url);
-            }
-            // Form name was provided — keep it, but attach the GitHub URL.
-            return (cleaned_name, github_url);
-        }
-    }
-
-    // Priority 3: name only, no enrichment.
-    (cleaned_name, None)
-}
-
-/// Resolve a profile picture URL. Tries multiple strategies in priority order:
-///
-/// 1. GitHub API avatar (if `author_url` is a github.com URL)
-/// 2. (webmentions feature) h-card photo + favicon from author's page
-/// 3. GitHub API avatar (if `github_username` was provided)
-/// 4. DiceBear generated avatar from author URL domain
-/// 5. DiceBear generated avatar from GitHub username
-/// 6. DiceBear from a generic seed (absolute last resort)
-async fn resolve_avatar(
-    resolved_url: &Option<String>,
-    raw_author_url: Option<&str>,
-    github_username: Option<&str>,
-    github: &Arc<dyn GitHubLookup>,
-    #[cfg(feature = "webmentions")] http_client: &reqwest::Client,
-) -> Option<String> {
-    // Priority 1: If author_url is a GitHub profile, get avatar via API.
-    if let Some(url) = resolved_url {
-        if let Some(username) = crate::github::extract_github_username(url) {
-            if let Some(profile) = github.lookup(&username).await {
-                return Some(profile.avatar_url);
-            }
-        }
-    }
-
-    // Priority 2: Fetch the author's page and try h-card photo + favicon.
-    #[cfg(feature = "webmentions")]
-    if let Some(url) = resolved_url {
-        if let Ok(parsed) = Url::parse(url) {
-            let avatar = fetch_page_avatar(http_client, &parsed).await;
-            if avatar.is_some() {
-                return avatar;
-            }
-        }
-    }
-
-    // Priority 3: GitHub avatar from `github_username` form field.
-    if let Some(gh) = github_username {
-        let gh = gh.trim();
-        if !gh.is_empty() {
-            if let Some(profile) = github.lookup(gh).await {
-                return Some(profile.avatar_url);
-            }
-        }
-    }
-
-    // Priority 4: DiceBear generated avatar from the author URL domain.
-    if let Some(url) = raw_author_url {
-        if let Ok(parsed) = Url::parse(url) {
-            if let Some(domain) = parsed.host_str() {
-                return Some(format!(
-                    "https://api.dicebear.com/7.x/notionists/svg?seed={domain}"
-                ));
-            }
-        }
-    }
-
-    // Priority 5: DiceBear from GitHub username.
-    if let Some(gh) = github_username {
-        let gh = gh.trim();
-        if !gh.is_empty() {
-            return Some(format!(
-                "https://api.dicebear.com/7.x/notionists/svg?seed={gh}"
-            ));
-        }
-    }
-
-    // Priority 6: DiceBear from IP address (unique per-author without any other signal).
-    Some("https://api.dicebear.com/7.x/notionists/svg?seed=anonymous".to_string())
-}
-
-/// Fetch a URL, parse the HTML, and try to extract an avatar.
-/// Tries h-card photo first, then favicon.
-///
-/// The untrusted author URL goes through [`crate::fetch::SafeFetcher`] — the
-/// same guarded door as webmention fetches — never a bare client. Any refusal
-/// (blocked target, redirect loop, oversized body, network error) returns
-/// `None` so the caller falls back to dicebear, like every other failure.
-#[cfg(feature = "webmentions")]
-async fn fetch_page_avatar(_http_client: &reqwest::Client, url: &Url) -> Option<String> {
-    // NOTE: the shared client is deliberately unused here — SafeFetcher owns
-    // its redirect-disabled client so per-hop SSRF checks cannot be skipped.
-    let fetched = crate::fetch::SafeFetcher::new().fetch(url).await.ok()?;
-
-    // Try h-card photo first (reads the single FetchedDoc parse tree).
-    use crate::mf2;
-    if let Some(parsed) = mf2::parse_h_entry(&fetched.doc) {
-        if let Some(avatar) = parsed.author_avatar {
-            if let Ok(abs) = url.join(&avatar) {
-                return Some(abs.to_string());
-            }
-        }
-        // Also check the author's u-photo directly.
-        let text = fetched.text();
-        if let Some(avatar) = mf2::extract_photo(&text, url) {
-            return Some(avatar);
-        }
-    }
-
-    // Fallback to favicon.
-    let text = fetched.text();
-    crate::avatar::best_favicon(&text, url)
 }
 
 #[cfg(test)]
@@ -1629,5 +1203,88 @@ mod tests {
             1,
             "no second event"
         );
+    }
+
+    #[tokio::test]
+    async fn comment_created_emission_is_signed_through_shared_sink() {
+        // T19(e) behavioral, comment half: the native path emits through the
+        // same signed T16 sink as reactions — one implementation serves both.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let (mut state, _dir) = helpers::test_state();
+        state.config.moderation_webhook_url = Some(format!("{}/hook", server.uri()));
+        state.config.webhook_signing_secret = Some("s3cr3t".to_string());
+        let app = build_app(state);
+        let resp = app
+            .oneshot(form_request(
+                "target_path=/signed&author_name=Ada&content=hi",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+        let reqs = wait_for_moderation(&server, 1).await;
+        assert_eq!(reqs.len(), 1, "comment.created emitted exactly once");
+        let ts = reqs[0]
+            .headers
+            .get(crate::http::webhook::TIMESTAMP_HEADER)
+            .expect("timestamp header via shared sink");
+        let sig = reqs[0]
+            .headers
+            .get(crate::http::webhook::SIGNATURE_HEADER)
+            .expect("signature header via shared sink");
+        assert!(crate::http::webhook::verify_body(
+            "s3cr3t",
+            Some(ts.to_str().unwrap()),
+            Some(sig.to_str().unwrap()),
+            &reqs[0].body,
+            crate::http::webhook::timestamp_now()
+        ));
+    }
+
+    #[tokio::test]
+    async fn honeypot_configured_name_flags_and_legacy_inert() {
+        // S1 end-to-end: HONEYPOT_FIELD=company → filling company flags,
+        // filling website alone does not.
+        let (mut state, _dir) = helpers::test_state();
+        state.config.honeypot_field = "company".to_string();
+        let app = build_app(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(form_request(
+                "target_path=/hp-a&author_name=Bot&content=spam&company=spam+co",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+        let pending = state.repo.list_pending(10, None, None).await.unwrap();
+        let c = pending.iter().find(|c| c.target_path == "/hp-a").unwrap();
+        assert!(c.honeypot, "configured field must flag");
+
+        let resp = app
+            .oneshot(form_request(
+                "target_path=/hp-b&author_name=Bot&content=spam&website=spammer.example",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+        let pending = state.repo.list_pending(10, None, None).await.unwrap();
+        let c = pending.iter().find(|c| c.target_path == "/hp-b").unwrap();
+        assert!(!c.honeypot, "legacy field inert under a custom name");
+    }
+
+    #[tokio::test]
+    async fn hostile_github_username_rejected_at_handler() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(form_request(
+                "target_path=/gh-hostile&author_name=Ada&content=hi&github_username=a%3Cb%3E",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "hostile github_username must be a 400");
     }
 }

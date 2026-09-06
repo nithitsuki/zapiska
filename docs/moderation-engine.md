@@ -56,6 +56,40 @@ Valid actions are `approved`, `spam`, `deleted`, and `pending`.
 
 If the webhook fails, zapiska keeps the current status.
 
+## Payload signing
+
+When `WEBHOOK_SIGNING_SECRET` is set, every webhook POST (async and sync,
+`*.created` and `*.status_changed`) carries `X-Zapiska-Timestamp` and
+`X-Zapiska-Signature: v1=<hex>` headers (HMAC-SHA256 over
+`"<timestamp>.<raw JSON body>"`). Verify before trusting the payload:
+
+```python
+import hashlib
+import hmac
+import time
+
+SECRET = "replace-this-value"
+WINDOW = 300
+
+
+def verify(timestamp: str, signature: str, body: bytes) -> bool:
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return False
+    if abs(time.time() - ts) > WINDOW:
+        return False
+    if not signature.startswith("v1="):
+        return False
+    expected = hmac.new(
+        SECRET.encode(), timestamp.encode() + b"." + body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(signature[3:], expected)
+```
+
+Reject unsigned or tampered bodies when a secret is configured (see
+[Security](security.md#webhook-authentication) for the full scheme).
+
 ## Comment event
 
 The native comment event uses `event: comment.created`.
@@ -74,7 +108,7 @@ The native comment event uses `event: comment.created`.
   "parent_id": null,
   "depth": 0,
   "submitter_ip": "203.0.113.42",
-  "delete_token": "0123456789abcdef",
+  "delete_token": "0123456789abcdef0123456789abcdef",
   "content_hash": "h:a1b2c3d4",
   "is_reply": false,
   "parents": null,

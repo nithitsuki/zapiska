@@ -3096,6 +3096,7 @@ dependencies = [
  "async-trait",
  "axum",
  "dotenvy",
+ "getrandom 0.4.3",
  "governor",
  "ipnet",
  "quick-xml",

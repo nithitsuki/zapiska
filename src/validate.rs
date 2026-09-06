@@ -11,6 +11,8 @@ pub enum ValidationError {
     InvalidScheme(String),
     RelativeUrl,
     InvalidUrl(String),
+    InvalidGithubUsername(String),
+    InvalidAuthor(String),
 }
 
 impl std::fmt::Display for ValidationError {
@@ -27,6 +29,11 @@ impl std::fmt::Display for ValidationError {
             Self::InvalidScheme(s) => write!(f, "invalid URL scheme: {s}, expected http or https"),
             Self::RelativeUrl => write!(f, "URL must be absolute"),
             Self::InvalidUrl(s) => write!(f, "invalid URL: {s}"),
+            Self::InvalidGithubUsername(s) => write!(
+                f,
+                "invalid github_username '{s}': 1-39 chars, alphanumeric or single hyphens, no leading/trailing hyphen"
+            ),
+            Self::InvalidAuthor(s) => write!(f, "{s}"),
         }
     }
 }
@@ -58,16 +65,50 @@ pub fn validate_target_path(path: &str) -> Result<(), ValidationError> {
 }
 
 /// Validate that `url` is an absolute http or https URL with a host.
+/// DECISION (S2/C4): the doc always claimed "with a host" but the check only
+/// compared schemes. The host is now enforced explicitly (defense in depth:
+/// today's `url` crate already fails truly-hostless inputs like `http://`
+/// at parse; the explicit check pins the contract if that ever changes).
+/// A missing host is `InvalidUrl`. Callers (native, import, URL rows) share
+/// this one rule. Note `http:///no-host` is NOT hostless — WHATWG parses
+/// the host as `no-host`, so it is correctly accepted.
 pub fn validate_http_url(url_str: &str) -> Result<(), ValidationError> {
     let parsed =
         Url::parse(url_str).map_err(|_| ValidationError::InvalidUrl(url_str.to_string()))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(ValidationError::InvalidScheme(parsed.scheme().to_string()));
     }
+    if parsed.host_str().is_none_or(|h| h.is_empty()) {
+        return Err(ValidationError::InvalidUrl(url_str.to_string()));
+    }
+    Ok(())
+}
+
+/// Validate a `github_username` BEFORE it is interpolated into
+/// `https://github.com/{name}` or a DiceBear seed (S2). GitHub's shape:
+/// 1-39 chars, ASCII alphanumeric or single hyphens, never leading/trailing.
+/// Anything else (angle brackets, slashes, whitespace, control/bidi chars,
+/// over-long) is rejected so a hostile login can never escape the URL path.
+pub fn validate_github_username(raw: &str) -> Result<(), ValidationError> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > 39 {
+        return Err(ValidationError::InvalidGithubUsername(raw.to_string()));
+    }
+    if name.starts_with('-') || name.ends_with('-') || name.contains("--") {
+        return Err(ValidationError::InvalidGithubUsername(raw.to_string()));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(ValidationError::InvalidGithubUsername(raw.to_string()));
+    }
     Ok(())
 }
 
 /// Strip ASCII control characters (U+0000–U+001F, excluding nothing per spec).
+///
+/// Superseded for author names by [`crate::identity::clean_author_name`],
+/// which additionally strips bidi/format spoof characters (U+202E, U+200B,
+/// isolates). Kept for target paths and other non-identity fields where
+/// `Cc`-only stripping is the specified rule.
 pub fn strip_control_chars(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
 }
@@ -207,7 +248,6 @@ mod tests {
         let result = validate_http_url("");
         assert!(matches!(result, Err(ValidationError::InvalidUrl(_))));
     }
-
     #[test]
     fn rejects_garbage() {
         let result = validate_http_url(" not a url ");
@@ -270,5 +310,74 @@ mod tests {
     #[test]
     fn zero_max_returns_empty() {
         assert_eq!(clamp_to_max_len("anything", 0), "");
+    }
+
+    // ── validate_http_url host enforcement (S2/C4) ────────
+
+    #[test]
+    fn rejects_hostless_http_url() {
+        // Truly hostless inputs (the `url` crate fails most at parse with
+        // "empty host"; the explicit host check pins the rest).
+        for bad in [
+            "http://",
+            "https://",
+            "http:///",
+            "http://?x",
+            "https://?q=1",
+        ] {
+            assert!(
+                matches!(validate_http_url(bad), Err(ValidationError::InvalidUrl(_))),
+                "{bad:?} must be rejected as hostless"
+            );
+        }
+        // `http:///no-host` is NOT hostless: WHATWG parses host `no-host`.
+        assert!(validate_http_url("http:///no-host").is_ok());
+    }
+
+    #[test]
+    fn accepts_host_with_port_and_path() {
+        assert!(validate_http_url("http://example.com:8080/p").is_ok());
+    }
+
+    // ── validate_github_username (S2) ─────────────────────
+
+    #[test]
+    fn github_accepts_valid_shapes() {
+        for good in ["alice", "a", "bob-smith", "A1", "x-1-y", &"a".repeat(39)] {
+            assert!(
+                validate_github_username(good).is_ok(),
+                "{good:?} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn github_rejects_bad_shapes() {
+        // RED: the old path interpolated these into URLs unsanitized.
+        for bad in [
+            "",
+            "   ",
+            "a<b>",
+            "a/b",
+            "a b",
+            "a\nb",
+            "-lead",
+            "trail-",
+            "double--hyphen",
+            &"a".repeat(40),
+            "under_score",
+            "semi;colon",
+            "quote\"q",
+            "apo's",
+            "dot.name",
+            "unicode-é",
+            "\u{202e}evil",
+            "a\u{200b}b",
+        ] {
+            assert!(
+                validate_github_username(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 }

@@ -279,13 +279,31 @@ pub trait ModerationSink: Send + Sync {
     /// decision, parse it to a [`Status`]. `None` on any failure or any
     /// non-whitelisted action (the caller keeps the current status).
     async fn decide(&self, payload: &serde_json::Value) -> Option<Status>;
+    /// One shared sync/async adapter (T19 dedup point): `is_sync == true`
+    /// awaits the decision, `false` fire-and-forgets and returns `None`.
+    /// Both comment and reaction ingress call THIS — the two copy-pasted
+    /// `if sync { decide } else { emit }` blocks collapse to one line each.
+    async fn deliver(&self, payload: &serde_json::Value, is_sync: bool) -> Option<Status> {
+        if is_sync {
+            self.decide(payload).await
+        } else {
+            self.emit(payload.clone());
+            None
+        }
+    }
 }
 
 /// Production sink: delivers to the configured moderation webhook URL.
+/// Carries an optional HMAC signing secret (S3): `None`/empty sends the
+/// historical unsigned body; `Some` signs BOTH async and sync emissions
+/// with `X-Zapiska-Timestamp`/`X-Zapiska-Signature` (see
+/// `crate::http::webhook`). T19 plumbing only — delivery semantics,
+/// timeouts, and payload schemas are unchanged (T16 owns them).
 pub struct WebhookSink {
     client: reqwest::Client,
     url: String,
     timeout_secs: u64,
+    signing_secret: Option<String>,
 }
 
 impl WebhookSink {
@@ -295,7 +313,16 @@ impl WebhookSink {
             client,
             url,
             timeout_secs,
+            signing_secret: None,
         }
+    }
+
+    /// Attach the HMAC signing secret (builder; keeps existing 3-arg call
+    /// sites compiling unsigned).
+    #[must_use]
+    pub fn with_secret(mut self, secret: Option<String>) -> Self {
+        self.signing_secret = secret.filter(|s| !s.is_empty());
+        self
     }
 
     /// Sink for `*.status_changed` events (historical 5 s timeout).
@@ -304,54 +331,68 @@ impl WebhookSink {
         Self::new(client.clone(), url.to_string(), 5)
     }
 
+    /// Signed variant: same timeout, signs when `secret` is `Some`.
+    #[must_use]
+    pub fn status_sink_signed(client: &reqwest::Client, url: &str, secret: Option<String>) -> Self {
+        Self::status_sink(client, url).with_secret(secret)
+    }
+
     /// Sink for `*.created` events (historical 10 s timeout).
     #[must_use]
     pub fn created_sink(client: &reqwest::Client, url: &str) -> Self {
         Self::new(client.clone(), url.to_string(), 10)
+    }
+
+    /// Signed variant: same timeout, signs when `secret` is `Some`.
+    #[must_use]
+    pub fn created_sink_signed(
+        client: &reqwest::Client,
+        url: &str,
+        secret: Option<String>,
+    ) -> Self {
+        Self::created_sink(client, url).with_secret(secret)
     }
 }
 
 #[async_trait::async_trait]
 impl ModerationSink for WebhookSink {
     fn emit(&self, payload: serde_json::Value) {
-        crate::http::webhook::fire(&self.client, &self.url, payload, self.timeout_secs);
+        crate::http::webhook::fire(
+            &self.client,
+            &self.url,
+            payload,
+            self.timeout_secs,
+            self.signing_secret.as_deref(),
+        );
     }
 
     async fn decide(&self, payload: &serde_json::Value) -> Option<Status> {
-        request_decision(&self.client, &self.url, payload).await
+        request_decision(
+            &self.client,
+            &self.url,
+            payload,
+            self.signing_secret.as_deref(),
+        )
+        .await
     }
 }
 
 /// Shared sync adapter behind [`ModerationSink::decide`]: POST with a 10 s
 /// timeout and parse the `action` field. Replaces the copy-pasted loops in
 /// `comment_post.rs` and `reactions.rs` (warn-and-keep-status on every
-/// failure, exactly as before).
+/// failure, exactly as before). Signs the POST when `signing_secret` is
+/// `Some` (S3); unsigned otherwise.
 pub async fn request_decision(
     client: &reqwest::Client,
     url: &str,
     payload: &serde_json::Value,
+    signing_secret: Option<&str>,
 ) -> Option<Status> {
-    match client
-        .post(url)
-        .json(payload)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
-            Ok(decision) => decision["action"]
-                .as_str()
-                .and_then(|a| a.parse::<Status>().ok()),
-            Err(_) => None,
-        },
-        Ok(r) => {
-            tracing::warn!(webhook = %url, status = %r.status(), "sync webhook returned error");
-            None
-        }
-        Err(e) => {
-            tracing::warn!(webhook = %url, err = %e, "sync webhook failed");
-            None
-        }
+    match crate::http::webhook::post_signed(client, url, payload, signing_secret).await {
+        Some(decision) => decision["action"]
+            .as_str()
+            .and_then(|a| a.parse::<Status>().ok()),
+        None => None,
     }
 }
 
@@ -1012,7 +1053,7 @@ mod tests {
         let client = reqwest::Client::new();
         let payload = serde_json::json!({"event": "comment.created"});
         assert_eq!(
-            request_decision(&client, &server.uri(), &payload).await,
+            request_decision(&client, &server.uri(), &payload, None).await,
             Some(Status::Approved)
         );
 
@@ -1025,7 +1066,7 @@ mod tests {
             .mount(&server2)
             .await;
         assert_eq!(
-            request_decision(&client, &server2.uri(), &payload).await,
+            request_decision(&client, &server2.uri(), &payload, None).await,
             None
         );
 
@@ -1035,8 +1076,58 @@ mod tests {
             .mount(&server3)
             .await;
         assert_eq!(
-            request_decision(&client, &server3.uri(), &payload).await,
+            request_decision(&client, &server3.uri(), &payload, None).await,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn signed_sink_signs_both_emit_and_decide() {
+        // S3 structural: one WebhookSink carries the secret to BOTH paths.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"action": "approved"})),
+            )
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let sink = WebhookSink::created_sink_signed(&client, &server.uri(), Some("s3cr3t".into()));
+        let payload = serde_json::json!({"event": "comment.created"});
+        assert_eq!(sink.decide(&payload).await, Some(Status::Approved));
+        sink.emit(payload);
+        let mut reqs = Vec::new();
+        for _ in 0..100 {
+            reqs = server.received_requests().await.unwrap_or_default();
+            if reqs.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(reqs.len(), 2, "sync decide + async emit both delivered");
+        for r in &reqs {
+            let ts = r.headers.get(crate::http::webhook::TIMESTAMP_HEADER);
+            let sig = r.headers.get(crate::http::webhook::SIGNATURE_HEADER);
+            assert!(ts.is_some() && sig.is_some(), "both emissions signed");
+        }
+    }
+
+    #[tokio::test]
+    async fn deliver_collapses_sync_async_into_one_call() {
+        // T19(e) structural: comment and reaction ingress share `deliver`.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"action": "spam"})),
+            )
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let sink = WebhookSink::created_sink(&client, &server.uri());
+        let payload = serde_json::json!({"event": "reaction.created"});
+        assert_eq!(sink.deliver(&payload, true).await, Some(Status::Spam));
+        assert_eq!(sink.deliver(&payload, false).await, None);
     }
 }

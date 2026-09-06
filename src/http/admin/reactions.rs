@@ -48,11 +48,13 @@ pub struct BatchReactionRequest {
 }
 
 fn status_sink(state: &AppState) -> Option<WebhookSink> {
-    state
-        .config
-        .moderation_webhook_url
-        .as_ref()
-        .map(|url| WebhookSink::status_sink(&state.http_client, url))
+    state.config.moderation_webhook_url.as_ref().map(|url| {
+        WebhookSink::status_sink_signed(
+            &state.http_client,
+            url,
+            state.config.webhook_signing_secret.clone(),
+        )
+    })
 }
 
 fn parse_action(action: &str) -> Result<Status, AppError> {
