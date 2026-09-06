@@ -3,6 +3,20 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 
+/// Latest schema version. Bump on every schema change and add a gated
+/// `if current < N` block in [`run_migrations`].
+///
+/// History:
+/// - 1: initial (comments base, webmention_seen, github_profiles).
+/// - 2: threading (parent_id, depth, idx_comments_parent).
+/// - 3: honeypot flag + delete_token.
+/// - 4: submitter_ip.
+/// - 5: content_hash.
+/// - 6: comment_urls table.
+/// - 7: submitter_ip_hash + backfill.
+/// - 8: comment_reactions table (previously only in schema.sql, now explicit).
+pub const LATEST_SCHEMA_VERSION: i64 = 8;
+
 pub type SqlitePool = Pool<SqliteConnectionManager>;
 
 #[derive(Debug)]
@@ -29,84 +43,251 @@ pub fn create_pool(database_path: &str) -> Result<SqlitePool, r2d2::Error> {
         .build(manager)
 }
 
-/// Run schema migrations. Fresh databases get the full schema from schema.sql.
-/// Existing databases get incremental ALTER TABLE migrations (errors silently
-/// ignored when a column already exists).
-pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
-    let conn = pool.get()?;
-    let schema = include_str!("../../migrations/schema.sql");
-    conn.execute_batch(schema)?;
+/// Read `PRAGMA user_version` — the source of truth for schema version.
+/// Returns 0 for legacy databases created before version tracking.
+fn user_version(conn: &Connection) -> Result<i64, rusqlite::Error> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+}
 
-    // Migration 2: nested comments — add parent_id, depth, and indexes.
-    let _ = conn.execute(
-        "ALTER TABLE comments ADD COLUMN parent_id INTEGER REFERENCES comments(id)",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE comments ADD COLUMN depth INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ =
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id)");
+fn set_user_version(conn: &Connection, version: i64) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(&format!("PRAGMA user_version = {version}"))
+}
 
-    // Migration 3: honeypot flag and self-deletion tokens.
-    let _ = conn.execute(
-        "ALTER TABLE comments ADD COLUMN honeypot INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute("ALTER TABLE comments ADD COLUMN delete_token TEXT", []);
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, rusqlite::Error> {
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type IN ('table','view') AND name = ?1",
+        rusqlite::params![table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
 
-    // Migration 4: optional submitter IP address storage.
-    let _ = conn.execute("ALTER TABLE comments ADD COLUMN submitter_ip TEXT", []);
-    // Migration 5: content hash for dedup detection.
-    let _ = conn.execute("ALTER TABLE comments ADD COLUMN content_hash TEXT", []);
-    // Migration 7: add submitter_ip_hash column and populate from existing IPs.
-    let _ = conn.execute("ALTER TABLE comments ADD COLUMN submitter_ip_hash TEXT", []);
-    {
-        use sha2::{Digest, Sha256};
-        let secret = std::env::var("IP_HASH_SECRET")
-            .ok()
-            .filter(|s| !s.is_empty());
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, submitter_ip FROM comments WHERE submitter_ip IS NOT NULL AND submitter_ip_hash IS NULL",
-        ) {
-            if let Ok(rows) = stmt.query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            }) {
-                for row in rows.flatten() {
-                    let (id, raw) = row;
-                    if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
-                        let mut h = Sha256::new();
-                        h.update(ip.to_string().as_bytes());
-                        if let Some(ref s) = secret {
-                            h.update(s.as_bytes());
-                        }
-                        let hex: String =
-                            h.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-                        let _ = conn.execute(
-                            "UPDATE comments SET submitter_ip_hash = ?1 WHERE id = ?2",
-                            rusqlite::params![format!("h:{hex}"), id],
-                        );
-                    }
-                }
-            }
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, rusqlite::Error> {
+    // Table name is internal (never user input); PRAGMA doesn't take params.
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for c in cols.flatten() {
+        if c == column {
+            return Ok(true);
         }
     }
+    Ok(false)
+}
 
-    // Migration 6: extracted URLs for cross-comment tracking.
-    let _ = conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS comment_urls (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            comment_id INTEGER NOT NULL REFERENCES comments(id),
-            url TEXT NOT NULL,
-            domain TEXT NOT NULL,
-            url_hash TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_comment_urls_comment ON comment_urls(comment_id);
-        CREATE INDEX IF NOT EXISTS idx_comment_urls_domain ON comment_urls(domain);
-        CREATE INDEX IF NOT EXISTS idx_comment_urls_hash ON comment_urls(url_hash);",
-    );
+/// `ALTER TABLE ... ADD COLUMN` only when the column is missing. Real errors
+/// propagate; the old `let _ =` swallow-everything behavior is gone.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    ddl: &str,
+) -> Result<(), rusqlite::Error> {
+    if column_exists(conn, table, column)? {
+        return Ok(());
+    }
+    conn.execute_batch(ddl)?;
+    // Verify the column actually appeared — catches typos and no-op DDL.
+    if !column_exists(conn, table, column)? {
+        return Err(rusqlite::Error::ExecuteReturnedResults);
+    }
+    Ok(())
+}
 
+/// Run schema migrations, versioned via `PRAGMA user_version`.
+///
+/// - Fresh databases (`user_version == 0`, no `comments` table) get the full
+///   canonical schema from `schema.sql`, then are stamped `LATEST`.
+/// - Legacy databases (`user_version == 0`, tables exist) run the same
+///   catch-up path idempotently (column/table existence checks, not blind
+///   `ALTER`s) and are then stamped `LATEST`. Existing rows are preserved.
+/// - Versioned databases (`user_version >= 1`) apply only pending
+///   `if current < N` migrations in order.
+/// - A database newer than this binary (`user_version > LATEST`) is refused
+///   with an error instead of silently running against an unknown schema.
+pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = pool.get()?;
+    let current: i64 = user_version(&conn)?;
+
+    if current > LATEST_SCHEMA_VERSION {
+        return Err(format!(
+            "database schema version {current} is newer than supported {LATEST_SCHEMA_VERSION}: upgrade zapiska first"
+        )
+        .into());
+    }
+
+    if current == LATEST_SCHEMA_VERSION {
+        // Defensive: ensure the canonical objects exist even if a previous
+        // run was interrupted after stamping. CREATE IF NOT EXISTS is safe.
+        let schema = include_str!("../../migrations/schema.sql");
+        conn.execute_batch(schema)?;
+        return Ok(());
+    }
+
+    // Fresh install: no comments table yet. The canonical schema already
+    // contains every column/index, so one batch creates everything.
+    // (This avoids the legacy trap where idx_comments_parent references
+    // parent_id before the column exists.)
+    if !table_exists(&conn, "comments")? {
+        let schema = include_str!("../../migrations/schema.sql");
+        conn.execute_batch(schema)?;
+        set_user_version(&conn, LATEST_SCHEMA_VERSION)?;
+        return Ok(());
+    }
+
+    // Legacy (v0 with tables) or versioned (v >= 1) upgrade path: add
+    // columns BEFORE applying the canonical schema snapshot, because the
+    // snapshot contains indexes (e.g. idx_comments_parent) that fail when
+    // their columns are still missing.
+
+    // v2: threaded replies.
+    if current < 2 {
+        add_column_if_missing(
+            &conn,
+            "comments",
+            "parent_id",
+            "ALTER TABLE comments ADD COLUMN parent_id INTEGER REFERENCES comments(id)",
+        )?;
+        add_column_if_missing(
+            &conn,
+            "comments",
+            "depth",
+            "ALTER TABLE comments ADD COLUMN depth INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id)",
+        )?;
+    }
+
+    // v3: honeypot flag and self-deletion tokens.
+    if current < 3 {
+        add_column_if_missing(
+            &conn,
+            "comments",
+            "honeypot",
+            "ALTER TABLE comments ADD COLUMN honeypot INTEGER NOT NULL DEFAULT 0",
+        )?;
+        add_column_if_missing(
+            &conn,
+            "comments",
+            "delete_token",
+            "ALTER TABLE comments ADD COLUMN delete_token TEXT",
+        )?;
+    }
+
+    // v4: raw submitter IP storage.
+    if current < 4 {
+        add_column_if_missing(
+            &conn,
+            "comments",
+            "submitter_ip",
+            "ALTER TABLE comments ADD COLUMN submitter_ip TEXT",
+        )?;
+    }
+
+    // v5: content hash for moderation lookup.
+    if current < 5 {
+        add_column_if_missing(
+            &conn,
+            "comments",
+            "content_hash",
+            "ALTER TABLE comments ADD COLUMN content_hash TEXT",
+        )?;
+    }
+
+    // v6: extracted URLs for cross-comment tracking.
+    if current < 6 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS comment_urls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                comment_id INTEGER NOT NULL REFERENCES comments(id),
+                url TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                url_hash TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_comment_urls_comment ON comment_urls(comment_id);
+            CREATE INDEX IF NOT EXISTS idx_comment_urls_domain ON comment_urls(domain);
+            CREATE INDEX IF NOT EXISTS idx_comment_urls_hash ON comment_urls(url_hash);",
+        )?;
+    }
+
+    // v7: hashed submitter IP + backfill of existing rows.
+    if current < 7 {
+        add_column_if_missing(
+            &conn,
+            "comments",
+            "submitter_ip_hash",
+            "ALTER TABLE comments ADD COLUMN submitter_ip_hash TEXT",
+        )?;
+        backfill_ip_hashes(&conn)?;
+    }
+
+    // v8: reactions (previously only reachable via the base schema snapshot;
+    // now an explicit versioned step so legacy DBs have a guaranteed path).
+    if current < 8 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS comment_reactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                comment_id INTEGER NOT NULL REFERENCES comments(id),
+                reaction TEXT NOT NULL,
+                identifier TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'approved', 'spam', 'deleted')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (comment_id, identifier)
+            );
+            CREATE INDEX IF NOT EXISTS idx_comment_reactions_read
+                ON comment_reactions(comment_id, status);",
+        )?;
+    }
+
+    // Canonical snapshot last: backfills any tables/indexes added to
+    // schema.sql without an explicit versioned step (e.g. webmention_seen,
+    // github_profiles for very old DBs). Safe now — all columns exist.
+    {
+        let schema = include_str!("../../migrations/schema.sql");
+        conn.execute_batch(schema)?;
+    }
+
+    set_user_version(&conn, LATEST_SCHEMA_VERSION)?;
+
+    // Keep the table_exists helper exercised for future migration authors.
+    debug_assert!(table_exists(&conn, "comments")?);
+
+    Ok(())
+}
+
+/// Populate `submitter_ip_hash` for rows that have a raw IP but no hash.
+/// A single bad IP must not abort startup; prepare failures do abort.
+fn backfill_ip_hashes(conn: &Connection) -> Result<(), rusqlite::Error> {
+    use sha2::{Digest, Sha256};
+    let secret = std::env::var("IP_HASH_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let mut stmt = conn.prepare(
+        "SELECT id, submitter_ip FROM comments WHERE submitter_ip IS NOT NULL AND submitter_ip_hash IS NULL",
+    )?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .flatten()
+        .collect();
+    for (id, raw) in rows {
+        if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+            let mut h = Sha256::new();
+            h.update(ip.to_string().as_bytes());
+            if let Some(ref s) = secret {
+                h.update(s.as_bytes());
+            }
+            let hex: String = h.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+            // Per-row errors ignored: one corrupt row must not block boot.
+            let _ = conn.execute(
+                "UPDATE comments SET submitter_ip_hash = ?1 WHERE id = ?2",
+                rusqlite::params![format!("h:{hex}"), id],
+            );
+        }
+    }
     Ok(())
 }
 
@@ -115,20 +296,138 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn test_pool(name: &str) -> (SqlitePool, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(name);
+        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        (pool, dir)
+    }
+
+    fn db_version(pool: &SqlitePool) -> i64 {
+        let conn = pool.get().unwrap();
+        user_version(&conn).unwrap()
+    }
+
     #[test]
     fn migrations_run_idempotently() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        let (pool, _dir) = test_pool("test.db");
         run_migrations(&pool).unwrap();
         run_migrations(&pool).unwrap(); // second call should be a no-op
+        assert_eq!(db_version(&pool), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn fresh_db_is_stamped_with_latest_version() {
+        let (pool, _dir) = test_pool("fresh.db");
+        run_migrations(&pool).unwrap();
+        assert_eq!(db_version(&pool), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_v0_db_upgrades_and_preserves_rows() {
+        // Simulate a v1-era database: base tables without any later columns,
+        // user_version == 0 (pre-tracking).
+        let (pool, _dir) = test_pool("legacy.db");
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE comments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_path TEXT NOT NULL,
+                    comment_type TEXT NOT NULL,
+                    source_url TEXT,
+                    author_name TEXT NOT NULL,
+                    author_url TEXT,
+                    author_avatar TEXT,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE TABLE webmention_seen (
+                    source TEXT NOT NULL, target TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_status TEXT NOT NULL, PRIMARY KEY (source, target)
+                );
+                CREATE TABLE github_profiles (
+                    login TEXT PRIMARY KEY, name TEXT,
+                    avatar_url TEXT NOT NULL,
+                    cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    valid INTEGER NOT NULL DEFAULT 1
+                );
+                INSERT INTO comments (target_path, comment_type, author_name, content, status)
+                    VALUES ('/legacy', 'native', 'Ada', 'first!', 'approved');",
+            )
+            .unwrap();
+            assert_eq!(user_version(&conn).unwrap(), 0);
+        }
+
+        run_migrations(&pool).unwrap();
+
+        let conn = pool.get().unwrap();
+        assert_eq!(user_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+        // Late columns now exist.
+        for col in [
+            "parent_id",
+            "depth",
+            "honeypot",
+            "delete_token",
+            "submitter_ip",
+            "submitter_ip_hash",
+            "content_hash",
+        ] {
+            assert!(
+                column_exists(&conn, "comments", col).unwrap(),
+                "missing column {col} after upgrade"
+            );
+        }
+        // Late tables backfilled.
+        assert!(table_exists(&conn, "comment_urls").unwrap());
+        assert!(table_exists(&conn, "comment_reactions").unwrap());
+        // Row survived.
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM comments WHERE author_name = 'Ada'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn newer_db_than_binary_is_refused() {
+        let (pool, _dir) = test_pool("future.db");
+        run_migrations(&pool).unwrap();
+        {
+            let conn = pool.get().unwrap();
+            set_user_version(&conn, LATEST_SCHEMA_VERSION + 1).unwrap();
+        }
+        let err = run_migrations(&pool).unwrap_err().to_string();
+        assert!(
+            err.contains("newer than supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn add_column_propagates_real_errors() {
+        let (pool, _dir) = test_pool("badcol.db");
+        run_migrations(&pool).unwrap();
+        let conn = pool.get().unwrap();
+        // Referencing a missing table is a real error, not "already exists".
+        let err = add_column_if_missing(
+            &conn,
+            "no_such_table",
+            "x",
+            "ALTER TABLE no_such_table ADD COLUMN x TEXT",
+        );
+        assert!(err.is_err(), "real DDL errors must propagate");
     }
 
     #[test]
     fn pragmas_set_on_every_connection() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("pragmas.db");
-        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        let (pool, _dir) = test_pool("pragmas.db");
         run_migrations(&pool).unwrap();
 
         let conn = pool.get().unwrap();
@@ -157,9 +456,7 @@ mod tests {
 
     #[test]
     fn comments_check_constraint_rejects_bad_comment_type() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("check.db");
-        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        let (pool, _dir) = test_pool("check.db");
         run_migrations(&pool).unwrap();
 
         let conn = pool.get().unwrap();
@@ -181,9 +478,7 @@ mod tests {
 
     #[test]
     fn comments_check_constraint_rejects_bad_status() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("check2.db");
-        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        let (pool, _dir) = test_pool("check2.db");
         run_migrations(&pool).unwrap();
 
         let conn = pool.get().unwrap();
@@ -197,9 +492,7 @@ mod tests {
 
     #[test]
     fn comments_target_path_check_rejects_no_slash() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("check3.db");
-        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        let (pool, _dir) = test_pool("check3.db");
         run_migrations(&pool).unwrap();
         let conn = pool.get().unwrap();
         let err = conn.execute(
@@ -215,9 +508,7 @@ mod tests {
 
     #[test]
     fn comments_status_defaults_to_pending() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("default.db");
-        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        let (pool, _dir) = test_pool("default.db");
         run_migrations(&pool).unwrap();
         let conn = pool.get().unwrap();
 
@@ -240,9 +531,7 @@ mod tests {
 
     #[test]
     fn idx_comments_read_exists() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("idx.db");
-        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        let (pool, _dir) = test_pool("idx.db");
         run_migrations(&pool).unwrap();
         let conn = pool.get().unwrap();
 

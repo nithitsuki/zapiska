@@ -107,13 +107,13 @@ Rate limit variables are:
 
 | Variable | Default |
 |---|---:|
-| `RATE_LIMIT_NATIVE` | `50` |
+| `RATE_LIMIT_NATIVE` | `100` |
 | `RATE_LIMIT_NATIVE_WINDOW` | `60` |
-| `RATE_LIMIT_WEBMENTION` | `30` |
+| `RATE_LIMIT_WEBMENTION` | `60` |
 | `RATE_LIMIT_WEBMENTION_WINDOW` | `60` |
-| `RATE_LIMIT_READ` | `60` |
+| `RATE_LIMIT_READ` | `300` |
 | `RATE_LIMIT_READ_WINDOW` | `60` |
-| `RATE_LIMIT_ADMIN_MODERATE` | `10` |
+| `RATE_LIMIT_ADMIN_MODERATE` | `30` |
 | `RATE_LIMIT_ADMIN_MODERATE_WINDOW` | `60` |
 
 `HONEYPOT_FIELD` is loaded from the environment. The current native handler
@@ -350,12 +350,20 @@ The export contains:
 - All extracted URL rows.
 - All GitHub profile rows.
 - All reaction rows.
+- `ip_hash_salted`: whether the exporting server had `IP_HASH_SECRET` set.
+  The secret itself is never exported — back up `.env` alongside the JSON.
 
 `POST /api/admin/import` accepts version `1` and a body up to 16 MiB.
 
 The import sorts comments by ID and restores parents before children.
 It re-sanitizes content and checks selected field values.
+It re-derives each comment IP hash from the raw IP with the importing
+server's secret and reports the count as `ip_hashes_recomputed`.
 It skips failed comment and URL rows and reports their counts.
+When the export salt flag mismatches the importing server and salted
+identities (hashes, anyone-mode reaction IDs) are present, the response
+carries a `warning`: reaction identities cannot be re-derived, so a lost or
+rotated secret orphans them.
 
 ## Notifications
 
@@ -384,7 +392,25 @@ The public router uses:
 The protected admin routes are merged outside the CORS layer.
 The public CORS methods are `GET`, `POST`, and `OPTIONS`.
 
-The public router also contains health, embed, Swagger, login, and logout.
+The public router also contains health, version, embed, Swagger, login, and logout.
+
+## Version
+
+`GET /api/version` returns the binary and data-format versions from their
+single source of truth (no manual sync):
+
+```json
+{
+  "version": "0.2.0",
+  "schema_version": 8,
+  "export_version": 1
+}
+```
+
+`schema_version` is the `PRAGMA user_version` this binary supports.
+`export_version` is the admin export document version it reads and writes.
+The same crate version is served in the OpenAPI document and printed by
+`zapiska --version` (which needs no configuration).
 
 ## Security rules
 

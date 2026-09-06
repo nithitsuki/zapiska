@@ -179,6 +179,15 @@ PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = NORMAL;
 ```
 
+Schema changes are versioned with `PRAGMA user_version` in
+`src/db/pool.rs` (`LATEST_SCHEMA_VERSION`, currently 8). Fresh databases get
+the canonical `migrations/schema.sql` snapshot and are stamped. Legacy
+`user_version = 0` databases run an idempotent catch-up (existence-checked
+`ADD COLUMN` / `CREATE TABLE`, never blind `ALTER`s) and are then stamped.
+A database newer than the binary refuses startup instead of running against
+an unknown schema. Add a new `if current < N` block and bump `LATEST` for
+every future schema change.
+
 ## Middleware and route scope
 
 The public router has these layers and routes:

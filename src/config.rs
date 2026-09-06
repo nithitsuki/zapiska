@@ -313,14 +313,14 @@ impl Config {
             Ok(val)
         }
 
-        let rate_limit_native_burst = rate_limit_burst("RATE_LIMIT_NATIVE", 50)?;
+        let rate_limit_native_burst = rate_limit_burst("RATE_LIMIT_NATIVE", 100)?;
         let rate_limit_native_window_secs = rate_limit_window("RATE_LIMIT_NATIVE_WINDOW", 60)?;
-        let rate_limit_webmention_burst = rate_limit_burst("RATE_LIMIT_WEBMENTION", 30)?;
+        let rate_limit_webmention_burst = rate_limit_burst("RATE_LIMIT_WEBMENTION", 60)?;
         let rate_limit_webmention_window_secs =
             rate_limit_window("RATE_LIMIT_WEBMENTION_WINDOW", 60)?;
-        let rate_limit_read_burst = rate_limit_burst("RATE_LIMIT_READ", 60)?;
+        let rate_limit_read_burst = rate_limit_burst("RATE_LIMIT_READ", 300)?;
         let rate_limit_read_window_secs = rate_limit_window("RATE_LIMIT_READ_WINDOW", 60)?;
-        let rate_limit_admin_moderate_burst = rate_limit_burst("RATE_LIMIT_ADMIN_MODERATE", 10)?;
+        let rate_limit_admin_moderate_burst = rate_limit_burst("RATE_LIMIT_ADMIN_MODERATE", 30)?;
         let rate_limit_admin_moderate_window_secs =
             rate_limit_window("RATE_LIMIT_ADMIN_MODERATE_WINDOW", 60)?;
 
@@ -664,6 +664,21 @@ mod tests {
             assert_eq!(config.fetch_timeout_ms, 4000);
             assert_eq!(config.worker_backlog, 64);
             assert_eq!(config.rust_log, "info");
+        });
+    }
+
+    #[test]
+    fn rate_limit_defaults() {
+        with_env(&[("ADMIN_TOKEN", "test-token")], || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.rate_limit_native_burst, 100);
+            assert_eq!(config.rate_limit_native_window_secs, 60);
+            assert_eq!(config.rate_limit_webmention_burst, 60);
+            assert_eq!(config.rate_limit_webmention_window_secs, 60);
+            assert_eq!(config.rate_limit_read_burst, 300);
+            assert_eq!(config.rate_limit_read_window_secs, 60);
+            assert_eq!(config.rate_limit_admin_moderate_burst, 30);
+            assert_eq!(config.rate_limit_admin_moderate_window_secs, 60);
         });
     }
 

@@ -1032,4 +1032,167 @@ mod tests {
         assert!(state.repo.get_comment(1).await.unwrap().is_none());
         assert!(state.repo.get_comment(2).await.unwrap().is_none());
     }
+
+    #[tokio::test]
+    async fn export_records_ip_salt_flag() {
+        // Default test state has no IP_HASH_SECRET.
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(authorized_request(
+                axum::http::Method::GET,
+                "/api/admin/export",
+            ))
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["ip_hash_salted"], false);
+
+        // With a secret configured, the flag flips — the secret itself must
+        // never appear in the document.
+        let (mut salted_state, _dir) = helpers::test_state();
+        salted_state.config.ip_hash_secret = Some("s3cr3t".to_string());
+        let app = build_app(salted_state);
+        let resp = app
+            .oneshot(authorized_request(
+                axum::http::Method::GET,
+                "/api/admin/export",
+            ))
+            .await
+            .unwrap();
+        let raw = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(body["ip_hash_salted"], true);
+        assert!(
+            !String::from_utf8_lossy(&raw).contains("s3cr3t"),
+            "secret must never leak into the export"
+        );
+    }
+
+    fn salted_comment_json(id: i64, ip: &str, hash: &str, salted_flag: Option<bool>) -> String {
+        let flag = match salted_flag {
+            Some(true) => "\"ip_hash_salted\": true,",
+            Some(false) => "\"ip_hash_salted\": false,",
+            None => "",
+        };
+        format!(
+            r#"{{"version": 1, {flag} "comments": [{{
+                "id": {id}, "target_path": "/salt", "comment_type": "native",
+                "source_url": null, "author_name": "Ada", "author_url": null,
+                "author_avatar": null, "content": "hi", "status": "approved",
+                "created_at": "2026-08-01 10:00:00", "updated_at": "2026-08-01 10:00:00",
+                "parent_id": null, "depth": 0, "honeypot": false,
+                "delete_token": null, "submitter_ip": "{ip}",
+                "submitter_ip_hash": "{hash}", "content_hash": null
+            }}]}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn import_recomputes_stale_hash_and_warns_on_salt_mismatch() {
+        // Export claims a salted server, but this server has no secret and the
+        // shipped hash is stale. The raw IP heals the row; the response warns.
+        let (state, _dir) = helpers::test_state();
+        assert!(state.config.ip_hash_secret.is_none());
+        let app = build_app(state.clone());
+        let body = salted_comment_json(11, "9.9.9.9", "h:stale", Some(true));
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["comments_imported"], 1);
+        assert_eq!(result["ip_hashes_recomputed"], 1);
+        assert!(
+            result["warning"].as_str().unwrap().contains("mismatch"),
+            "salt mismatch must warn: {result}"
+        );
+
+        let stored = state.repo.get_comment(11).await.unwrap().unwrap();
+        let expected =
+            crate::ip_hash::hash_ip(&"9.9.9.9".parse::<std::net::IpAddr>().unwrap(), None);
+        assert_eq!(stored.submitter_ip_hash.as_deref(), Some(expected.as_str()));
+        assert_eq!(stored.submitter_ip.as_deref(), Some("9.9.9.9"));
+    }
+
+    #[tokio::test]
+    async fn import_matching_salt_has_no_warning() {
+        // Flag and server agree (both unsalted) with a consistent hash.
+        let (state, _dir) = helpers::test_state();
+        let fresh = crate::ip_hash::hash_ip(&"9.9.9.9".parse::<std::net::IpAddr>().unwrap(), None);
+        let app = build_app(state.clone());
+        let body = salted_comment_json(12, "9.9.9.9", &fresh, Some(false));
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["comments_imported"], 1);
+        assert_eq!(result["ip_hashes_recomputed"], 0);
+        assert!(result["warning"].is_null(), "no warning: {result}");
+    }
+
+    #[tokio::test]
+    async fn import_pre_flag_export_without_hashes_has_no_warning() {
+        // Old exports have no flag at all; with no salted identities there is
+        // nothing to warn about.
+        let (state, _dir) = helpers::test_state();
+        let app = build_app(state);
+        let plain = serde_json::json!({
+            "version": 1,
+            "comments": [{
+                "id": 13, "target_path": "/salt", "comment_type": "native",
+                "source_url": null, "author_name": "Ada", "author_url": null,
+                "author_avatar": null, "content": "hi", "status": "approved",
+                "created_at": "2026-08-01 10:00:00", "updated_at": "2026-08-01 10:00:00",
+                "parent_id": null, "depth": 0, "honeypot": false,
+                "delete_token": null, "submitter_ip": null,
+                "submitter_ip_hash": null, "content_hash": null
+            }]
+        })
+        .to_string();
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &plain,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(result["warning"].is_null(), "no warning: {result}");
+    }
 }

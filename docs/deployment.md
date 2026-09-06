@@ -69,13 +69,13 @@ control. A leaked admin token gives access to protected data and actions.
 
 | Variable | Default | Route |
 |---|---:|---|
-| `RATE_LIMIT_NATIVE` | `50` | Native comments, deletion, and reactions. |
+| `RATE_LIMIT_NATIVE` | `100` | Native comments, deletion, and reactions. |
 | `RATE_LIMIT_NATIVE_WINDOW` | `60` | Native limit window in seconds. |
-| `RATE_LIMIT_WEBMENTION` | `30` | Webmention ingress burst. |
+| `RATE_LIMIT_WEBMENTION` | `60` | Webmention ingress burst. |
 | `RATE_LIMIT_WEBMENTION_WINDOW` | `60` | Webmention limit window in seconds. |
-| `RATE_LIMIT_READ` | `60` | Public comments and RSS. |
+| `RATE_LIMIT_READ` | `300` | Public comments and RSS. |
 | `RATE_LIMIT_READ_WINDOW` | `60` | Read limit window in seconds. |
-| `RATE_LIMIT_ADMIN_MODERATE` | `10` | Single comment moderation. |
+| `RATE_LIMIT_ADMIN_MODERATE` | `30` | Single comment moderation. |
 | `RATE_LIMIT_ADMIN_MODERATE_WINDOW` | `60` | Admin moderation window in seconds. |
 
 The limits use the TCP peer IP. The server does not trust forwarded IP headers.
@@ -283,7 +283,17 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```
 
 The export includes comments, webmention state, extracted URLs, GitHub
-profiles, and reactions.
+profiles, reactions, and an `ip_hash_salted` flag recording whether
+`IP_HASH_SECRET` was set on the exporting server.
+
+WARNING: The export never contains `IP_HASH_SECRET` itself, but stored IP
+hashes are salted with it. Back up your `.env` (or at least the secret)
+alongside `backup.json`. A lost or rotated secret splits IP-hash continuity:
+comment hashes are re-derived on import where a raw IP exists, but
+anyone-mode reaction identities cannot be re-derived and are orphaned. The
+import response carries a `warning` when it detects this mismatch, and the
+server logs a warning at startup when the database holds hashes but the
+secret is unset.
 
 ## Turnstile
 

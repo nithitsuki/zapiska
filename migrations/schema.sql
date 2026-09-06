@@ -1,5 +1,7 @@
--- Schema for webmention.nithitsuki.com comment server.
--- Applied idempotently (CREATE IF NOT EXISTS throughout).
+-- Canonical schema snapshot for fresh installs (currently version 8).
+-- Upgrades of existing databases are versioned via PRAGMA user_version in
+-- src/db/pool.rs (LATEST_SCHEMA_VERSION). Do not rely on this file alone
+-- for upgrades: column additions are gated per version there.
 
 PRAGMA busy_timeout = 5000;
 PRAGMA journal_mode = WAL;

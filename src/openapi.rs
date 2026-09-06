@@ -13,10 +13,11 @@ pub struct ApiError {
     info(
         title = "zapiska API",
         description = "zapiska — a note, a comment, a webmention",
-        version = "0.2.0"
+        version = env!("CARGO_PKG_VERSION")
     ),
     paths(
         crate::http::healthz,
+        crate::http::version,
         crate::http::comment_post::create_comment,
         crate::http::webmention_post::receive_webmention,
         crate::http::comments_read::list_comments,
@@ -52,10 +53,11 @@ pub struct ApiDoc;
     info(
         title = "zapiska API",
         description = "zapiska — a note, a comment, a webmention",
-        version = "0.2.0"
+        version = env!("CARGO_PKG_VERSION")
     ),
     paths(
         crate::http::healthz,
+        crate::http::version,
         crate::http::comment_post::create_comment,
         crate::http::comments_read::list_comments,
         crate::http::feed::feed,

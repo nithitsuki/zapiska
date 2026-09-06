@@ -101,6 +101,7 @@ pub fn build_app(state: AppState) -> Router {
     let router = Router::new()
         .merge(swagger)
         .route("/healthz", axum::routing::get(healthz))
+        .route("/api/version", axum::routing::get(version))
         .route("/admin", axum::routing::get(admin_dashboard))
         .route("/embed/comments.js", axum::routing::get(comments_js))
         .route("/api/admin/login", axum::routing::post(admin::login))
@@ -192,6 +193,30 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+/// Reported binary and data-format versions. All values are compile-time
+/// constants from their single source of truth — no manual sync needed.
+#[derive(serde::Serialize)]
+struct VersionInfo {
+    version: &'static str,
+    schema_version: i64,
+    export_version: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/version",
+    responses(
+        (status = 200, description = "Binary and data-format versions"),
+    ),
+)]
+async fn version() -> axum::Json<VersionInfo> {
+    axum::Json(VersionInfo {
+        version: crate::APP_VERSION,
+        schema_version: crate::db::pool::LATEST_SCHEMA_VERSION,
+        export_version: crate::http::admin::data::EXPORT_VERSION,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +266,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn version_reports_single_sourced_versions() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/api/version"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            body["schema_version"],
+            crate::db::pool::LATEST_SCHEMA_VERSION
+        );
+        assert_eq!(
+            body["export_version"],
+            crate::http::admin::data::EXPORT_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn openapi_version_matches_package_version() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/api-docs/openapi.json"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["info"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(
+            body["paths"].get("/api/version").is_some(),
+            "version endpoint must appear in OpenAPI"
+        );
     }
 
     #[tokio::test]

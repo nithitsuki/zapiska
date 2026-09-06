@@ -1,5 +1,9 @@
 #[cfg(feature = "webmentions")]
 pub mod avatar;
+/// Crate version from Cargo.toml — the single source of truth for the
+/// reported application version (used by `--version`, `/api/version`,
+/// and the OpenAPI document).
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod config;
 pub mod db;
 pub mod error;

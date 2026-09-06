@@ -15,6 +15,13 @@ use zapiska::worker;
 
 #[tokio::main]
 async fn main() {
+    // `--version` / `-V` must not require configuration: operators check the
+    // binary version before any `.env` exists.
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("zapiska {}", zapiska::APP_VERSION);
+        return;
+    }
+
     let _ = dotenvy::dotenv();
 
     tracing_subscriber::fmt()
@@ -37,6 +44,31 @@ async fn main() {
     let sqlite_pool =
         pool::create_pool(&config.database_path).expect("failed to create SQLite pool");
     pool::run_migrations(&sqlite_pool).expect("failed to run migrations");
+
+    // A lost or rotated IP_HASH_SECRET silently splits IP-hash continuity:
+    // stored hashes (comments, anyone-mode reaction identities) stop matching
+    // freshly computed ones. Fail loud in the logs, not silent in the data.
+    if config.ip_hash_secret.is_none() {
+        let hashed_rows: i64 = sqlite_pool
+            .get()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM comments WHERE submitter_ip_hash IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok()
+            })
+            .unwrap_or(0);
+        if hashed_rows > 0 {
+            tracing::warn!(
+                rows = hashed_rows,
+                "IP_HASH_SECRET is unset but the database holds salted IP hashes; \
+                 restore the original secret from your .env backup or hashes will mismatch"
+            );
+        }
+    }
 
     let bind_addr = config.bind_addr;
 

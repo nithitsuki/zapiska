@@ -487,6 +487,7 @@ Return an export document for backup or migration.
 {
   "version": 1,
   "exported_at": "2026-08-07T16:18:40Z",
+  "ip_hash_salted": false,
   "comments": [],
   "webmention_seen": [],
   "comment_urls": [],
@@ -497,7 +498,8 @@ Return an export document for backup or migration.
 
 The comments array contains all comment columns and all statuses. The reaction
 array contains `id`, `comment_id`, `reaction`, `identifier`, `status`,
-`created_at`, and `updated_at`.
+`created_at`, and `updated_at`. `ip_hash_salted` records whether the exporting
+server had `IP_HASH_SECRET` set. The secret itself is never exported.
 
 ### POST /api/admin/import
 
@@ -519,6 +521,7 @@ The import process:
 - Restores parent rows before child rows.
 - Re-sanitizes comment content.
 - Checks selected path, type, status, name, URL, parent, and depth values.
+- Re-derives each comment IP hash from its raw IP with this server's secret.
 - Upserts webmention state and GitHub profiles.
 - Replaces URL rows for each comment.
 - Restores reaction rows.
@@ -533,15 +536,36 @@ Response:
   "webmention_seen_imported": 3,
   "comment_urls_imported": 17,
   "github_profiles_imported": 5,
-  "comment_reactions_imported": 12
+  "comment_reactions_imported": 12,
+  "ip_hashes_recomputed": 40,
+  "warning": null
 }
 ```
+
+`warning` is set when the export salt flag mismatches this server while
+salted identities are present. Back up `.env` (`IP_HASH_SECRET`) alongside
+every export. See [Deployment](deployment.md).
 
 ## Health
 
 ### GET /healthz
 
 Return `ok` with status `200`.
+
+### GET /api/version
+
+Return the binary and data-format versions:
+
+```json
+{
+  "version": "0.2.0",
+  "schema_version": 8,
+  "export_version": 1
+}
+```
+
+`zapiska --version` prints the same crate version without needing any
+configuration.
 
 ## CORS
 

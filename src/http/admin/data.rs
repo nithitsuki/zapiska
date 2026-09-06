@@ -30,6 +30,10 @@ pub const MAX_IMPORT_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub struct ExportFile {
     pub version: i64,
     pub exported_at: String,
+    /// Whether the exporting server had `IP_HASH_SECRET` set. Stored IP
+    /// hashes are salted with that secret, so the secret itself is part of
+    /// the backup: back up `.env` alongside this file. Never the secret.
+    pub ip_hash_salted: Option<bool>,
     pub comments: Vec<Comment>,
     pub webmention_seen: Vec<WebmentionSeen>,
     pub comment_urls: Vec<CommentUrl>,
@@ -40,6 +44,10 @@ pub struct ExportFile {
 #[derive(Deserialize, Default)]
 pub struct ImportFile {
     pub version: Option<i64>,
+    /// Salt status of the exporting server. `None` = pre-flag export,
+    /// unverifiable — see the import warning logic.
+    #[serde(default)]
+    pub ip_hash_salted: Option<bool>,
     pub comments: Option<Vec<Comment>>,
     pub webmention_seen: Option<Vec<WebmentionSeen>>,
     pub comment_urls: Option<Vec<CommentUrl>>,
@@ -55,6 +63,11 @@ pub struct ImportResponse {
     pub comment_urls_imported: usize,
     pub github_profiles_imported: usize,
     pub comment_reactions_imported: usize,
+    /// Comment hashes re-derived from the raw IP with this server's secret.
+    pub ip_hashes_recomputed: usize,
+    /// Present when the export's salt status mismatches this server, meaning
+    /// reaction identities and unrecomputable hashes may be orphaned.
+    pub warning: Option<String>,
 }
 
 /// GET /api/admin/export — full JSON dump (backup/migration source).
@@ -68,6 +81,7 @@ pub async fn export(State(state): State<AppState>) -> Result<Json<ExportFile>, A
     Ok(Json(ExportFile {
         version: EXPORT_VERSION,
         exported_at: crate::timeutil::now_iso8601(),
+        ip_hash_salted: Some(state.config.ip_hash_secret.is_some()),
         comments,
         webmention_seen,
         comment_urls,
@@ -96,7 +110,14 @@ pub async fn import(
         comment_urls_imported: 0,
         github_profiles_imported: 0,
         comment_reactions_imported: 0,
+        ip_hashes_recomputed: 0,
+        warning: None,
     };
+    // Whether any salted-looking identity material crossed the wire. Used
+    // for the salt-mismatch warning below.
+    let mut saw_salted_identities = false;
+    let export_salted = body.ip_hash_salted;
+    let current_salted = state.config.ip_hash_secret.is_some();
 
     // Comments first (URL rows reference them), sorted by id so the
     // parent_id foreign key always resolves (parents precede children).
@@ -108,6 +129,23 @@ pub async fn import(
                 tracing::warn!(id, err = %e, "import skipped invalid comment");
                 response.comments_skipped += 1;
                 continue;
+            }
+            if c.submitter_ip_hash.is_some() {
+                saw_salted_identities = true;
+            }
+            // Self-heal IP hashes across secret rotation: when the raw IP is
+            // present, the hash is re-derived with THIS server's secret
+            // instead of trusting the exported value. Rows without a raw IP
+            // keep their exported hash verbatim.
+            if let Some(ref raw) = c.submitter_ip {
+                if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+                    let fresh =
+                        crate::ip_hash::hash_ip(&ip, state.config.ip_hash_secret.as_deref());
+                    if c.submitter_ip_hash.as_deref() != Some(fresh.as_str()) {
+                        c.submitter_ip_hash = Some(fresh);
+                        response.ip_hashes_recomputed += 1;
+                    }
+                }
             }
             // DB-level failures (e.g. an orphaned parent_id whose parent row
             // was skipped) are skipped too — a single bad row must never
@@ -172,6 +210,11 @@ pub async fn import(
                 tracing::warn!(id = r.id, err = %e, "import skipped invalid reaction");
                 continue;
             }
+            // Anyone-mode identifiers are salted IP hashes: they cannot be
+            // re-derived on import (no raw IP is stored for reactions).
+            if r.identifier.starts_with("h:") {
+                saw_salted_identities = true;
+            }
             state.repo.import_comment_reaction(r).await?;
             response.comment_reactions_imported += 1;
         }
@@ -189,6 +232,22 @@ pub async fn import(
                 })
                 .await?;
             response.github_profiles_imported += 1;
+        }
+    }
+
+    // Salt-mismatch warning: comment hashes were re-derived above when a raw
+    // IP existed, but reaction identities cannot be healed. A changed or lost
+    // secret orphans anyone-mode reactions (old voters look like strangers)
+    // and any hash kept verbatim for lack of a raw IP.
+    if let Some(exported) = export_salted {
+        if exported != current_salted && saw_salted_identities {
+            let msg = format!(
+                "IP hash salt mismatch: export salted={exported}, this server salted={current_salted}. \
+                 Comment hashes were re-derived where a raw IP existed (see ip_hashes_recomputed); \
+                 reaction identities cannot be re-derived. Keep IP_HASH_SECRET stable and back up .env alongside exports."
+            );
+            tracing::warn!(msg = %msg, "import completed with salt mismatch");
+            response.warning = Some(msg);
         }
     }
 
