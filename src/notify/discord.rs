@@ -1,37 +1,45 @@
 //! Discord channel: incoming-webhook messages in markdown.
 
-use reqwest::Client;
 use serde_json::json;
 
+use super::channel::{Channel, Outgoing, hard_truncate, longest_field, shrink_text};
 use super::{Digest, NewCommentInfo, by_line};
 use crate::notify::strip_html;
 
-/// POST an incoming-webhook payload to Discord (as the `zapiska` bot user).
-async fn send(client: &Client, url: &str, content: &str) -> Result<reqwest::StatusCode, String> {
-    let resp = client
-        .post(url)
-        .json(&json!({ "content": content, "username": "zapiska" }))
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    Ok(resp.status())
+/// Discord adapter: wire format + endpoint only. Retry, timeout, and budget
+/// helpers are shared (`super::channel`); dispatch is shared (`super`).
+pub(crate) struct DiscordChannel {
+    webhook_url: String,
 }
 
-/// Fire-and-forget a message to Discord; failures are logged, never surfaced.
-pub(crate) fn spawn(client: &Client, url: &str, content: &str) {
-    let client = client.clone();
-    let url = url.to_string();
-    let content = content.to_string();
-    tokio::spawn(async move {
-        match send(&client, &url, &content).await {
-            Ok(status) => tracing::debug!(status = %status, "discord notification sent"),
-            Err(e) => tracing::warn!(err = %e, "discord notification failed"),
+impl DiscordChannel {
+    pub(crate) fn new(webhook_url: String) -> Self {
+        Self { webhook_url }
+    }
+}
+
+impl Channel for DiscordChannel {
+    fn name(&self) -> &'static str {
+        "discord"
+    }
+
+    fn max_chars(&self) -> usize {
+        DISCORD_MAX_CHARS
+    }
+
+    fn format_single(&self, info: &NewCommentInfo) -> Outgoing {
+        Outgoing {
+            url: self.webhook_url.clone(),
+            body: json!({ "content": build_single_payload(info), "username": "zapiska" }),
         }
-    });
+    }
+
+    fn format_digest(&self, digest: &Digest) -> Outgoing {
+        Outgoing {
+            url: self.webhook_url.clone(),
+            body: json!({ "content": build_digest_payload(digest), "username": "zapiska" }),
+        }
+    }
 }
 
 /// Discord rejects `content` longer than 2000 characters. The builders below
@@ -62,50 +70,6 @@ pub(crate) fn escape(s: &str) -> String {
         }
     }
     out.replace('@', "@\u{200B}")
-}
-
-/// Shorten a non-empty already-escaped field by at least `overflow`
-/// characters, marking the cut with `...`. Always returns a strictly shorter
-/// string, so budget loops terminate.
-fn shrink_text(field: &str, overflow: usize) -> String {
-    let len = field.chars().count();
-    let keep = len.saturating_sub(overflow + 3);
-    if keep == 0 {
-        return String::new();
-    }
-    let mut out: String = field.chars().take(keep).collect();
-    while out.ends_with('\\') {
-        out.pop();
-    }
-    if out.trim().is_empty() {
-        return String::new();
-    }
-    out.push_str("...");
-    out
-}
-
-/// Last-resort cap: cut the whole message to the channel budget. Only reached
-/// when every shrinkable field is already empty.
-fn hard_truncate(text: &str) -> String {
-    if text.chars().count() <= DISCORD_MAX_CHARS {
-        return text.to_string();
-    }
-    text.chars().take(DISCORD_MAX_CHARS - 3).collect::<String>() + "..."
-}
-
-/// Index of the longest non-empty string in `fields`, if any.
-fn longest_field<'a>(fields: impl Iterator<Item = &'a String>) -> Option<usize> {
-    let mut best: Option<(usize, usize)> = None;
-    for (i, f) in fields.enumerate() {
-        let len = f.chars().count();
-        if len == 0 {
-            continue;
-        }
-        if best.is_none_or(|(_, best_len)| len > best_len) {
-            best = Some((i, len));
-        }
-    }
-    best.map(|(i, _)| i)
 }
 
 /// Build the Discord message content for a single comment (markdown).
@@ -142,7 +106,7 @@ pub(crate) fn build_single_payload(info: &NewCommentInfo) -> String {
         } else if !esc_author.is_empty() {
             esc_author = shrink_text(&esc_author, overflow);
         } else {
-            return hard_truncate(&text);
+            return hard_truncate(&text, DISCORD_MAX_CHARS);
         }
     }
 }
@@ -210,7 +174,7 @@ pub(crate) fn build_digest_payload(d: &Digest) -> String {
         } else if !commenters.is_empty() {
             commenters.pop();
         } else {
-            return hard_truncate(&text);
+            return hard_truncate(&text, DISCORD_MAX_CHARS);
         }
     }
 }
@@ -259,6 +223,38 @@ mod tests {
             text.contains("/api/admin/pending?path=/blog/hello"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn channel_seam_limits_are_named() {
+        assert_eq!(super::DISCORD_MAX_CHARS, 2000);
+        let adapter =
+            super::DiscordChannel::new("https://discord.com/api/webhooks/1/abc".to_string());
+        let seam: &dyn crate::notify::channel::Channel = &adapter;
+        assert_eq!(seam.name(), "discord");
+        assert_eq!(seam.max_chars(), 2000);
+    }
+
+    #[test]
+    fn maximal_golden_single_stays_in_budget() {
+        // Golden maximal input: 5000-char name, long URL, 5000-char content,
+        // adversarial mention + markdown + control chars.
+        let mut info = crate::notify::test_util::sample_info();
+        info.author_name = format!("@everyone **boss**{}", "A".repeat(5000));
+        info.author_url = Some(format!("https://example.invalid/{}", "u".repeat(1000)));
+        info.content = format!(
+            "<p>Hi @here ||spoiler|| **bold** `code` <script>alert(1)</script>{}</p>",
+            "x".repeat(5000)
+        );
+        let text = build_single_payload(&info);
+        assert!(
+            text.chars().count() <= super::DISCORD_MAX_CHARS,
+            "golden single exceeds budget: {} chars",
+            text.chars().count()
+        );
+        assert!(!text.contains("@everyone"), "mention leaks: {text}");
+        assert!(!text.contains("||spoiler||"), "spoiler leaks: {text}");
+        assert!(text.contains("Moderate:"), "footer must survive");
     }
 
     #[test]
@@ -350,6 +346,7 @@ mod tests {
 
     #[tokio::test]
     async fn wiremock_everyone_neutralized() {
+        use crate::notify::channel::{Channel, post_with_retry};
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(wiremock::ResponseTemplate::new(200))
@@ -358,12 +355,16 @@ mod tests {
         let mut info = crate::notify::test_util::sample_info();
         info.author_name = "@everyone".to_string();
         info.content = "<p>hi @everyone @here</p>".to_string();
-        let payload = build_single_payload(&info);
-        let client = Client::new();
-        send(&client, &server.uri(), &payload).await.unwrap();
+        let adapter = super::DiscordChannel::new(server.uri());
+        let outgoing = adapter.format_single(&info);
+        let client = reqwest::Client::new();
+        post_with_retry(&client, &adapter, &outgoing)
+            .await
+            .expect("discord mock must accept the payload");
         let reqs = server.received_requests().await.unwrap_or_default();
         assert!(!reqs.is_empty(), "discord mock must receive a request");
         let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["username"], "zapiska");
         let content = body["content"].as_str().unwrap();
         assert!(
             !content.contains("@everyone"),

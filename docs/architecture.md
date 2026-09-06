@@ -297,25 +297,47 @@ required for the protected admin route group.
 
 ## Notification flow
 
-The notification batcher is in memory. It supports Telegram, Slack, and
-Discord. Telegram needs both a bot token and a chat ID. Slack and Discord need a
-webhook URL.
+Admin notifications go through one `Channel` seam
+(`src/notify/channel.rs`): Telegram, Slack, and Discord are thin adapters
+that own only their wire format and escape rules. Shared dispatch formats
+one message per adapter and delivers with a shared retry policy: up to three
+attempts with backoff on transient failures (network errors, 429, 5xx), then
+a logged drop. Delivery is fire-and-forget with bounded retry (duplicates
+possible on timeout), log-and-drop — failures never
+fail the comment request. Permanent failures (other 4xx, Telegram `ok:
+false`) are attempted once. Adding a channel is one new adapter file plus
+the registration checklist in `Notifier::channels`.
 
-With the default settings, a new event opens a window for its page. The window
-ends after `NOTIFY_BATCH_SECS`. A count of `NOTIFY_BATCH_THRESHOLD` flushes the
-window early. `NOTIFY_BATCH_GRANULARITY=global` uses one window for the site.
+Per-channel size budgets: Telegram 4096 characters, Slack 3000 (section
+block), Discord 2000. Formatters shrink preview text, then names, then the
+commenter list; the moderation footer survives every shrink stage. Telegram
+needs both a bot token and a chat ID. Slack and Discord need a webhook URL.
 
-Set `NOTIFY_BATCH_SECS=0` for immediate delivery. Delivery runs in spawned tasks
-with a timeout. Delivery failure does not fail the comment request.
+The notification batcher (`src/notify/batcher.rs`) collects comments into
+fixed windows per page. The first comment opens a window that flushes
+exactly at `opened_at + NOTIFY_BATCH_SECS` — later comments never extend it
+— or early when `NOTIFY_BATCH_THRESHOLD` is reached.
+`NOTIFY_BATCH_GRANULARITY=global` shares one site-wide window. One timer
+task is armed per window, when the window opens. The window clock is an
+injected `Clock` seam (fake clock in tests).
 
-Open notification windows are lost when the process stops.
+Set `NOTIFY_BATCH_SECS=0` for immediate delivery. Delivery runs in spawned
+tasks with a timeout. Delivery failure does not fail the comment request.
+
+Open windows flush on shutdown: after the server stops accepting
+connections, `NotificationBatcher::drain` delivers each open window as a
+final digest (channels concurrently, same retry policy, awaited), then
+awaits spawned in-flight sends. Total shutdown latency is bounded to 12 s.
+The drain runs twice so a webmention job finishing mid-drain is still
+caught; a job completing after the second pass's checks is best-effort.
+`Retry-After` on 429s is honored up to a 2 s cap per wait.
 
 ## Shutdown
 
 The process listens for Ctrl+C and SIGTERM. The shutdown signal stops the Axum
-server. The current shutdown function does not drain the webmention queue or
-wait for worker jobs. Queued webmentions and open notification windows can be
-lost when the process stops.
+server, then the shutdown drain flushes open notification windows as final
+digests. The current shutdown function does not drain the webmention queue or
+wait for worker jobs. Queued webmentions can be lost when the process stops.
 
 ## Errors
 

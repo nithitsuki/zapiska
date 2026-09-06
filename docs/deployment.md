@@ -111,6 +111,21 @@ Notification delivery is asynchronous. It does not change the comment result.
 Setting only one of the two Telegram values logs a startup warning and
 disables Telegram delivery.
 
+Batching uses fixed windows: the first comment on a page opens a window that
+flushes exactly `NOTIFY_BATCH_SECS` later (or early once
+`NOTIFY_BATCH_THRESHOLD` comments accumulate); steady traffic never extends
+the window. One timer task is armed per window, when it opens. On shutdown
+the server drains open windows as final digests after the listener stops, so
+a restart during a burst still alerts the admin. Each delivery is attempted
+up to three times with backoff on transient failures (network errors, 429,
+5xx), then dropped with a warning log: bounded retry (duplicates possible
+on timeout), log-and-drop — submissions never block on delivery. `Retry-After`
+on 429s is honored up to a 2 s cap per wait. Shutdown drain latency is
+bounded to 12 s total and also awaits in-flight sends; the drain runs twice
+to catch a webmention job finishing mid-drain, which is otherwise the one
+narrow best-effort case. Channel size limits are enforced at format
+time (Telegram 4096, Slack 3000, Discord 2000 characters).
+
 ### Reaction values
 
 | Variable | Default | Description |

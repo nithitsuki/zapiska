@@ -16,15 +16,21 @@
 //! - [`NotificationBatcher`] — window/threshold batching (see `batcher.rs`).
 //! - [`Digest`] — aggregated view of a batch, shared by all channel
 //!   formatters.
-//! - Per-channel modules (`telegram.rs`, `slack.rs`, `discord.rs`) own their
-//!   wire format and message builders.
+//! - [`channel::Channel`] — the channel seam: one adapter per channel
+//!   (`telegram.rs`, `slack.rs`, `discord.rs`) owning its wire format and
+//!   escape rules, with shared dispatch, retry, and size budgets.
+//!   Adding a fourth channel is one new adapter file plus the registration
+//!   checklist in `Notifier::channels`.
 
 mod batcher;
+pub(crate) mod channel;
 mod discord;
 mod slack;
 mod telegram;
 
 pub use batcher::NotificationBatcher;
+
+use std::sync::Arc;
 
 use reqwest::Client;
 
@@ -42,6 +48,10 @@ pub struct Notifier {
     pub telegram_api_base: String,
     pub slack_webhook_url: Option<String>,
     pub discord_webhook_url: Option<String>,
+    /// Spawned sends still in flight, shared by dispatch (which spawns) and
+    /// the shutdown drain (which awaits them). Part of the fourth-channel
+    /// checklist below: nothing to do per channel, just don't drop it.
+    pub(crate) inflight: Arc<channel::Inflight>,
 }
 
 impl Notifier {
@@ -52,6 +62,7 @@ impl Notifier {
             telegram_api_base: config.telegram_api_base.clone(),
             slack_webhook_url: config.slack_webhook_url.clone(),
             discord_webhook_url: config.discord_webhook_url.clone(),
+            inflight: Arc::new(channel::Inflight::default()),
         }
     }
 
@@ -60,6 +71,27 @@ impl Notifier {
     pub fn is_empty(&self) -> bool {
         let telegram_ready = self.telegram_bot_token.is_some() && self.telegram_chat_id.is_some();
         !telegram_ready && self.slack_webhook_url.is_none() && self.discord_webhook_url.is_none()
+    }
+
+    /// One adapter per configured channel. Adding a channel is a checklist,
+    /// not one line: new adapter file, `Config` fields, `Notifier` fields
+    /// (plus an `is_empty` arm), and one `push` line here.
+    pub(crate) fn channels(&self) -> Vec<Box<dyn channel::Channel>> {
+        let mut out: Vec<Box<dyn channel::Channel>> = Vec::new();
+        if let (Some(token), Some(chat_id)) = (&self.telegram_bot_token, &self.telegram_chat_id) {
+            out.push(Box::new(telegram::TelegramChannel::new(
+                self.telegram_api_base.clone(),
+                token.clone(),
+                chat_id.clone(),
+            )));
+        }
+        if let Some(url) = &self.slack_webhook_url {
+            out.push(Box::new(slack::SlackChannel::new(url.clone())));
+        }
+        if let Some(url) = &self.discord_webhook_url {
+            out.push(Box::new(discord::DiscordChannel::new(url.clone())));
+        }
+        out
     }
 }
 
@@ -71,6 +103,7 @@ impl Default for Notifier {
             telegram_api_base: "https://api.telegram.org".to_string(),
             slack_webhook_url: None,
             discord_webhook_url: None,
+            inflight: Arc::new(channel::Inflight::default()),
         }
     }
 }
@@ -175,44 +208,45 @@ impl Digest {
 
 // ── Delivery dispatch ────────────────────────────────────────
 
+/// Shared dispatch loop: format one message per channel, deliver each with
+/// the shared retry policy. Fire-and-forget — failures are logged inside the
+/// spawned task, never surfaced to the comment path.
+fn dispatch(
+    client: &Client,
+    notifier: &Notifier,
+    build: impl Fn(&dyn channel::Channel) -> channel::Outgoing,
+) {
+    for adapter in notifier.channels() {
+        let msg = build(&*adapter);
+        channel::spawn_delivery(client, &notifier.inflight, adapter, msg);
+    }
+}
+
 /// Send one comment immediately to every configured channel (no batching).
 pub(crate) fn deliver_new_comment(client: &Client, notifier: &Notifier, info: &NewCommentInfo) {
-    if let (Some(token), Some(chat_id)) = (&notifier.telegram_bot_token, &notifier.telegram_chat_id)
-    {
-        telegram::spawn(
-            client,
-            notifier,
-            token,
-            chat_id,
-            &telegram::build_single_text(info),
-        );
-    }
-    if let Some(url) = &notifier.slack_webhook_url {
-        slack::spawn(client, url, &slack::build_single_payload(info));
-    }
-    if let Some(url) = &notifier.discord_webhook_url {
-        discord::spawn(client, url, &discord::build_single_payload(info));
-    }
+    dispatch(client, notifier, |c| c.format_single(info));
 }
 
 /// Send a batch digest to every configured channel.
 pub(crate) fn deliver_digest_to_channels(client: &Client, notifier: &Notifier, digest: &Digest) {
-    if let (Some(token), Some(chat_id)) = (&notifier.telegram_bot_token, &notifier.telegram_chat_id)
-    {
-        telegram::spawn(
-            client,
-            notifier,
-            token,
-            chat_id,
-            &telegram::build_digest_text(digest),
-        );
+    dispatch(client, notifier, |c| c.format_digest(digest));
+}
+
+/// Awaited variant of [`deliver_digest_to_channels`] for the shutdown drain:
+/// same formatting and retry policy, but the caller waits for every channel
+/// instead of spawning, so open windows flush before the process exits.
+/// Channels deliver concurrently; the caller (`drain`) bounds total time.
+pub(crate) async fn deliver_digest_sync(client: &Client, notifier: &Notifier, digest: &Digest) {
+    let mut set = tokio::task::JoinSet::new();
+    for adapter in notifier.channels() {
+        let msg = adapter.format_digest(digest);
+        let client = client.clone();
+        set.spawn(async move {
+            let result = channel::post_with_retry(&client, &*adapter, &msg).await;
+            channel::log_result(adapter.name(), &result);
+        });
     }
-    if let Some(url) = &notifier.slack_webhook_url {
-        slack::spawn(client, url, &slack::build_digest_payload(digest));
-    }
-    if let Some(url) = &notifier.discord_webhook_url {
-        discord::spawn(client, url, &discord::build_digest_payload(digest));
-    }
+    while set.join_next().await.is_some() {}
 }
 
 // ── Shared helpers ───────────────────────────────────────────
@@ -408,5 +442,31 @@ mod tests {
         assert_eq!(strip_html("<p>a</p><p>b</p>"), "a b");
         assert_eq!(strip_html("no tags here"), "no tags here");
         assert_eq!(strip_html(""), "");
+    }
+
+    #[test]
+    fn channels_register_one_adapter_per_configured_channel() {
+        // The fourth-channel checklist (adapter file, Config fields,
+        // Notifier fields + is_empty arm, one push in channels): this test
+        // pins the registration side.
+        let empty = Notifier::default();
+        assert!(empty.channels().is_empty());
+        let telegram_only = Notifier {
+            telegram_bot_token: Some("tok".to_string()),
+            telegram_chat_id: Some("chat".to_string()),
+            ..Notifier::default()
+        };
+        let names: Vec<&str> = telegram_only.channels().iter().map(|c| c.name()).collect();
+        assert_eq!(names, vec!["telegram"]);
+        let all = Notifier {
+            telegram_bot_token: Some("tok".to_string()),
+            telegram_chat_id: Some("chat".to_string()),
+            slack_webhook_url: Some("https://hooks.slack.com/services/x".to_string()),
+            discord_webhook_url: Some("https://discord.com/api/webhooks/1/abc".to_string()),
+            ..Notifier::default()
+        };
+        let mut names: Vec<&str> = all.channels().iter().map(|c| c.name()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["discord", "slack", "telegram"]);
     }
 }

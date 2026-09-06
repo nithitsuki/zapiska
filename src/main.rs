@@ -140,6 +140,17 @@ async fn main() {
         limiter: Arc::new(zapiska::state::Limiter::new()),
     };
 
+    // Shutdown drain: after the server stops accepting connections, flush
+    // open notification windows as final digests (same retry policy,
+    // awaited) so a restart during a burst still alerts the admin.
+    // Drained twice: handler senders die with the router at serve return,
+    // but a webmention job already mid-flight can push during the first
+    // drain — the second pass catches those stragglers. Residual
+    // best-effort: a job completing after the second pass's checks is not
+    // awaited (narrow: it must finish inside the second drain's tail).
+    let drain_notifier = Arc::clone(&state.notifier);
+    let drain_client = state.http_client.clone();
+
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(bind_addr)
@@ -152,6 +163,8 @@ async fn main() {
     .with_graceful_shutdown(shutdown::shutdown_signal())
     .await
     .expect("server exited with error");
+    drain_notifier.drain(&drain_client).await;
+    drain_notifier.drain(&drain_client).await;
 }
 
 /// True when the server listens on a non-loopback address, i.e. it is

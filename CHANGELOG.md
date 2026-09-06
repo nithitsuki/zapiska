@@ -66,6 +66,13 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Fixed
 
+- Notification batching pins the fixed-window deadline
+  (`opened_at + NOTIFY_BATCH_SECS`) with clock-driven tests — the old
+  per-push timers were effectively fixed-window too (the first timer won),
+  but armed O(N) tasks and the deadline was never pinned. One timer task is
+  now armed per window (when it opens) instead of one per push. Open windows
+  drain as final digests on graceful shutdown (bounded to 12 s, in-flight
+  sends awaited) instead of being lost on restart.
 - Batch comment moderation now emits one `comment.status_changed` event per
   changed item (the documented engine polling path previously fired
   nothing), and self-service delete by token emits one as well (previously
@@ -243,6 +250,22 @@ All notable changes to zapiska are documented here. The format follows
   `webmention_seen_skipped`, `comment_urls_skipped`,
   `github_profiles_skipped`, and `comment_reactions_skipped` alongside the
   existing counts.
+- Notifications now go through one `Channel` adapter seam
+  (`src/notify/channel.rs`): each channel owns only its wire format and
+  escape rules (policies unchanged), while dispatch, retry, and size budgets
+  are shared — the three near-identical `send` functions and the two
+  hand-synced dispatch branches collapse into one loop over
+  `Notifier::channels`, so a fourth channel is one new adapter file plus the
+  registration checklist (`Config` fields, `Notifier` fields plus an
+  `is_empty` arm, one `push` line). Delivery retries transient failures (network errors,
+  429, 5xx) up to 3 attempts with backoff, then logs and drops; permanent
+  failures (other 4xx, Telegram `ok: false`) are attempted once.
+  Bounded retry (duplicates possible on timeout), log-and-drop: submission
+  never blocks on delivery. `Retry-After` on 429s is honored up to a 2 s cap
+  per wait. Telegram and Slack payloads are now capped at their channel
+  limits (4096 / 3000 characters) with the same shrink-cheapest-first policy
+  Discord already had; the moderation footer survives every shrink stage.
+  Digest content and grouping are unchanged.
 
 ## [0.2.0] - 2026-08-07
 
