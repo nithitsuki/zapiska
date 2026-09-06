@@ -146,6 +146,36 @@ pub fn create_pool(database_path: &str) -> Result<SqlitePool, r2d2::Error> {
         .build(manager)
 }
 
+/// Run `PRAGMA quick_check` against the database and refuse to serve traffic
+/// when it reports anything but a clean `ok`. Corruption must fail loud at
+/// boot (via [`crate::state::AppState::start`]), not as silent row loss at
+/// request time.
+pub fn quick_check(pool: &SqlitePool) -> Result<(), String> {
+    let conn = pool.get().map_err(|e| {
+        format!(
+            "database PRAGMA quick_check failed: cannot acquire a connection ({e}); \
+             check DATABASE_PATH and file permissions"
+        )
+    })?;
+    let mut stmt = conn
+        .prepare("PRAGMA quick_check")
+        .map_err(|e| format!("database PRAGMA quick_check failed: cannot prepare probe ({e})"))?;
+    let rows: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| format!("database PRAGMA quick_check failed: cannot run probe ({e})"))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("database PRAGMA quick_check failed: cannot read probe rows ({e})"))?;
+    if rows.len() == 1 && rows[0] == "ok" {
+        return Ok(());
+    }
+    Err(format!(
+        "database PRAGMA quick_check reported corruption: {}; \
+         restore the SQLite file from backup (or re-import a known-good JSON export) before starting; \
+         set DB_QUICK_CHECK=false only to bypass this gate for recovery",
+        rows.join("; ")
+    ))
+}
+
 /// Read `PRAGMA user_version` — the source of truth for schema version.
 /// Returns 0 for legacy databases created before version tracking.
 fn user_version(conn: &Connection) -> Result<i64, rusqlite::Error> {
@@ -405,6 +435,31 @@ mod tests {
         let path = dir.path().join(name);
         let pool = create_pool(&path.to_string_lossy()).unwrap();
         (pool, dir)
+    }
+
+    #[test]
+    fn quick_check_healthy_db_passes() {
+        let (pool, _dir) = test_pool("q.db");
+        run_migrations(&pool, None).unwrap();
+        assert!(quick_check(&pool).is_ok());
+    }
+
+    #[test]
+    fn quick_check_unreachable_db_fails_loud() {
+        // A short connection timeout keeps the failure fast: r2d2 would
+        // otherwise retry for its 30 s default before surfacing the error.
+        let manager =
+            r2d2_sqlite::SqliteConnectionManager::file("/nonexistent-dir-zapiska-quickcheck/q.db");
+        let pool = r2d2::Pool::builder()
+            .min_idle(Some(0))
+            .connection_timeout(std::time::Duration::from_millis(200))
+            .build(manager)
+            .unwrap();
+        let err = quick_check(&pool).unwrap_err();
+        assert!(
+            err.contains("quick_check"),
+            "failure must name the check, got: {err}"
+        );
     }
 
     fn db_version(pool: &SqlitePool) -> i64 {

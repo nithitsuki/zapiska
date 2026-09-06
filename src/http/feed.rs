@@ -51,6 +51,7 @@ pub async fn feed(
     let origin = state
         .config
         .public_target_origin
+        .as_str()
         .trim_end_matches('/')
         .to_string();
 

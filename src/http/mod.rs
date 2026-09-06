@@ -11,7 +11,9 @@ pub(crate) mod routes;
 pub mod shutdown;
 #[cfg(test)]
 pub(crate) mod test_support;
-pub(crate) mod webhook;
+/// Webhook signing/verification primitives. Public so integration tests can
+/// verify the production sink's signatures with the real verifier (T20-F1).
+pub mod webhook;
 #[cfg(feature = "webmentions")]
 pub(crate) mod webmention_post;
 

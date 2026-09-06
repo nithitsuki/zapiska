@@ -3,10 +3,14 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use thiserror::Error;
 
+/// T21 subgroups: Server | Fetch | Moderation | RateLimit | Notify.
+/// Fields stay flat (no renames) and are grouped by section comments below;
+/// enums are parsed once at load so consumers never re-derive them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+    // ── Server ──
     pub bind_addr: SocketAddr,
-    pub public_target_origin: String,
+    pub public_target_origin: url::Url,
     pub allowed_cors_origin: String,
     pub admin_token: String,
     pub database_path: String,
@@ -15,36 +19,33 @@ pub struct Config {
     /// of the checking of `integrity_check` but runs much faster, so boot
     /// latency is small); set `DB_QUICK_CHECK=false` to skip.
     pub db_quick_check: bool,
+    /// Whether the server sits behind a trusted reverse proxy that sets
+    /// client-IP headers. When `false` (default), `X-Forwarded-For`,
+    /// `X-Real-IP`, and `Forwarded` are ignored and rate limits, quotas, and
+    /// IP hashes key on the TCP peer address (spoof-proof). Set to `true`
+    /// only when a proxy you control overwrites those headers — then the
+    /// leftmost `X-Forwarded-For` entry (else `X-Real-IP`, else `Forwarded
+    /// for=`) identifies the client. See `src/http/peer.rs`.
+    pub trust_proxy: bool,
+    // ── Fetch ──
     pub github_token: Option<String>,
     pub max_content_len: usize,
     pub max_author_len: usize,
     pub max_body_size: usize,
     pub fetch_timeout_ms: u64,
     pub worker_backlog: usize,
-    pub rust_log: String,
+    // ── Moderation ──
     /// Name of the honeypot form field. When non-empty, the submission is stored
     /// with `honeypot = 1` (flagged for moderator review, not discarded).
     /// The field is hidden from human users via CSS.
     pub honeypot_field: String,
-    /// Max native comments per IP per day (resets at midnight UTC). 0 = unlimited.
-    pub max_comments_per_ip_per_day: u32,
-    /// Max webmentions per source domain per hour. 0 = unlimited.
-    pub max_webmentions_per_domain_per_hour: u32,
-    /// Whether to store the submitter's IP address with each comment.
-    /// Disabled by default for privacy. Set to "true" to enable IP-based
-    /// spam analysis in moderation scripts.
-    pub store_ip_address: bool,
-    /// Secret salt used when hashing IP addresses with SHA-256.
-    /// When set, the salt is mixed into the hash to prevent rainbow table
-    /// attacks. Only used when `store_ip_address` is also enabled.
-    pub ip_hash_secret: Option<String>,
     /// Optional URL of an external moderation webhook. When set, zapiska
     /// POSTs the full comment data to this URL after every submission.
     /// The external service can use the admin API for additional context
     /// and call `/api/admin/moderate` to make a decision at any time.
     pub moderation_webhook_url: Option<String>,
-    /// Webhook mode: "async" (fire-and-forget, default) or "sync" (wait for response).
-    pub moderation_webhook_mode: String,
+    /// Webhook mode: `Async` (fire-and-forget, default) or `Sync` (wait for response).
+    pub moderation_webhook_mode: WebhookMode,
     /// Optional HMAC secret signing every outbound moderation-webhook body
     /// (both async and sync emissions). Empty/unset = unsigned (backwards
     /// compatible). When set, each POST carries `X-Zapiska-Timestamp` and
@@ -52,10 +53,10 @@ pub struct Config {
     /// holding the secret rejects unsigned or tampered bodies. Additive only.
     pub webhook_signing_secret: Option<String>,
     /// Default moderation status for new comments.
-    /// `"pending"` = manual review required (default).
-    /// `"approved"` = auto-approve (posts appear immediately).
+    /// `Pending` = manual review required (default).
+    /// `Approved` = auto-approve (posts appear immediately).
     /// Either way, the moderation webhook is still notified if configured.
-    pub default_comment_status: String,
+    pub default_comment_status: crate::moderation::Status,
     /// Maximum nesting depth for threaded replies. 0 = disabled (no nesting).
     pub max_thread_depth: i64,
     /// Whether Cloudflare Turnstile verification is required on native comment
@@ -69,6 +70,19 @@ pub struct Config {
     /// Override for the siteverify endpoint. Defaults to the public Cloudflare
     /// endpoint. Useful for tests or for routing through a proxy.
     pub turnstile_verify_url: String,
+    /// Whether to store the submitter's IP address with each comment.
+    /// Disabled by default for privacy. Set to "true" to enable IP-based
+    /// spam analysis in moderation scripts.
+    pub store_ip_address: bool,
+    /// Secret salt used when hashing IP addresses with SHA-256.
+    /// When set, the salt is mixed into the hash to prevent rainbow table
+    /// attacks. Only used when `store_ip_address` is also enabled.
+    pub ip_hash_secret: Option<String>,
+    // ── RateLimit ──
+    /// Max native comments per IP per day (resets at midnight UTC). 0 = unlimited.
+    pub max_comments_per_ip_per_day: u32,
+    /// Max webmentions per source domain per hour. 0 = unlimited.
+    pub max_webmentions_per_domain_per_hour: u32,
     /// Rate-limit burst for native comment submission (/api/comment).
     pub rate_limit_native_burst: u32,
     /// Rate-limit window (seconds) for native comment submission.
@@ -85,6 +99,7 @@ pub struct Config {
     pub rate_limit_admin_moderate_burst: u32,
     /// Rate-limit window (seconds) for admin moderate.
     pub rate_limit_admin_moderate_window_secs: u64,
+    // ── Notify ──
     /// Telegram bot token for new-comment notifications (via Bot API).
     /// Requires `telegram_chat_id`; when both are set, every new comment
     /// posts a message to the chat. Optional — unset disables Telegram.
@@ -109,14 +124,14 @@ pub struct Config {
     /// this count, it is flushed immediately with an aggregated message.
     /// `0` = window-based only (no threshold flush).
     pub notify_batch_threshold: u32,
-    /// Batch window scoping: "page" = one window per target_path,
-    /// "global" = a single site-wide window.
-    pub notify_batch_granularity: String,
-    /// Who may react to comments: "admin" (default — only requests with the
-    /// admin token), or "anyone" (public, IP-hashed identity — HIGHLY
+    /// Batch window scoping: `Page` = one window per target_path,
+    /// `Global` = a single site-wide window.
+    pub notify_batch_granularity: BatchGranularity,
+    /// Who may react to comments: `Admin` (default — only requests with the
+    /// admin token), or `Anyone` (public, IP-hashed identity — HIGHLY
     /// discouraged without additional protections; reserved future value:
     /// "authenticated").
-    pub reactions_allowed: String,
+    pub reactions_allowed: ReactionsMode,
     /// Allowed reaction set, comma-separated (e.g. "👍,❤️,😄"). The API
     /// rejects anything outside this set.
     pub reactions_set: Vec<String>,
@@ -127,18 +142,10 @@ pub struct Config {
     /// Blacklist of comment languages as ISO 639-1 codes. Empty = no
     /// blacklist. Ignored when a whitelist is set.
     pub comment_lang_blocked: Vec<String>,
-    /// Policy for undetectable / emoji-heavy comments: "always" (default,
-    /// emoji-only comments pass), "never" (emoji-heavy rejected), or
-    /// "if_unknown" (emoji-heavy pass, other undetectable text rejected).
-    pub comment_lang_allow_emoji: String,
-    /// Whether the server sits behind a trusted reverse proxy that sets
-    /// client-IP headers. When `false` (default), `X-Forwarded-For`,
-    /// `X-Real-IP`, and `Forwarded` are ignored and rate limits, quotas, and
-    /// IP hashes key on the TCP peer address (spoof-proof). Set to `true`
-    /// only when a proxy you control overwrites those headers — then the
-    /// leftmost `X-Forwarded-For` entry (else `X-Real-IP`, else `Forwarded
-    /// for=`) identifies the client. See `src/http/peer.rs`.
-    pub trust_proxy: bool,
+    /// Policy for undetectable / emoji-heavy comments: `Always` (default,
+    /// emoji-only comments pass), `Never` (emoji-heavy rejected), or
+    /// `IfUnknown` (emoji-heavy pass, other undetectable text rejected).
+    pub comment_lang_allow_emoji: EmojiPolicy,
 }
 
 #[derive(Debug, Error)]
@@ -183,6 +190,172 @@ pub enum ConfigError {
     InvalidEmojiPolicy(String),
     #[error("HONEYPOT_FIELD must be 1-64 chars of [A-Za-z0-9_-], got: {0}")]
     InvalidHoneypotField(String),
+    #[error("MODERATION_WEBHOOK_MODE must be 'async' or 'sync', got: {0}")]
+    InvalidModerationWebhookMode(String),
+    #[error("DEFAULT_COMMENT_STATUS must be 'pending' or 'approved', got: {0}")]
+    InvalidDefaultStatus(String),
+    #[error("MAX_COMMENTS_PER_IP_PER_DAY must be a non-negative integer, got: {0}")]
+    InvalidMaxCommentsPerIpPerDay(String),
+    #[error("MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR must be a non-negative integer, got: {0}")]
+    InvalidMaxWebmentionsPerDomainPerHour(String),
+    #[error("MAX_THREAD_DEPTH must be an integer, got: {0}")]
+    InvalidMaxThreadDepth(String),
+}
+
+// ── Typed subgroups (parsed once at load; consumers never re-derive) ──
+
+/// Batch window scoping for notification digests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchGranularity {
+    Page,
+    Global,
+}
+
+impl BatchGranularity {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Global => "global",
+        }
+    }
+}
+
+impl std::fmt::Display for BatchGranularity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for BatchGranularity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "page" => Ok(Self::Page),
+            "global" => Ok(Self::Global),
+            other => Err(other.to_string()),
+        }
+    }
+}
+
+/// Moderation webhook delivery mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebhookMode {
+    Async,
+    Sync,
+}
+
+impl WebhookMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Async => "async",
+            Self::Sync => "sync",
+        }
+    }
+
+    #[must_use]
+    pub fn is_sync(self) -> bool {
+        matches!(self, Self::Sync)
+    }
+}
+
+impl std::fmt::Display for WebhookMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WebhookMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "async" => Ok(Self::Async),
+            "sync" => Ok(Self::Sync),
+            other => Err(other.to_string()),
+        }
+    }
+}
+
+/// Who may react to comments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReactionsMode {
+    Admin,
+    Anyone,
+}
+
+impl ReactionsMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Anyone => "anyone",
+        }
+    }
+}
+
+impl std::fmt::Display for ReactionsMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ReactionsMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "admin" => Ok(Self::Admin),
+            "anyone" => Ok(Self::Anyone),
+            other => Err(other.to_string()),
+        }
+    }
+}
+
+/// Policy for undetectable / emoji-heavy comments. The single definition —
+/// [`crate::language::LanguageGate`] consumes this instead of re-parsing a
+/// string (its old `expect` is gone with the string field).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmojiPolicy {
+    /// Emoji-only comments are always accepted (default).
+    #[default]
+    Always,
+    /// Emoji-heavy comments are rejected.
+    Never,
+    /// Emoji-heavy comments are accepted; other undetectable text is rejected.
+    IfUnknown,
+}
+
+impl EmojiPolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Never => "never",
+            Self::IfUnknown => "if_unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for EmojiPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EmojiPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "always" => Ok(Self::Always),
+            "never" => Ok(Self::Never),
+            "if_unknown" => Ok(Self::IfUnknown),
+            other => Err(other.to_string()),
+        }
+    }
 }
 
 fn env_or_default(key: &str, default: &str) -> String {
@@ -223,13 +396,13 @@ fn redact_webhook_url(url: &str) -> String {
     }
 }
 
-fn validate_public_target_origin(raw: &str) -> Result<String, ConfigError> {
+fn validate_public_target_origin(raw: &str) -> Result<url::Url, ConfigError> {
     match url::Url::parse(raw) {
         Ok(parsed)
             if (parsed.scheme() == "http" || parsed.scheme() == "https")
                 && parsed.host_str().is_some() =>
         {
-            Ok(raw.to_string())
+            Ok(parsed)
         }
         _ => Err(ConfigError::InvalidPublicTargetOrigin(raw.to_string())),
     }
@@ -239,31 +412,33 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             bind_addr: "127.0.0.1:3000".parse().expect("default bind_addr valid"),
-            public_target_origin: "https://nithitsuki.com".to_string(),
+            public_target_origin: "https://nithitsuki.com"
+                .parse()
+                .expect("default public_target_origin valid"),
             allowed_cors_origin: "https://nithitsuki.com".to_string(),
             admin_token: String::new(),
             database_path: "./comments.db".to_string(),
             db_quick_check: true,
+            trust_proxy: false,
             github_token: None,
             max_content_len: 2000,
             max_author_len: 100,
             max_body_size: 8192,
             fetch_timeout_ms: 4000,
             worker_backlog: 64,
-            rust_log: "info".to_string(),
             honeypot_field: "website".to_string(),
-            max_comments_per_ip_per_day: 50,
-            max_webmentions_per_domain_per_hour: 10,
-            store_ip_address: false,
-            ip_hash_secret: None,
             moderation_webhook_url: None,
-            moderation_webhook_mode: "async".to_string(),
+            moderation_webhook_mode: WebhookMode::Async,
             webhook_signing_secret: None,
-            default_comment_status: "pending".to_string(),
+            default_comment_status: crate::moderation::Status::Pending,
             max_thread_depth: 0,
             turnstile_enabled: false,
             turnstile_secret_key: None,
             turnstile_verify_url: crate::turnstile::default_verify_url().to_string(),
+            store_ip_address: false,
+            ip_hash_secret: None,
+            max_comments_per_ip_per_day: 50,
+            max_webmentions_per_domain_per_hour: 10,
             rate_limit_native_burst: 100,
             rate_limit_native_window_secs: 60,
             rate_limit_webmention_burst: 60,
@@ -279,8 +454,8 @@ impl Default for Config {
             discord_webhook_url: None,
             notify_batch_secs: 60,
             notify_batch_threshold: 20,
-            notify_batch_granularity: "page".to_string(),
-            reactions_allowed: "admin".to_string(),
+            notify_batch_granularity: BatchGranularity::Page,
+            reactions_allowed: ReactionsMode::Admin,
             reactions_set: vec![
                 "👍".to_string(),
                 "❤️".to_string(),
@@ -291,8 +466,7 @@ impl Default for Config {
             ],
             comment_lang_allowed: Vec::new(),
             comment_lang_blocked: Vec::new(),
-            comment_lang_allow_emoji: "always".to_string(),
-            trust_proxy: false,
+            comment_lang_allow_emoji: EmojiPolicy::Always,
         }
     }
 }
@@ -308,7 +482,7 @@ impl Config {
 
         let public_target_origin = validate_public_target_origin(&env_or_default(
             "PUBLIC_TARGET_ORIGIN",
-            &defaults.public_target_origin,
+            defaults.public_target_origin.as_str(),
         ))?;
 
         let allowed_cors_origin =
@@ -382,8 +556,6 @@ impl Config {
             return Err(ConfigError::InvalidWorkerBacklog("0".to_string()));
         }
 
-        let rust_log = env_or_default("RUST_LOG", &defaults.rust_log);
-
         let honeypot_field = env_or_default("HONEYPOT_FIELD", &defaults.honeypot_field);
         // Fail-closed: the configured name is substituted into the served
         // widget JS inside a single-quoted string. Anything outside
@@ -397,18 +569,24 @@ impl Config {
         {
             return Err(ConfigError::InvalidHoneypotField(honeypot_field));
         }
-        let max_comments_per_ip_per_day = env_or_default(
+        // Fail-loud like every other numeric knob: garbage refuses boot
+        // instead of silently running on the default.
+        let max_comments_per_ip_per_day = parse_or_err(
             "MAX_COMMENTS_PER_IP_PER_DAY",
-            &defaults.max_comments_per_ip_per_day.to_string(),
-        )
-        .parse::<u32>()
-        .unwrap_or(defaults.max_comments_per_ip_per_day);
-        let max_webmentions_per_domain_per_hour = env_or_default(
+            env_or_default(
+                "MAX_COMMENTS_PER_IP_PER_DAY",
+                &defaults.max_comments_per_ip_per_day.to_string(),
+            ),
+            ConfigError::InvalidMaxCommentsPerIpPerDay,
+        )?;
+        let max_webmentions_per_domain_per_hour = parse_or_err(
             "MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR",
-            &defaults.max_webmentions_per_domain_per_hour.to_string(),
-        )
-        .parse::<u32>()
-        .unwrap_or(defaults.max_webmentions_per_domain_per_hour);
+            env_or_default(
+                "MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR",
+                &defaults.max_webmentions_per_domain_per_hour.to_string(),
+            ),
+            ConfigError::InvalidMaxWebmentionsPerDomainPerHour,
+        )?;
 
         let store_ip_address = env_bool("STORE_IP_ADDRESS", defaults.store_ip_address);
         let ip_hash_secret = env::var("IP_HASH_SECRET").ok().filter(|s| !s.is_empty());
@@ -416,18 +594,34 @@ impl Config {
         let moderation_webhook_url = env::var("MODERATION_WEBHOOK_URL")
             .ok()
             .filter(|s| !s.is_empty());
-        let moderation_webhook_mode =
-            env_or_default("MODERATION_WEBHOOK_MODE", &defaults.moderation_webhook_mode);
+        let moderation_webhook_mode = env_or_default(
+            "MODERATION_WEBHOOK_MODE",
+            defaults.moderation_webhook_mode.as_str(),
+        )
+        .parse::<WebhookMode>()
+        .map_err(ConfigError::InvalidModerationWebhookMode)?;
         let webhook_signing_secret = env::var("WEBHOOK_SIGNING_SECRET")
             .ok()
             .filter(|s| !s.is_empty());
-        let default_comment_status =
-            env_or_default("DEFAULT_COMMENT_STATUS", &defaults.default_comment_status);
-        let max_thread_depth =
-            env_or_default("MAX_THREAD_DEPTH", &defaults.max_thread_depth.to_string())
-                .parse::<i64>()
-                .unwrap_or(defaults.max_thread_depth)
-                .clamp(0, 10);
+        let default_comment_status_raw = env_or_default(
+            "DEFAULT_COMMENT_STATUS",
+            defaults.default_comment_status.as_str(),
+        );
+        let default_comment_status = match default_comment_status_raw.to_lowercase().as_str() {
+            "pending" => crate::moderation::Status::Pending,
+            "approved" => crate::moderation::Status::Approved,
+            _ => {
+                return Err(ConfigError::InvalidDefaultStatus(
+                    default_comment_status_raw,
+                ));
+            }
+        };
+        let max_thread_depth = parse_or_err(
+            "MAX_THREAD_DEPTH",
+            env_or_default("MAX_THREAD_DEPTH", &defaults.max_thread_depth.to_string()),
+            ConfigError::InvalidMaxThreadDepth,
+        )
+        .map(|v: i64| v.clamp(0, 10))?;
 
         let turnstile_enabled = env_bool("TURNSTILE_ENABLED", defaults.turnstile_enabled);
         let turnstile_secret_key = env::var("TURNSTILE_SECRET_KEY")
@@ -518,20 +712,15 @@ impl Config {
         )?;
         let notify_batch_granularity = env_or_default(
             "NOTIFY_BATCH_GRANULARITY",
-            &defaults.notify_batch_granularity,
+            defaults.notify_batch_granularity.as_str(),
         )
-        .to_lowercase();
-        if notify_batch_granularity != "page" && notify_batch_granularity != "global" {
-            return Err(ConfigError::InvalidNotifyGranularity(
-                notify_batch_granularity,
-            ));
-        }
+        .parse::<BatchGranularity>()
+        .map_err(ConfigError::InvalidNotifyGranularity)?;
 
         let reactions_allowed =
-            env_or_default("REACTIONS_ALLOWED", &defaults.reactions_allowed).to_lowercase();
-        if reactions_allowed != "admin" && reactions_allowed != "anyone" {
-            return Err(ConfigError::InvalidReactionsMode(reactions_allowed));
-        }
+            env_or_default("REACTIONS_ALLOWED", defaults.reactions_allowed.as_str())
+                .parse::<ReactionsMode>()
+                .map_err(ConfigError::InvalidReactionsMode)?;
         let reactions_set: Vec<String> =
             env_or_default("REACTIONS_SET", &defaults.reactions_set.join(","))
                 .split(',')
@@ -558,15 +747,10 @@ impl Config {
         let comment_lang_blocked = parse_lang_codes("COMMENT_LANG_BLOCKED")?;
         let comment_lang_allow_emoji = env_or_default(
             "COMMENT_LANG_ALLOW_EMOJI",
-            &defaults.comment_lang_allow_emoji,
+            defaults.comment_lang_allow_emoji.as_str(),
         )
-        .to_lowercase();
-        if !matches!(
-            comment_lang_allow_emoji.as_str(),
-            "always" | "never" | "if_unknown"
-        ) {
-            return Err(ConfigError::InvalidEmojiPolicy(comment_lang_allow_emoji));
-        }
+        .parse::<EmojiPolicy>()
+        .map_err(ConfigError::InvalidEmojiPolicy)?;
 
         Ok(Config {
             bind_addr,
@@ -581,7 +765,6 @@ impl Config {
             max_body_size,
             fetch_timeout_ms,
             worker_backlog,
-            rust_log,
             honeypot_field,
             max_comments_per_ip_per_day,
             max_webmentions_per_domain_per_hour,
@@ -622,6 +805,25 @@ impl Config {
 
     pub fn redacted_display(&self) -> RedactedConfig<'_> {
         RedactedConfig(self)
+    }
+
+    /// Production moderation sink for the webmention worker's gone path:
+    /// `None` when no webhook URL is configured, else the signed
+    /// `status_sink` (the same constructor the comment/reaction paths build
+    /// per request). [`crate::state::AppState::start`] and the F1
+    /// prod-wiring test share this so the spawn path cannot diverge.
+    #[must_use]
+    pub fn worker_moderation_sink(
+        &self,
+        client: &reqwest::Client,
+    ) -> Option<crate::moderation::WebhookSink> {
+        self.moderation_webhook_url.as_ref().map(|url| {
+            crate::moderation::WebhookSink::status_sink_signed(
+                client,
+                url,
+                self.webhook_signing_secret.clone(),
+            )
+        })
     }
 }
 
@@ -684,8 +886,7 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 comment_lang_allowed: {:?}, \
                 comment_lang_blocked: {:?}, \
                 comment_lang_allow_emoji: {}, \
-                trust_proxy: {}, \
-                rust_log: {} \
+                trust_proxy: {} \
             }}",
             self.0.bind_addr,
             self.0.public_target_origin,
@@ -761,7 +962,6 @@ impl std::fmt::Display for RedactedConfig<'_> {
             self.0.comment_lang_blocked,
             self.0.comment_lang_allow_emoji,
             self.0.trust_proxy,
-            self.0.rust_log,
         )
     }
 }
@@ -788,7 +988,6 @@ mod tests {
         "MAX_BODY_SIZE",
         "FETCH_TIMEOUT_MS",
         "WORKER_BACKLOG",
-        "RUST_LOG",
         "HONEYPOT_FIELD",
         "MAX_COMMENTS_PER_IP_PER_DAY",
         "MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR",
@@ -853,7 +1052,8 @@ mod tests {
     /// that must set ambient state atomically with the hermetic window).
     fn with_env_locked(vars: &[(&str, &str)], f: impl FnOnce()) {
         // Snapshot then clear every managed var so ambient environment
-        // (e.g. RUST_LOG=debug exported in CI) cannot leak into `from_env`.
+        // Ambient environment (e.g. DATABASE_PATH exported in CI) cannot
+        // leak into `from_env`.
         let mut saved = Vec::with_capacity(ENV_VARS.len());
         for var in ENV_VARS {
             saved.push((var.to_string(), env::var(var).ok()));
@@ -883,7 +1083,10 @@ mod tests {
         with_env(&[("ADMIN_TOKEN", "test-token")], || {
             let config = Config::from_env().unwrap();
             assert_eq!(config.bind_addr.to_string(), "127.0.0.1:3000");
-            assert_eq!(config.public_target_origin, "https://nithitsuki.com");
+            assert_eq!(
+                config.public_target_origin.as_str(),
+                "https://nithitsuki.com/"
+            );
             assert_eq!(config.allowed_cors_origin, "https://nithitsuki.com");
             assert_eq!(config.admin_token, "test-token");
             assert_eq!(config.database_path, "./comments.db");
@@ -893,7 +1096,6 @@ mod tests {
             assert_eq!(config.max_body_size, 8192);
             assert_eq!(config.fetch_timeout_ms, 4000);
             assert_eq!(config.worker_backlog, 64);
-            assert_eq!(config.rust_log, "info");
         });
     }
 
@@ -927,12 +1129,11 @@ mod tests {
                 ("MAX_BODY_SIZE", "4096"),
                 ("FETCH_TIMEOUT_MS", "2000"),
                 ("WORKER_BACKLOG", "128"),
-                ("RUST_LOG", "debug"),
             ],
             || {
                 let config = Config::from_env().unwrap();
                 assert_eq!(config.bind_addr.to_string(), "0.0.0.0:9090");
-                assert_eq!(config.public_target_origin, "https://example.com");
+                assert_eq!(config.public_target_origin.as_str(), "https://example.com/");
                 assert_eq!(config.allowed_cors_origin, "https://example.com");
                 assert_eq!(config.admin_token, "my-secret");
                 assert_eq!(config.database_path, "/data/comments.db");
@@ -942,7 +1143,6 @@ mod tests {
                 assert_eq!(config.max_body_size, 4096);
                 assert_eq!(config.fetch_timeout_ms, 2000);
                 assert_eq!(config.worker_backlog, 128);
-                assert_eq!(config.rust_log, "debug");
             },
         );
     }
@@ -1179,7 +1379,7 @@ mod tests {
             let config = Config::from_env().unwrap();
             assert_eq!(config.notify_batch_secs, 60);
             assert_eq!(config.notify_batch_threshold, 20);
-            assert_eq!(config.notify_batch_granularity, "page");
+            assert_eq!(config.notify_batch_granularity, BatchGranularity::Page);
             assert!(config.discord_webhook_url.is_none());
         });
     }
@@ -1201,7 +1401,7 @@ mod tests {
                 let config = Config::from_env().unwrap();
                 assert_eq!(config.notify_batch_secs, 300);
                 assert_eq!(config.notify_batch_threshold, 50);
-                assert_eq!(config.notify_batch_granularity, "global");
+                assert_eq!(config.notify_batch_granularity, BatchGranularity::Global);
                 assert_eq!(
                     config.discord_webhook_url.as_deref(),
                     Some("https://discord.com/api/webhooks/1/abc")
@@ -1228,7 +1428,7 @@ mod tests {
     fn reactions_defaults() {
         with_env(&[("ADMIN_TOKEN", "test")], || {
             let config = Config::from_env().unwrap();
-            assert_eq!(config.reactions_allowed, "admin");
+            assert_eq!(config.reactions_allowed, ReactionsMode::Admin);
             assert_eq!(
                 config.reactions_set,
                 vec!["👍", "❤️", "😄", "😮", "😢", "😡"]
@@ -1246,7 +1446,7 @@ mod tests {
             ],
             || {
                 let config = Config::from_env().unwrap();
-                assert_eq!(config.reactions_allowed, "anyone");
+                assert_eq!(config.reactions_allowed, ReactionsMode::Anyone);
                 assert_eq!(config.reactions_set, vec!["👍", "👎", "🚀"]);
             },
         );
@@ -1269,7 +1469,7 @@ mod tests {
             let config = Config::from_env().unwrap();
             assert!(config.comment_lang_allowed.is_empty());
             assert!(config.comment_lang_blocked.is_empty());
-            assert_eq!(config.comment_lang_allow_emoji, "always");
+            assert_eq!(config.comment_lang_allow_emoji, EmojiPolicy::Always);
         });
     }
 
@@ -1286,7 +1486,7 @@ mod tests {
                 let config = Config::from_env().unwrap();
                 assert_eq!(config.comment_lang_allowed, vec!["en", "de", "ja"]);
                 assert_eq!(config.comment_lang_blocked, vec!["ru"]);
-                assert_eq!(config.comment_lang_allow_emoji, "if_unknown");
+                assert_eq!(config.comment_lang_allow_emoji, EmojiPolicy::IfUnknown);
             },
         );
     }
@@ -1434,7 +1634,7 @@ mod tests {
     fn redacted_display_hides_admin_and_github_tokens() {
         let config = Config {
             bind_addr: "127.0.0.1:3000".parse().unwrap(),
-            public_target_origin: "https://nithitsuki.com".to_string(),
+            public_target_origin: "https://nithitsuki.com".parse().unwrap(),
             allowed_cors_origin: "https://nithitsuki.com".to_string(),
             admin_token: "super-secret-12345".to_string(),
             database_path: "./comments.db".to_string(),
@@ -1444,16 +1644,15 @@ mod tests {
             max_body_size: 8192,
             fetch_timeout_ms: 4000,
             worker_backlog: 64,
-            rust_log: "info".to_string(),
             honeypot_field: "website".to_string(),
             max_comments_per_ip_per_day: 50,
             max_webmentions_per_domain_per_hour: 10,
             store_ip_address: false,
             ip_hash_secret: None,
             moderation_webhook_url: None,
-            moderation_webhook_mode: "async".to_string(),
+            moderation_webhook_mode: WebhookMode::Async,
             webhook_signing_secret: None,
-            default_comment_status: "pending".to_string(),
+            default_comment_status: crate::moderation::Status::Pending,
             max_thread_depth: 0,
             turnstile_enabled: true,
             turnstile_secret_key: Some("0x4AAAAAAAsecret".to_string()),
@@ -1474,12 +1673,12 @@ mod tests {
             discord_webhook_url: Some("https://discord.com/api/webhooks/1/abc".to_string()),
             notify_batch_secs: 60,
             notify_batch_threshold: 20,
-            notify_batch_granularity: "page".to_string(),
-            reactions_allowed: "admin".to_string(),
+            notify_batch_granularity: BatchGranularity::Page,
+            reactions_allowed: ReactionsMode::Admin,
             reactions_set: vec!["👍".to_string(), "❤️".to_string()],
             comment_lang_allowed: vec!["en".to_string()],
             comment_lang_blocked: Vec::new(),
-            comment_lang_allow_emoji: "always".to_string(),
+            comment_lang_allow_emoji: EmojiPolicy::Always,
             db_quick_check: true,
             trust_proxy: false,
         };
@@ -1584,7 +1783,7 @@ mod tests {
             ],
             || {
                 let config = Config::from_env().unwrap();
-                assert_eq!(config.public_target_origin, "https://example.com");
+                assert_eq!(config.public_target_origin.as_str(), "https://example.com/");
             },
         );
         with_env(
@@ -1594,7 +1793,10 @@ mod tests {
             ],
             || {
                 let config = Config::from_env().unwrap();
-                assert_eq!(config.public_target_origin, "http://localhost:3000");
+                assert_eq!(
+                    config.public_target_origin.as_str(),
+                    "http://localhost:3000/"
+                );
             },
         );
     }
@@ -1709,10 +1911,11 @@ mod tests {
 
     #[test]
     fn silent_default_fields_match_default_impl() {
-        // These three fields keep the silent `unwrap_or` policy but must still
-        // read their defaults from `Config::default()` — they were the last
-        // hand-synced literals in `from_env`, so a drifted literal here would
-        // silently diverge from `Default`. If any literal drifts, this fails.
+        // Fail-loud audit pin: these three fields once fell back to defaults
+        // on garbage (`unwrap_or`); they now refuse boot like every other
+        // numeric knob. They must still read their defaults from
+        // `Config::default()` — a drifted literal here would silently diverge
+        // from `Default`.
         with_env(&[("ADMIN_TOKEN", "test")], || {
             let from_env = Config::from_env().unwrap();
             let defaults = Config::default();
@@ -1761,24 +1964,195 @@ mod tests {
     }
 
     #[test]
+    fn batch_granularity_parses_once_and_rejects_garbage() {
+        for (raw, expected) in [
+            ("page", BatchGranularity::Page),
+            ("global", BatchGranularity::Global),
+            ("PAGE", BatchGranularity::Page),
+        ] {
+            with_env(
+                &[("ADMIN_TOKEN", "test"), ("NOTIFY_BATCH_GRANULARITY", raw)],
+                || {
+                    assert_eq!(
+                        Config::from_env().unwrap().notify_batch_granularity,
+                        expected
+                    );
+                },
+            );
+        }
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("NOTIFY_BATCH_GRANULARITY", "per-comment"),
+            ],
+            || {
+                assert!(matches!(
+                    Config::from_env().unwrap_err(),
+                    ConfigError::InvalidNotifyGranularity(_)
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn webhook_mode_parses_once_and_rejects_garbage() {
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            assert_eq!(
+                Config::from_env().unwrap().moderation_webhook_mode,
+                WebhookMode::Async
+            );
+        });
+        for (raw, expected) in [
+            ("async", WebhookMode::Async),
+            ("sync", WebhookMode::Sync),
+            ("SYNC", WebhookMode::Sync),
+        ] {
+            with_env(
+                &[("ADMIN_TOKEN", "test"), ("MODERATION_WEBHOOK_MODE", raw)],
+                || {
+                    assert_eq!(
+                        Config::from_env().unwrap().moderation_webhook_mode,
+                        expected
+                    );
+                },
+            );
+        }
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("MODERATION_WEBHOOK_MODE", "sometimes"),
+            ],
+            || {
+                assert!(matches!(
+                    Config::from_env().unwrap_err(),
+                    ConfigError::InvalidModerationWebhookMode(_)
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn default_status_parses_once_and_rejects_garbage() {
+        use crate::moderation::Status;
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            assert_eq!(
+                Config::from_env().unwrap().default_comment_status,
+                Status::Pending
+            );
+        });
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("DEFAULT_COMMENT_STATUS", "APPROVED"),
+            ],
+            || {
+                assert_eq!(
+                    Config::from_env().unwrap().default_comment_status,
+                    Status::Approved
+                );
+            },
+        );
+        for bad in ["sometimes", "spam", "deleted", ""] {
+            with_env(
+                &[("ADMIN_TOKEN", "test"), ("DEFAULT_COMMENT_STATUS", bad)],
+                || {
+                    assert!(
+                        matches!(
+                            Config::from_env().unwrap_err(),
+                            ConfigError::InvalidDefaultStatus(_)
+                        ),
+                        "DEFAULT_COMMENT_STATUS={bad:?} must fail loud"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn quota_and_depth_garbage_fails_loud() {
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("MAX_COMMENTS_PER_IP_PER_DAY", "garbage"),
+            ],
+            || {
+                assert!(matches!(
+                    Config::from_env().unwrap_err(),
+                    ConfigError::InvalidMaxCommentsPerIpPerDay(_)
+                ));
+            },
+        );
+        with_env(
+            &[
+                ("ADMIN_TOKEN", "test"),
+                ("MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR", "garbage"),
+            ],
+            || {
+                assert!(matches!(
+                    Config::from_env().unwrap_err(),
+                    ConfigError::InvalidMaxWebmentionsPerDomainPerHour(_)
+                ));
+            },
+        );
+        with_env(
+            &[("ADMIN_TOKEN", "test"), ("MAX_THREAD_DEPTH", "garbage")],
+            || {
+                assert!(matches!(
+                    Config::from_env().unwrap_err(),
+                    ConfigError::InvalidMaxThreadDepth(_)
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn public_target_origin_is_typed_url() {
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(
+                config.public_target_origin.as_str(),
+                "https://nithitsuki.com/"
+            );
+        });
+    }
+
+    #[test]
+    fn worker_moderation_sink_absent_without_url() {
+        let client = reqwest::Client::new();
+        assert!(
+            Config::default().worker_moderation_sink(&client).is_none(),
+            "no webhook URL means no worker sink"
+        );
+        let config = Config {
+            moderation_webhook_url: Some("https://mod.example/hook".to_string()),
+            webhook_signing_secret: Some("s3cr3t".to_string()),
+            ..Config::default()
+        };
+        assert!(
+            config.worker_moderation_sink(&client).is_some(),
+            "configured URL means the worker carries a sink"
+        );
+    }
+
+    #[test]
     fn with_env_is_hermetic_against_ambient_vars() {
-        // Simulate ambient pollution (e.g. CI exporting RUST_LOG=debug):
+        // Simulate ambient pollution (e.g. CI exporting DATABASE_PATH):
         // `with_env` must clear it for the duration and restore it after.
         // The whole sequence holds ENV_LOCK so no other env test can
         // interleave between the pollution and the hermetic window.
         let _lock = ENV_LOCK.lock().unwrap();
-        let ambient_before = env::var("RUST_LOG").ok();
+        let ambient_before = env::var("DATABASE_PATH").ok();
         // SAFETY: ENV_LOCK is held.
-        unsafe { env::set_var("RUST_LOG", "polluted-by-ambient") };
+        unsafe { env::set_var("DATABASE_PATH", "polluted-by-ambient") };
         with_env_locked(&[("ADMIN_TOKEN", "test")], || {
             let config = Config::from_env().unwrap();
             assert_eq!(
-                config.rust_log, "info",
-                "ambient RUST_LOG must not leak into from_env"
+                config.database_path, "./comments.db",
+                "ambient DATABASE_PATH must not leak into from_env"
             );
         });
         assert_eq!(
-            env::var("RUST_LOG").as_deref(),
+            env::var("DATABASE_PATH").as_deref(),
             Ok("polluted-by-ambient"),
             "with_env must restore ambient vars afterwards"
         );
@@ -1786,8 +2160,8 @@ mod tests {
         // SAFETY: ENV_LOCK is held.
         unsafe {
             match ambient_before {
-                Some(v) => env::set_var("RUST_LOG", v),
-                None => env::remove_var("RUST_LOG"),
+                Some(v) => env::set_var("DATABASE_PATH", v),
+                None => env::remove_var("DATABASE_PATH"),
             }
         }
     }

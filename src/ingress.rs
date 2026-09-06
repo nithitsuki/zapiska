@@ -369,7 +369,7 @@ impl Ingress {
         let hook_ip = submitter_ip.clone();
         let hook_content_hash = content_hash.clone();
         let extracted_urls = ctx.urls.extract(&content);
-        let auto_approve = ctx.config.default_comment_status == "approved";
+        let auto_approve = ctx.config.default_comment_status == Status::Approved;
         let new_id = ctx
             .repo
             .create_native_comment(
@@ -410,7 +410,7 @@ impl Ingress {
         // awaits the decision, async emits). Sync decisions apply on the
         // plain write path (no machine transition, no extra event) — folding
         // them into `Moderation::transition` stays a follow-up.
-        let mut final_status = ctx.config.default_comment_status.clone();
+        let mut final_status = ctx.config.default_comment_status.as_str().to_string();
         if let Some(sink) = ctx.moderation_sink {
             let submitter_stats = if let Some(ref ip) = hook_ip {
                 ctx.repo.submitter_stats(ip).await.ok()

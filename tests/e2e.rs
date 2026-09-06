@@ -9,19 +9,19 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use zapiska::config::Config;
-use zapiska::db::pool::{create_pool, run_migrations};
-use zapiska::db::repo::Repo;
 use zapiska::http::build_app;
-use zapiska::state::{AppState, Limiter};
-#[cfg(feature = "webmentions")]
-use zapiska::worker;
+use zapiska::state::AppState;
 
 /// Helper: start a real server on a random port, return the base URL + state.
 async fn start_server() -> (String, AppState) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("e2e.db");
+    // All assembly rides AppState::start_with_github (same path as
+    // production AppState::start, minus the GitHub adapter).
     let config = Config {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         admin_token: "test-admin-token".to_string(),
-        database_path: ":memory:".to_string(),
+        database_path: path.to_string_lossy().to_string(),
         rate_limit_native_burst: 50,
         rate_limit_webmention_burst: 30,
         rate_limit_read_burst: 60,
@@ -31,36 +31,8 @@ async fn start_server() -> (String, AppState) {
         reactions_set: vec!["👍".to_string()],
         ..Config::default()
     };
-    let notifier = std::sync::Arc::new(zapiska::notify::NotificationBatcher::new(&config));
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("e2e.db");
-    let pool = create_pool(&path.to_string_lossy()).unwrap();
-    run_migrations(&pool, None).unwrap();
-    let repo = Repo::new(pool.clone());
-
-    let http_client = reqwest::Client::builder().build().unwrap();
-
-    #[cfg(feature = "webmentions")]
-    let (wm_sender, mut wm_receiver) = worker::channel(config.worker_backlog);
-    #[cfg(feature = "webmentions")]
-    tokio::spawn(async move {
-        while let Some(job) = wm_receiver.recv().await {
-            tracing::debug!(source = %job.source, "e2e test worker drained job");
-        }
-    });
-
-    let state = AppState {
-        config,
-        pool,
-        repo: repo.clone(),
-        github: Arc::new(zapiska::github::StubGitHub),
-        notifier,
-        language: zapiska::language::LanguageGate::default(),
-        #[cfg(feature = "webmentions")]
-        wm_sender,
-        http_client: http_client.clone(),
-        limiter: Arc::new(Limiter::new()),
-    };
+    let state = AppState::start_with_github(config, Arc::new(zapiska::github::StubGitHub))
+        .expect("e2e start");
 
     let app = build_app(state.clone());
 
@@ -261,7 +233,7 @@ async fn e2e_webmention_full_lifecycle() {
         github,
         Arc::new(zapiska::notify::NotificationBatcher::default()),
         http_client,
-        "https://nithitsuki.com".to_string(),
+        "https://nithitsuki.com".parse().expect("test origin valid"),
         state.config.max_content_len,
         std::time::Duration::from_secs(5),
         None,

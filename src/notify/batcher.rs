@@ -21,7 +21,7 @@ use super::{
     Digest, GLOBAL_KEY, MAX_STORED_PREVIEWS, NewCommentInfo, Notifier, deliver_digest_sync,
     deliver_digest_to_channels, deliver_new_comment,
 };
-use crate::config::Config;
+use crate::config::{BatchGranularity, Config};
 
 /// Overall shutdown-drain bound. Worst case without it is one wedged channel
 /// at ~3 attempts × 10 s per-attempt timeout (≈30 s, per channel if
@@ -127,7 +127,7 @@ impl NotificationBatcher {
             notifier: Notifier::new(config),
             window: Duration::from_secs(config.notify_batch_secs),
             threshold: config.notify_batch_threshold as u64,
-            global: config.notify_batch_granularity == "global",
+            global: matches!(config.notify_batch_granularity, BatchGranularity::Global),
             clock,
             timer_spawns: AtomicU64::new(0),
             state: Mutex::new(HashMap::new()),
@@ -372,7 +372,7 @@ mod tests {
             telegram_api_base: api_base,
             notify_batch_secs: window_secs,
             notify_batch_threshold: threshold,
-            notify_batch_granularity: granularity.to_string(),
+            notify_batch_granularity: granularity.parse().expect("test granularity valid"),
             ..Config::default()
         }
     }

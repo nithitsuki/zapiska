@@ -68,8 +68,7 @@ pub async fn receive_webmention(
     }
 
     // 2. Target must match the configured origin by URL origin, not string prefix.
-    let target_origin_url = Url::parse(&state.config.public_target_origin)
-        .expect("PUBLIC_TARGET_ORIGIN validated at config load");
+    let target_origin_url = state.config.public_target_origin.clone();
     if target_url.origin() != target_origin_url.origin() {
         return Err(AppError::BadRequest(format!(
             "target origin '{}' does not match configured origin",
@@ -167,6 +166,10 @@ mod tests {
 
     #[tokio::test]
     async fn backlog_full_returns_503() {
+        // Intentional exception to the AppState::start rule: forcing the
+        // 503 needs an undrained channel(1) nobody receives from, while
+        // start_with_github spawns a draining worker. Compiles against
+        // the typed Config via ..Config::default().
         use crate::config::Config;
         use crate::db::pool::{create_pool, run_migrations};
         use crate::db::repo::Repo;

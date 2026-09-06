@@ -97,7 +97,7 @@ pub async fn create_comment(
         notify: &notify,
         urls: &urls,
         moderation_sink: sink_ref,
-        moderation_is_sync: state.config.moderation_webhook_mode == "sync",
+        moderation_is_sync: state.config.moderation_webhook_mode.is_sync(),
     };
     let req = SubmitRequest {
         target_path: form.target_path,
@@ -610,7 +610,7 @@ mod tests {
     async fn emoji_policy_never_rejects_emoji_only() {
         let (mut state, _dir) = test_state();
         state.config.comment_lang_allowed = vec!["en".to_string()];
-        state.config.comment_lang_allow_emoji = "never".to_string();
+        state.config.comment_lang_allow_emoji = crate::config::EmojiPolicy::Never;
         state.language = crate::language::LanguageGate::new(&state.config);
         let app = build_app(state);
 
@@ -628,7 +628,7 @@ mod tests {
     async fn emoji_policy_if_unknown_rejects_gibberish() {
         let (mut state, _dir) = test_state();
         state.config.comment_lang_allowed = vec!["en".to_string()];
-        state.config.comment_lang_allow_emoji = "if_unknown".to_string();
+        state.config.comment_lang_allow_emoji = crate::config::EmojiPolicy::IfUnknown;
         state.language = crate::language::LanguageGate::new(&state.config);
         let app = build_app(state);
 

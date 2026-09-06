@@ -30,6 +30,20 @@ All notable changes to zapiska are documented here. The format follows
   pointing at backup restore. Set to `false` only to bypass the gate for
   recovery.
 - This `CHANGELOG.md`.
+- `AppState::start(config)` / `start_with_github(config, github)` (T22):
+  one assembly path for `main` and every test (pool, migrations with
+  newer-than-binary refusal, `PRAGMA quick_check` gate, repo, notifier,
+  language gate, GitHub adapter, webmention worker). Covered by a temp-DB
+  → `healthz` smoke test, a newer-schema refusal test, and
+  `IP_HASH_SECRET`-warning tests.
+- The webmention worker spawn path now carries the moderation webhook sink
+  (T20-F1: URL + signing secret from config via
+  `Config::worker_moderation_sink`, shared with the comment/reaction
+  paths): production gone-deletes POST a signed
+  `comment.status_changed` event, pinned by a prod-wiring test (wiremock on
+  the webhook URL asserts exactly one signed emission from a processor
+  carrying the shared builder's sink — the spawned worker itself stays
+  idle, so the spawn call's argument plumbing is review-only).
 
 ### Changed
 
@@ -63,6 +77,24 @@ All notable changes to zapiska are documented here. The format follows
   takes the secret as a parameter (from `Config`) instead of reading
   `IP_HASH_SECRET` from the environment. Stored hashes are unchanged for
   the same input and secret.
+- `Config` is typed at the boundary (T21): `PUBLIC_TARGET_ORIGIN` is a
+  `url::Url` (the two stale "validated at config load" panics in the
+  webmention handler and worker are gone), and `NOTIFY_BATCH_GRANULARITY`,
+  `MODERATION_WEBHOOK_MODE`, `DEFAULT_COMMENT_STATUS` (reusing
+  `moderation::Status`), `REACTIONS_ALLOWED`, and
+  `COMMENT_LANG_ALLOW_EMOJI` are enums parsed once at load — consumers
+  (`NotificationBatcher`, `Ingress`, comment/reaction handlers,
+  `LanguageGate`) read the typed values instead of re-deriving strings.
+  Every env parse now fails loud: `MAX_COMMENTS_PER_IP_PER_DAY`,
+  `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR`, and `MAX_THREAD_DEPTH` refuse
+  boot on garbage instead of silently keeping defaults, and unvalidated
+  `MODERATION_WEBHOOK_MODE` / `DEFAULT_COMMENT_STATUS` values are
+  rejected (matching is case-insensitive like the other enums:
+  `SYNC` / `APPROVED` now parse as such — previously they fell silently
+  into the defaults — while garbage still fails loud). The dead `rust_log` field is gone (`tracing` always read
+  `RUST_LOG` directly via `EnvFilter::from_default_env()`; runtime
+  behavior unchanged — `RUST_LOG` in `.env`/compose still works). No
+  renames, no default-value changes.
 
 ### Fixed
 

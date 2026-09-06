@@ -5,13 +5,8 @@ pub(crate) mod helpers {
     use tempfile::TempDir;
 
     use crate::config::Config;
-    use crate::db::pool::{create_pool, run_migrations};
-    use crate::db::repo::Repo;
     use crate::github::{GitHubLookup, StubGitHub};
     use crate::state::AppState;
-    use crate::state::Limiter;
-    #[cfg(feature = "webmentions")]
-    use crate::worker;
 
     /// A test-ready AppState + a TempDir that keeps the DB file alive.
     pub fn test_state() -> (AppState, TempDir) {
@@ -46,18 +41,13 @@ pub(crate) mod helpers {
     ) -> (AppState, TempDir) {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("test.db");
-        let pool = create_pool(&path.to_string_lossy()).expect("pool");
-        run_migrations(&pool, None).expect("migrations");
-        let repo = Repo::new(pool.clone());
-        #[cfg(feature = "webmentions")]
-        let (wm_sender, rx) = worker::channel(64);
-        #[cfg(feature = "webmentions")]
-        worker::spawn_worker(rx);
-
+        // All assembly rides AppState::start_with_github (the same path as
+        // production AppState::start, minus the GitHub adapter): pool,
+        // migrations, notifier, language gate, and the real worker.
         let config = Config {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             admin_token: "test".to_string(),
-            database_path: ":memory:".to_string(),
+            database_path: path.to_string_lossy().to_string(),
             turnstile_enabled,
             turnstile_secret_key: turnstile_secret,
             turnstile_verify_url,
@@ -70,24 +60,7 @@ pub(crate) mod helpers {
             reactions_set: vec!["👍".to_string(), "❤️".to_string(), "😄".to_string()],
             ..Config::default()
         };
-        let notifier = Arc::new(crate::notify::NotificationBatcher::new(&config));
-        let language = crate::language::LanguageGate::new(&config);
-
-        let state = AppState {
-            config,
-            pool,
-            repo,
-            github,
-            notifier,
-            language,
-            #[cfg(feature = "webmentions")]
-            wm_sender,
-            http_client: reqwest::Client::builder()
-                .build()
-                .expect("test reqwest client"),
-            limiter: Arc::new(Limiter::new()),
-        };
-
+        let state = AppState::start_with_github(config, github).expect("test start");
         (state, dir)
     }
 
@@ -123,7 +96,8 @@ pub(crate) mod helpers {
         state.config.telegram_api_base = telegram_api_base;
         state.config.notify_batch_secs = batch_secs;
         state.config.notify_batch_threshold = batch_threshold;
-        state.config.notify_batch_granularity = granularity.to_string();
+        state.config.notify_batch_granularity =
+            granularity.parse().expect("test granularity valid");
         state.config.discord_webhook_url = discord_webhook_url;
         state.notifier = Arc::new(crate::notify::NotificationBatcher::new(&state.config));
         (state, dir)

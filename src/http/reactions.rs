@@ -17,6 +17,7 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use serde::Deserialize;
 
+use crate::config::ReactionsMode;
 use crate::error::AppError;
 use crate::http::admin::request_has_admin_token;
 use crate::http::peer::ClientIdentity;
@@ -53,7 +54,7 @@ pub async fn add_reaction(
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     let is_admin = request_has_admin_token(&state, &headers);
 
-    if state.config.reactions_allowed == "admin" && !is_admin {
+    if matches!(state.config.reactions_allowed, ReactionsMode::Admin) && !is_admin {
         return Err(AppError::Unauthorized);
     }
     if !state.config.reactions_set.contains(&body.reaction) {
@@ -106,7 +107,7 @@ pub async fn add_reaction(
             state.config.webhook_signing_secret.clone(),
         );
         if let Some(decision) = sink
-            .deliver(&payload, state.config.moderation_webhook_mode == "sync")
+            .deliver(&payload, state.config.moderation_webhook_mode.is_sync())
             .await
         {
             let _ = state
@@ -142,7 +143,7 @@ pub async fn remove_reaction(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let is_admin = request_has_admin_token(&state, &headers);
 
-    if state.config.reactions_allowed == "admin" && !is_admin {
+    if matches!(state.config.reactions_allowed, ReactionsMode::Admin) && !is_admin {
         return Err(AppError::Unauthorized);
     }
 
@@ -412,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn anyone_mode_uses_ip_identity_and_uniqueness() {
         let (mut state, _dir) = helpers::test_state();
-        state.config.reactions_allowed = "anyone".to_string();
+        state.config.reactions_allowed = crate::config::ReactionsMode::Anyone;
         let id = seed_approved(&state).await;
         let app = build_app(state.clone());
 
@@ -499,7 +500,7 @@ mod tests {
 
         let (mut state, _dir) = helpers::test_state();
         state.config.moderation_webhook_url = Some(format!("{}/hook", server.uri()));
-        state.config.moderation_webhook_mode = "sync".to_string();
+        state.config.moderation_webhook_mode = crate::config::WebhookMode::Sync;
         let id = seed_approved(&state).await;
         let app = build_app(state.clone());
 
@@ -556,7 +557,7 @@ mod tests {
 
         let (mut state, _dir) = helpers::test_state();
         state.config.moderation_webhook_url = Some(format!("{}/hook", server.uri()));
-        state.config.moderation_webhook_mode = "sync".to_string();
+        state.config.moderation_webhook_mode = crate::config::WebhookMode::Sync;
         let id = seed_approved(&state).await;
         let app = build_app(state.clone());
 

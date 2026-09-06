@@ -200,6 +200,27 @@ impl Repo {
         .await
     }
 
+    /// Count rows holding a salted IP hash. Startup probe behind the
+    /// `IP_HASH_SECRET`-unset warning in [`crate::state::AppState::start`]:
+    /// a lost or rotated secret silently splits hash continuity, so boot
+    /// warns when hashes exist but no secret is configured.
+    ///
+    /// Sync (not via `spawn_blocking`) because assembly runs before the
+    /// runtime serves traffic; a pool failure surfaces as `Err` and the
+    /// caller treats it as zero (migrations already failed loud by then).
+    pub fn count_salted_ip_hashes_sync(&self) -> RepoResult<i64> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| RepoError::Other(format!("pool acquire: {e}")))?;
+        conn.query_row(
+            "SELECT count(*) FROM comments WHERE submitter_ip_hash IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(RepoError::from)
+    }
+
     /// Whole-database read snapshot for the admin export: all five tables
     /// from ONE connection inside one deferred read transaction, so a
     /// comment created mid-export cannot appear in only some arrays (B-22).
@@ -683,6 +704,53 @@ mod tests {
     }
 
     // ── Comment tests ──
+
+    #[tokio::test]
+    async fn salted_ip_hash_count_reports_rows() {
+        let (repo, _dir) = setup_repo();
+        assert_eq!(repo.count_salted_ip_hashes_sync().unwrap(), 0);
+        repo.insert_comment(NewComment {
+            target_path: "/t-secret".to_string(),
+            comment_type: "native".to_string(),
+            source_url: None,
+            author_name: "Ada".to_string(),
+            author_url: None,
+            author_avatar: None,
+            content: "hashed".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: Some("1.2.3.4".to_string()),
+            submitter_ip_hash: Some("h:abc".to_string()),
+            content_hash: None,
+        })
+        .await
+        .unwrap();
+        repo.insert_comment(NewComment {
+            target_path: "/t-secret".to_string(),
+            comment_type: "native".to_string(),
+            source_url: None,
+            author_name: "Bob".to_string(),
+            author_url: None,
+            author_avatar: None,
+            content: "plain".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
+            submitter_ip_hash: None,
+            content_hash: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.count_salted_ip_hashes_sync().unwrap(),
+            1,
+            "only rows holding a hash count"
+        );
+    }
 
     #[tokio::test]
     async fn insert_and_get_comment() {

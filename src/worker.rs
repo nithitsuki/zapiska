@@ -60,17 +60,19 @@ pub fn spawn_worker(mut rx: JobReceiver) {
 
 /// Spawn the background worker that processes webmention jobs. The loop
 /// stays a thin drain: build the production processor (its `SafeFetcher`
-/// door carries the configured fetch timeout) and pump jobs through it.
+/// door carries the configured fetch timeout, its moderation sink carries
+/// the configured webhook URL + signing secret) and pump jobs through it.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_worker_for_state(
     rx: JobReceiver,
     repo: Repo,
     client: Client,
     github: Arc<dyn GitHubLookup>,
-    target_origin: String,
+    target_origin: Url,
     max_content_len: usize,
     timeout_ms: u64,
     notifier: Arc<NotificationBatcher>,
+    moderation_sink: Option<Arc<dyn ModerationSink>>,
 ) {
     let processor = WebmentionProcessor::new(
         repo,
@@ -80,6 +82,7 @@ pub fn spawn_worker_for_state(
         target_origin,
         max_content_len,
         Duration::from_millis(timeout_ms),
+        moderation_sink,
     );
     spawn_worker_for_processor(rx, processor);
 }
@@ -154,7 +157,7 @@ pub struct WebmentionProcessor {
     github: Arc<dyn GitHubLookup>,
     notifier: Arc<NotificationBatcher>,
     client: Client,
-    target_origin: String,
+    target_origin: Url,
     max_content_len: usize,
     fetch_timeout: Duration,
     moderation_sink: Option<Arc<dyn ModerationSink>>,
@@ -163,19 +166,19 @@ pub struct WebmentionProcessor {
 impl WebmentionProcessor {
     /// Production constructor: builds the [`SafeFetcher`] door with
     /// `fetch_timeout` (threaded from the worker spawn args — the processor
-    /// owns the timeout config end to end). No moderation sink yet: the
-    /// spawn path cannot name the webhook URL without `main.rs` changes
-    /// (follow-up T20-F1); gone-deletes still transition correctly, they
-    /// just emit no webhook event until then.
+    /// owns the timeout config end to end) and carries the spawn path's
+    /// moderation sink (webhook URL + signing secret from config, `None`
+    /// when unconfigured) for the gone path's `status_changed` events.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         repo: Repo,
         github: Arc<dyn GitHubLookup>,
         notifier: Arc<NotificationBatcher>,
         client: Client,
-        target_origin: String,
+        target_origin: Url,
         max_content_len: usize,
         fetch_timeout: Duration,
+        moderation_sink: Option<Arc<dyn ModerationSink>>,
     ) -> Self {
         Self::with_fetcher(
             repo,
@@ -186,7 +189,7 @@ impl WebmentionProcessor {
             target_origin,
             max_content_len,
             fetch_timeout,
-            None,
+            moderation_sink,
         )
     }
 
@@ -200,7 +203,7 @@ impl WebmentionProcessor {
         github: Arc<dyn GitHubLookup>,
         notifier: Arc<NotificationBatcher>,
         client: Client,
-        target_origin: String,
+        target_origin: Url,
         max_content_len: usize,
         fetch_timeout: Duration,
         moderation_sink: Option<Arc<dyn ModerationSink>>,
@@ -520,11 +523,10 @@ async fn resolve_github(
 // ── Helpers ─────────────────────────────────────────────────
 
 /// Extract the path portion from a target URL, validated against the configured origin.
-fn derive_target_path(target: &str, target_origin: &str) -> Result<String, WorkerError> {
+fn derive_target_path(target: &str, target_origin: &Url) -> Result<String, WorkerError> {
     let parsed = Url::parse(target).map_err(|_| WorkerError::InvalidTarget(target.to_string()))?;
-    let origin_url = Url::parse(target_origin).expect("target_origin validated at startup");
 
-    if parsed.origin() != origin_url.origin() {
+    if parsed.origin() != target_origin.origin() {
         return Err(WorkerError::OriginMismatch(target_origin.to_string()));
     }
 
@@ -654,7 +656,7 @@ mod t20_processor_tests {
             github,
             notifier,
             client,
-            ORIGIN.to_string(),
+            ORIGIN.parse().expect("test origin valid"),
             2000,
             Duration::from_secs(5),
             sink,
@@ -695,9 +697,10 @@ mod t20_processor_tests {
             github,
             notifier,
             client,
-            ORIGIN.to_string(),
+            ORIGIN.parse().expect("test origin valid"),
             2000,
             Duration::from_millis(80),
+            None,
         );
         assert_eq!(prod.fetch_timeout(), Duration::from_millis(80));
     }

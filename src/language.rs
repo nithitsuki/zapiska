@@ -21,36 +21,13 @@ use std::collections::HashSet;
 
 use whatlang::Lang;
 
-use crate::config::Config;
+use crate::config::{Config, EmojiPolicy};
 
 /// Confidence below which a detection is treated as "unknown".
 const MIN_CONFIDENCE: f64 = 0.5;
 /// A comment is "emoji-heavy" when at least this fraction of its
 /// non-whitespace characters are emoji.
 const EMOJI_HEAVY_RATIO: f64 = 0.5;
-
-/// Policy for undetectable / emoji-heavy content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EmojiPolicy {
-    /// Emoji-only comments are always accepted (default).
-    #[default]
-    Always,
-    /// Emoji-heavy comments are rejected.
-    Never,
-    /// Emoji-heavy comments are accepted; other undetectable text is rejected.
-    IfUnknown,
-}
-
-impl EmojiPolicy {
-    fn parse(s: &str) -> Option<Self> {
-        match s {
-            "always" => Some(Self::Always),
-            "never" => Some(Self::Never),
-            "if_unknown" => Some(Self::IfUnknown),
-            _ => None,
-        }
-    }
-}
 
 /// Compiled language gate, built once at startup from `Config`.
 #[derive(Debug, Clone, Default)]
@@ -80,8 +57,7 @@ impl LanguageGate {
             .map(String::as_str)
             .filter_map(lang_from_iso_639_1)
             .collect();
-        let emoji_policy = EmojiPolicy::parse(&config.comment_lang_allow_emoji)
-            .expect("COMMENT_LANG_ALLOW_EMOJI validated at config load");
+        let emoji_policy = config.comment_lang_allow_emoji;
         Self {
             whitelist,
             blacklist,
@@ -286,7 +262,7 @@ mod tests {
                 .filter(|c| !c.is_empty())
                 .filter_map(lang_from_iso_639_1)
                 .collect(),
-            emoji_policy: EmojiPolicy::parse(emoji).unwrap(),
+            emoji_policy: emoji.parse().expect("test emoji policy valid"),
         }
     }
 
