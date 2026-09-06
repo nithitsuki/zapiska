@@ -42,7 +42,7 @@ async fn setup(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("worker.db");
     let pool = create_pool(&path.to_string_lossy()).unwrap();
-    run_migrations(&pool).unwrap();
+    run_migrations(&pool, None).unwrap();
     let repo = Repo::new(pool.clone());
 
     // Notifications: Telegram only, immediate mode (no batching).

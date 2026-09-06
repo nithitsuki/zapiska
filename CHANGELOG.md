@@ -36,6 +36,11 @@ All notable changes to zapiska are documented here. The format follows
   the new defaults.
 - OpenAPI `info.version` now reads `env!("CARGO_PKG_VERSION")` instead of a
   hardcoded duplicate of the crate version.
+- The v7 IP-hash backfill now calls the single `hash_ip` implementation in
+  `src/ip_hash.rs` instead of a duplicated inline hash. `run_migrations`
+  takes the secret as a parameter (from `Config`) instead of reading
+  `IP_HASH_SECRET` from the environment. Stored hashes are unchanged for
+  the same input and secret.
 
 ### Fixed
 

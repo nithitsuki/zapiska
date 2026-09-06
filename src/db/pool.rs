@@ -104,7 +104,14 @@ fn add_column_if_missing(
 ///   `if current < N` migrations in order.
 /// - A database newer than this binary (`user_version > LATEST`) is refused
 ///   with an error instead of silently running against an unknown schema.
-pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// The IP-hash secret is passed by the caller (from `Config`) instead of
+/// being read from the environment here, so the v7 backfill hashes with the
+/// same secret as every other `hash_ip` call site.
+pub fn run_migrations(
+    pool: &SqlitePool,
+    ip_hash_secret: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let conn = pool.get()?;
     let current: i64 = user_version(&conn)?;
 
@@ -218,7 +225,7 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error
             "submitter_ip_hash",
             "ALTER TABLE comments ADD COLUMN submitter_ip_hash TEXT",
         )?;
-        backfill_ip_hashes(&conn)?;
+        backfill_ip_hashes(&conn, ip_hash_secret)?;
     }
 
     // v8: reactions (previously only reachable via the base schema snapshot;
@@ -257,13 +264,14 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Populate `submitter_ip_hash` for rows that have a raw IP but no hash.
+/// Populate `submitter_ip_hash` for rows that have a raw IP but no hash,
+/// using the single [`crate::ip_hash::hash_ip`] implementation shared with
+/// comment submission and admin import.
 /// A single bad IP must not abort startup; prepare failures do abort.
-fn backfill_ip_hashes(conn: &Connection) -> Result<(), rusqlite::Error> {
-    use sha2::{Digest, Sha256};
-    let secret = std::env::var("IP_HASH_SECRET")
-        .ok()
-        .filter(|s| !s.is_empty());
+fn backfill_ip_hashes(
+    conn: &Connection,
+    ip_hash_secret: Option<&str>,
+) -> Result<(), rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT id, submitter_ip FROM comments WHERE submitter_ip IS NOT NULL AND submitter_ip_hash IS NULL",
     )?;
@@ -275,16 +283,11 @@ fn backfill_ip_hashes(conn: &Connection) -> Result<(), rusqlite::Error> {
         .collect();
     for (id, raw) in rows {
         if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
-            let mut h = Sha256::new();
-            h.update(ip.to_string().as_bytes());
-            if let Some(ref s) = secret {
-                h.update(s.as_bytes());
-            }
-            let hex: String = h.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+            let hashed = crate::ip_hash::hash_ip(&ip, ip_hash_secret);
             // Per-row errors ignored: one corrupt row must not block boot.
             let _ = conn.execute(
                 "UPDATE comments SET submitter_ip_hash = ?1 WHERE id = ?2",
-                rusqlite::params![format!("h:{hex}"), id],
+                rusqlite::params![hashed, id],
             );
         }
     }
@@ -311,15 +314,15 @@ mod tests {
     #[test]
     fn migrations_run_idempotently() {
         let (pool, _dir) = test_pool("test.db");
-        run_migrations(&pool).unwrap();
-        run_migrations(&pool).unwrap(); // second call should be a no-op
+        run_migrations(&pool, None).unwrap();
+        run_migrations(&pool, None).unwrap(); // second call should be a no-op
         assert_eq!(db_version(&pool), LATEST_SCHEMA_VERSION);
     }
 
     #[test]
     fn fresh_db_is_stamped_with_latest_version() {
         let (pool, _dir) = test_pool("fresh.db");
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
         assert_eq!(db_version(&pool), LATEST_SCHEMA_VERSION);
     }
 
@@ -362,7 +365,7 @@ mod tests {
             assert_eq!(user_version(&conn).unwrap(), 0);
         }
 
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
 
         let conn = pool.get().unwrap();
         assert_eq!(user_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
@@ -398,12 +401,12 @@ mod tests {
     #[test]
     fn newer_db_than_binary_is_refused() {
         let (pool, _dir) = test_pool("future.db");
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
         {
             let conn = pool.get().unwrap();
             set_user_version(&conn, LATEST_SCHEMA_VERSION + 1).unwrap();
         }
-        let err = run_migrations(&pool).unwrap_err().to_string();
+        let err = run_migrations(&pool, None).unwrap_err().to_string();
         assert!(
             err.contains("newer than supported"),
             "unexpected error: {err}"
@@ -413,7 +416,7 @@ mod tests {
     #[test]
     fn add_column_propagates_real_errors() {
         let (pool, _dir) = test_pool("badcol.db");
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
         let conn = pool.get().unwrap();
         // Referencing a missing table is a real error, not "already exists".
         let err = add_column_if_missing(
@@ -428,7 +431,7 @@ mod tests {
     #[test]
     fn pragmas_set_on_every_connection() {
         let (pool, _dir) = test_pool("pragmas.db");
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
 
         let conn = pool.get().unwrap();
         // WAL mode persists in the DB file — check the journal_mode.
@@ -457,7 +460,7 @@ mod tests {
     #[test]
     fn comments_check_constraint_rejects_bad_comment_type() {
         let (pool, _dir) = test_pool("check.db");
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
 
         let conn = pool.get().unwrap();
         let err = conn.execute(
@@ -479,7 +482,7 @@ mod tests {
     #[test]
     fn comments_check_constraint_rejects_bad_status() {
         let (pool, _dir) = test_pool("check2.db");
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
 
         let conn = pool.get().unwrap();
         let err = conn.execute(
@@ -493,7 +496,7 @@ mod tests {
     #[test]
     fn comments_target_path_check_rejects_no_slash() {
         let (pool, _dir) = test_pool("check3.db");
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
         let conn = pool.get().unwrap();
         let err = conn.execute(
             "INSERT INTO comments (target_path, comment_type, author_name, content)
@@ -509,7 +512,7 @@ mod tests {
     #[test]
     fn comments_status_defaults_to_pending() {
         let (pool, _dir) = test_pool("default.db");
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
         let conn = pool.get().unwrap();
 
         conn.execute(
@@ -530,9 +533,101 @@ mod tests {
     }
 
     #[test]
+    fn v7_backfill_hashes_match_hash_ip() {
+        use crate::ip_hash::hash_ip;
+
+        // A realistic pre-v7 database: every column a v6 database would
+        // have, raw peer addresses stored, no hash column yet.
+        fn fabricated_v6_db(name: &str) -> (SqlitePool, tempfile::TempDir) {
+            let (pool, dir) = test_pool(name);
+            {
+                let conn = pool.get().unwrap();
+                conn.execute_batch(
+                    "CREATE TABLE comments (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_path TEXT NOT NULL,
+                        comment_type TEXT NOT NULL,
+                        source_url TEXT,
+                        author_name TEXT NOT NULL,
+                        author_url TEXT,
+                        author_avatar TEXT,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        parent_id INTEGER REFERENCES comments(id),
+                        depth INTEGER NOT NULL DEFAULT 0,
+                        honeypot INTEGER NOT NULL DEFAULT 0,
+                        delete_token TEXT,
+                        submitter_ip TEXT,
+                        content_hash TEXT
+                    );
+                    INSERT INTO comments (target_path, comment_type, author_name, content, submitter_ip)
+                        VALUES ('/v4', 'native', 'Ada', 'hello', '1.2.3.4'),
+                               ('/v6', 'native', 'Bob', 'hi', '::1'),
+                               ('/bad', 'native', 'Cid', 'garbage ip', 'not-an-ip'),
+                               ('/none', 'native', 'Dee', 'no ip', NULL);
+                    PRAGMA user_version = 6;",
+                )
+                .unwrap();
+            }
+            (pool, dir)
+        }
+
+        for secret in [Some("parity-secret"), None] {
+            let db_name = if secret.is_some() {
+                "parity_salted.db"
+            } else {
+                "parity_plain.db"
+            };
+            let (pool, _dir) = fabricated_v6_db(db_name);
+            run_migrations(&pool, secret).unwrap();
+
+            let conn = pool.get().unwrap();
+            let hash_for = |ip: &str| -> Option<String> {
+                conn.query_row(
+                    "SELECT submitter_ip_hash FROM comments WHERE submitter_ip = ?1",
+                    rusqlite::params![ip],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            // Backfilled rows equal the single hash_ip implementation.
+            for raw in ["1.2.3.4", "::1"] {
+                let ip: std::net::IpAddr = raw.parse().unwrap();
+                assert_eq!(
+                    hash_for(raw).as_deref(),
+                    Some(hash_ip(&ip, secret).as_str()),
+                    "backfill must equal hash_ip for {raw}"
+                );
+                // The secret is actually plumbed, not silently dropped:
+                // a salted backfill must differ from the unsalted hash.
+                if secret.is_some() {
+                    assert_ne!(
+                        hash_for(raw).as_deref(),
+                        Some(hash_ip(&ip, None).as_str()),
+                        "salted backfill must differ from unsalted hash_ip"
+                    );
+                }
+            }
+            // An unparseable IP stays NULL; one bad row never aborts boot.
+            assert_eq!(hash_for("not-an-ip"), None);
+            let null_hash: Option<String> = conn
+                .query_row(
+                    "SELECT submitter_ip_hash FROM comments WHERE submitter_ip IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(null_hash, None);
+            assert_eq!(db_version(&pool), LATEST_SCHEMA_VERSION);
+        }
+    }
+
+    #[test]
     fn idx_comments_read_exists() {
         let (pool, _dir) = test_pool("idx.db");
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
         let conn = pool.get().unwrap();
 
         let count: i64 = conn

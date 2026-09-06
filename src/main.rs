@@ -43,7 +43,8 @@ async fn main() {
 
     let sqlite_pool =
         pool::create_pool(&config.database_path).expect("failed to create SQLite pool");
-    pool::run_migrations(&sqlite_pool).expect("failed to run migrations");
+    pool::run_migrations(&sqlite_pool, config.ip_hash_secret.as_deref())
+        .expect("failed to run migrations");
 
     // A lost or rotated IP_HASH_SECRET silently splits IP-hash continuity:
     // stored hashes (comments, anyone-mode reaction identities) stop matching

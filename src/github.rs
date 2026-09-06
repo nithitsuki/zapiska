@@ -230,7 +230,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gh_test.db");
         let pool = create_pool(&path.to_string_lossy()).unwrap();
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
         (Repo::new(pool), dir)
     }
 

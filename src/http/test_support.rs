@@ -47,7 +47,7 @@ pub(crate) mod helpers {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("test.db");
         let pool = create_pool(&path.to_string_lossy()).expect("pool");
-        run_migrations(&pool).expect("migrations");
+        run_migrations(&pool, None).expect("migrations");
         let repo = Repo::new(pool.clone());
         #[cfg(feature = "webmentions")]
         let (wm_sender, rx) = worker::channel(64);

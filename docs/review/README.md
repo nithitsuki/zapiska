@@ -31,6 +31,14 @@ change/bugs/knowledge concentrate).
 1. Explore + directed research (parallel subagents) → this folder's findings.
 2. Synthesize candidates → HTML report (in temp) + candidate tracker below.
 3. Grilling loop on the picked candidate → ADRs as decisions crystallize.
+4. **Buildout (approved 2026-09-06): `docs/review/PLAN.md` + `.scratch/arch-deepening/issues/` (23 tickets, T01–T23) — branch `arch/deepening`, risk L, full gates.**
+
+## Baseline (T01, branch `arch/deepening` @ `294a7e1`)
+
+`cargo fmt --check` clean · `cargo clippy --all-targets` clean ·
+default: lib **334** + e2e **4** + pentest **14** + worker_notify **1** = **353** green ·
+comments-only: lib **275** + e2e **3** = **278** green. Full log:
+`.scratch/arch-deepening/baseline.log`.
 
 ## Findings — markdown trackers
 

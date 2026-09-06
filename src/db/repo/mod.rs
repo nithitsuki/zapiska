@@ -182,7 +182,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("repo_test.db");
         let pool = create_pool(&path.to_string_lossy()).unwrap();
-        run_migrations(&pool).unwrap();
+        run_migrations(&pool, None).unwrap();
         (Repo::new(pool), dir)
     }
 
