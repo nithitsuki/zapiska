@@ -180,13 +180,26 @@ PRAGMA synchronous = NORMAL;
 ```
 
 Schema changes are versioned with `PRAGMA user_version` in
-`src/db/pool.rs` (`LATEST_SCHEMA_VERSION`, currently 8). Fresh databases get
-the canonical `migrations/schema.sql` snapshot and are stamped. Legacy
-`user_version = 0` databases run an idempotent catch-up (existence-checked
-`ADD COLUMN` / `CREATE TABLE`, never blind `ALTER`s) and are then stamped.
-A database newer than the binary refuses startup instead of running against
-an unknown schema. Add a new `if current < N` block and bump `LATEST` for
-every future schema change.
+`src/db/pool.rs`. The `MIGRATIONS` array is the single source of truth for
+upgrades: entry `MIGRATIONS[N]` holds the DDL that brings a database from
+version N-1 to N, the stamp written after a run is the step index, and
+`LATEST_SCHEMA_VERSION` is derived from the array length. Fresh databases
+get the canonical `migrations/schema.sql` snapshot and are stamped. Legacy
+`user_version = 0` databases run every step in order (column additions go
+through the existence-checked `add_column_if_missing` safety net, every
+other statement is `IF NOT EXISTS`, so interrupted and partial upgrades
+resume cleanly) and are then stamped. A database newer than the binary
+refuses startup instead of running against an unknown schema. Add one
+`MIGRATIONS` entry and update `migrations/schema.sql` together for every
+future schema change; the `stepped_v0_upgrade_matches_fresh_install` test
+diffs object sets, column shapes, and index definitions between a stepped
+v0 upgrade and a fresh install, and
+`never_altered_table_definitions_match_snapshot` pins exact `CREATE TABLE`
+text (modulo whitespace) for tables no step ever ALTERs, catching CHECK and
+table-UNIQUE drift the shape diff cannot see. The `comments` table is
+excluded from the text pin because ALTER history legitimately rewrites its
+stored definition.
+
 Comment reads build on one `COMMENT_COLUMNS` list plus a single
 `select_comments` query builder in `src/db/repo/`, with `row_to_comment` as
 the only row mapper; optional filters use `(?N IS NULL OR ...)` predicates

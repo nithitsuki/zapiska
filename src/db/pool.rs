@@ -3,19 +3,122 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 
-/// Latest schema version. Bump on every schema change and add a gated
-/// `if current < N` block in [`run_migrations`].
+/// Versioned schema steps. The index IS the version: entry `MIGRATIONS[N]`
+/// holds the DDL that brings a database from version N-1 to N, entry 0 is an
+/// unused placeholder (pre-versioning legacy databases report `user_version`
+/// 0), and the stamp written after a successful run is the step index.
+/// [`LATEST_SCHEMA_VERSION`] is derived from the length so adding a version
+/// is appending one entry — never a new `if current < N` branch plus a
+/// separate snapshot hunk.
 ///
-/// History:
-/// - 1: initial (comments base, webmention_seen, github_profiles).
-/// - 2: threading (parent_id, depth, idx_comments_parent).
-/// - 3: honeypot flag + delete_token.
-/// - 4: submitter_ip.
-/// - 5: content_hash.
-/// - 6: comment_urls table.
-/// - 7: submitter_ip_hash + backfill.
-/// - 8: comment_reactions table (previously only in schema.sql, now explicit).
-pub const LATEST_SCHEMA_VERSION: i64 = 8;
+/// Rules for entries (enforced by the tests named below):
+/// - Every `CREATE TABLE`/`CREATE INDEX` uses `IF NOT EXISTS`, so re-running
+///   a step (interrupted upgrade, legacy catch-up) is a no-op for objects
+///   that already exist.
+/// - The only `ALTER` shape allowed is
+///   `ALTER TABLE <table> ADD COLUMN <column> ...`, routed through the
+///   existence-checked [`add_column_if_missing`] safety net by
+///   [`apply_migration_step`] — never blind DDL.
+/// - No semicolons inside string literals, no triggers or multi-statement
+///   procedures: [`split_step_statements`] is a plain `;` split, and the
+///   `migration_steps_pin_statement_counts_and_literals` test (exact
+///   per-step statement counts plus a literal scan) fails if this rule or
+///   the counts drift. Update the splitter before adding any such SQL.
+/// - The union of all steps must equal `migrations/schema.sql`, which stays
+///   the canonical fresh-install snapshot (kept as a docs-generated
+///   artifact: deriving fresh-install SQL by concatenating steps would
+///   rewrite `sqlite_master` CREATE text and column order, changing
+///   fresh-install behavior for zero benefit). Two tests pin this from both
+///   sides: `stepped_v0_upgrade_matches_fresh_install` diffs object sets,
+///   column shapes, and index definitions between a stepped v0 upgrade and
+///   a fresh install, while `never_altered_table_definitions_match_snapshot`
+///   pins whitespace-normalized `CREATE TABLE` text for tables no step ever
+///   ALTERs (catching CHECK / table-UNIQUE drift the DB diff cannot see).
+///   `comments` is excluded from the text pin because ALTER history
+///   legitimately rewrites its stored definition.
+pub const MIGRATIONS: &[&str] = &[
+    // 0: pre-versioning legacy. Never applied, never stamped.
+    "",
+    // 1: initial (comments base, webmention_seen, github_profiles).
+    "CREATE TABLE IF NOT EXISTS comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_path TEXT NOT NULL
+            CHECK (target_path LIKE '/%' AND length(target_path) <= 1024),
+        comment_type TEXT NOT NULL
+            CHECK (comment_type IN ('native', 'webmention')),
+        source_url TEXT,
+        author_name TEXT NOT NULL,
+        author_url TEXT,
+        author_avatar TEXT,
+        content TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'approved', 'spam', 'deleted')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS webmention_seen (
+        source TEXT NOT NULL,
+        target TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_status TEXT NOT NULL CHECK (last_status IN ('alive', 'gone')),
+        PRIMARY KEY (source, target)
+    );
+    CREATE TABLE IF NOT EXISTS github_profiles (
+        login TEXT PRIMARY KEY,
+        name TEXT,
+        avatar_url TEXT NOT NULL,
+        cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+        valid INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS idx_comments_read
+        ON comments(target_path, status, created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_comments_source_target
+        ON comments(source_url, target_path)
+        WHERE source_url IS NOT NULL;",
+    // 2: threading (parent_id, depth, idx_comments_parent).
+    "ALTER TABLE comments ADD COLUMN parent_id INTEGER REFERENCES comments(id);
+    ALTER TABLE comments ADD COLUMN depth INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id);",
+    // 3: honeypot flag + delete_token.
+    "ALTER TABLE comments ADD COLUMN honeypot INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE comments ADD COLUMN delete_token TEXT;",
+    // 4: submitter_ip.
+    "ALTER TABLE comments ADD COLUMN submitter_ip TEXT;",
+    // 5: content_hash.
+    "ALTER TABLE comments ADD COLUMN content_hash TEXT;",
+    // 6: comment_urls table.
+    "CREATE TABLE IF NOT EXISTS comment_urls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        comment_id INTEGER NOT NULL REFERENCES comments(id),
+        url TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        url_hash TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_comment_urls_comment ON comment_urls(comment_id);
+    CREATE INDEX IF NOT EXISTS idx_comment_urls_domain ON comment_urls(domain);
+    CREATE INDEX IF NOT EXISTS idx_comment_urls_hash ON comment_urls(url_hash);",
+    // 7: submitter_ip_hash + backfill (the backfill itself is procedural —
+    // see run_migrations — because it hashes with the caller's secret).
+    "ALTER TABLE comments ADD COLUMN submitter_ip_hash TEXT;",
+    // 8: comment_reactions table (previously only in schema.sql, now explicit).
+    "CREATE TABLE IF NOT EXISTS comment_reactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        comment_id INTEGER NOT NULL REFERENCES comments(id),
+        reaction TEXT NOT NULL,
+        identifier TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'approved', 'spam', 'deleted')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (comment_id, identifier)
+    );
+    CREATE INDEX IF NOT EXISTS idx_comment_reactions_read
+        ON comment_reactions(comment_id, status);",
+];
+
+/// Latest schema version. Derived from [`MIGRATIONS`] — the stamp IS the
+/// step index, so this never needs a manual bump beside a new entry.
+pub const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 - 1;
 
 pub type SqlitePool = Pool<SqliteConnectionManager>;
 
@@ -93,15 +196,73 @@ fn add_column_if_missing(
     Ok(())
 }
 
+/// Parse the single ALTER shape migration steps may use:
+/// `ALTER TABLE <table> ADD COLUMN <column> ...`, with bare (unquoted,
+/// single-token) table and column names. Returns the table and column so the
+/// caller can route through the existence-checked [`add_column_if_missing`]
+/// safety net. Any other statement returns `None` and runs verbatim via
+/// `execute_batch`.
+///
+/// Quoted-identifier caveat: names containing whitespace or quoting
+/// (`"my table"`, `[col]`, backticks) do NOT parse — the whitespace split
+/// would misread them — so they fall through to verbatim execution, which is
+/// not idempotent on re-run. Never use quoted identifiers in steps; keep
+/// every step to the bare-identifier shape above.
+fn parse_add_column(stmt: &str) -> Option<(&str, &str)> {
+    let mut toks = stmt.split_whitespace();
+    if !toks.next()?.eq_ignore_ascii_case("ALTER") {
+        return None;
+    }
+    if !toks.next()?.eq_ignore_ascii_case("TABLE") {
+        return None;
+    }
+    let table = toks.next()?;
+    if !toks.next()?.eq_ignore_ascii_case("ADD") {
+        return None;
+    }
+    if !toks.next()?.eq_ignore_ascii_case("COLUMN") {
+        return None;
+    }
+    Some((table, toks.next()?))
+}
+
+/// Apply one [`MIGRATIONS`] step, statement by statement. Column additions
+/// go through [`add_column_if_missing`] (a legacy v0 database may already
+/// hold any subset of late columns, so blind `ALTER`s would abort the
+/// upgrade); every other statement is already `IF NOT EXISTS` and therefore
+/// a safe no-op on re-run. Real DDL errors propagate.
+fn apply_migration_step(conn: &Connection, step_sql: &str) -> Result<(), rusqlite::Error> {
+    for stmt in split_step_statements(step_sql) {
+        if let Some((table, column)) = parse_add_column(stmt) {
+            add_column_if_missing(conn, table, column, stmt)?;
+        } else {
+            conn.execute_batch(stmt)?;
+        }
+    }
+    Ok(())
+}
+
+/// Split one [`MIGRATIONS`] entry into its runnable statements, dropping
+/// empties. This is a plain `;` split, which is exact only because migration
+/// SQL never embeds semicolons in string literals — pinned by the
+/// `migration_steps_pin_statement_counts_and_literals` test.
+fn split_step_statements(step_sql: &str) -> Vec<&str> {
+    step_sql
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Run schema migrations, versioned via `PRAGMA user_version`.
 ///
 /// - Fresh databases (`user_version == 0`, no `comments` table) get the full
 ///   canonical schema from `schema.sql`, then are stamped `LATEST`.
-/// - Legacy databases (`user_version == 0`, tables exist) run the same
-///   catch-up path idempotently (column/table existence checks, not blind
-///   `ALTER`s) and are then stamped `LATEST`. Existing rows are preserved.
-/// - Versioned databases (`user_version >= 1`) apply only pending
-///   `if current < N` migrations in order.
+/// - Legacy databases (`user_version == 0`, tables exist) run every
+///   [`MIGRATIONS`] step in order through [`apply_migration_step`]
+///   (idempotent: existence-checked columns, `IF NOT EXISTS` objects) and
+///   are then stamped `LATEST`. Existing rows are preserved.
+/// - Versioned databases (`user_version >= 1`) apply only pending steps.
 /// - A database newer than this binary (`user_version > LATEST`) is refused
 ///   with an error instead of silently running against an unknown schema.
 ///
@@ -141,137 +302,26 @@ pub fn run_migrations(
         return Ok(());
     }
 
-    // Legacy (v0 with tables) or versioned (v >= 1) upgrade path: add
-    // columns BEFORE applying the canonical schema snapshot, because the
-    // snapshot contains indexes (e.g. idx_comments_parent) that fail when
-    // their columns are still missing.
-
-    // v2: threaded replies.
-    if current < 2 {
-        add_column_if_missing(
-            &conn,
-            "comments",
-            "parent_id",
-            "ALTER TABLE comments ADD COLUMN parent_id INTEGER REFERENCES comments(id)",
-        )?;
-        add_column_if_missing(
-            &conn,
-            "comments",
-            "depth",
-            "ALTER TABLE comments ADD COLUMN depth INTEGER NOT NULL DEFAULT 0",
-        )?;
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id)",
-        )?;
+    // Legacy (v0 with tables) or versioned (v >= 1) upgrade path: the steps
+    // ARE the upgrade — no trailing snapshot re-run, so
+    // `stepped_v0_upgrade_matches_fresh_install` pins step-union == snapshot
+    // instead of papering drift over. Column additions run inside the steps
+    // (before the indexes that reference them) via apply_migration_step.
+    ensure_no_duplicate_source_target(&conn)?;
+    let start = (current + 1).max(1) as usize;
+    for step in &MIGRATIONS[start..] {
+        apply_migration_step(&conn, step)?;
     }
 
-    // v3: honeypot flag and self-deletion tokens.
-    if current < 3 {
-        add_column_if_missing(
-            &conn,
-            "comments",
-            "honeypot",
-            "ALTER TABLE comments ADD COLUMN honeypot INTEGER NOT NULL DEFAULT 0",
-        )?;
-        add_column_if_missing(
-            &conn,
-            "comments",
-            "delete_token",
-            "ALTER TABLE comments ADD COLUMN delete_token TEXT",
-        )?;
-    }
-
-    // v4: raw submitter IP storage.
-    if current < 4 {
-        add_column_if_missing(
-            &conn,
-            "comments",
-            "submitter_ip",
-            "ALTER TABLE comments ADD COLUMN submitter_ip TEXT",
-        )?;
-    }
-
-    // v5: content hash for moderation lookup.
-    if current < 5 {
-        add_column_if_missing(
-            &conn,
-            "comments",
-            "content_hash",
-            "ALTER TABLE comments ADD COLUMN content_hash TEXT",
-        )?;
-    }
-
-    // v6: extracted URLs for cross-comment tracking.
-    if current < 6 {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS comment_urls (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                comment_id INTEGER NOT NULL REFERENCES comments(id),
-                url TEXT NOT NULL,
-                domain TEXT NOT NULL,
-                url_hash TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_comment_urls_comment ON comment_urls(comment_id);
-            CREATE INDEX IF NOT EXISTS idx_comment_urls_domain ON comment_urls(domain);
-            CREATE INDEX IF NOT EXISTS idx_comment_urls_hash ON comment_urls(url_hash);",
-        )?;
-    }
-
-    // v7: hashed submitter IP + backfill of existing rows.
+    // v7 backfill is procedural (it hashes with the caller's secret), so it
+    // rides beside its step rather than inside it. Same gate as before:
+    // only databases upgrading from below v7 backfill; fresh installs have
+    // no rows and already-stamped databases already backfilled.
     if current < 7 {
-        add_column_if_missing(
-            &conn,
-            "comments",
-            "submitter_ip_hash",
-            "ALTER TABLE comments ADD COLUMN submitter_ip_hash TEXT",
-        )?;
         backfill_ip_hashes(&conn, ip_hash_secret)?;
     }
 
-    // v8: reactions (previously only reachable via the base schema snapshot;
-    // now an explicit versioned step so legacy DBs have a guaranteed path).
-    if current < 8 {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS comment_reactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                comment_id INTEGER NOT NULL REFERENCES comments(id),
-                reaction TEXT NOT NULL,
-                identifier TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending', 'approved', 'spam', 'deleted')),
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-                UNIQUE (comment_id, identifier)
-            );
-            CREATE INDEX IF NOT EXISTS idx_comment_reactions_read
-                ON comment_reactions(comment_id, status);",
-        )?;
-    }
-
-    // Canonical snapshot last: backfills any tables/indexes added to
-    // schema.sql without an explicit versioned step (e.g. webmention_seen,
-    // github_profiles for very old DBs). Safe now — all columns exist.
-    {
-        ensure_no_duplicate_source_target(&conn)?;
-        let schema = include_str!("../../migrations/schema.sql");
-        conn.execute_batch(schema)
-            .map_err(|e| -> Box<dyn std::error::Error> {
-                if !e.to_string().contains("idx_comments_source_target") {
-                    return e.into();
-                }
-                // Belt-and-braces: translate the raw SQLite unique-index
-                // error into the actionable dedup message.
-                match duplicate_source_target_pairs(&conn) {
-                    Ok(dupes) if !dupes.is_empty() => duplicate_source_target_error(&dupes),
-                    _ => e.into(),
-                }
-            })?;
-    }
-
     set_user_version(&conn, LATEST_SCHEMA_VERSION)?;
-
-    // Keep the table_exists helper exercised for future migration authors.
-    debug_assert!(table_exists(&conn, "comments")?);
 
     Ok(())
 }
@@ -362,6 +412,432 @@ mod tests {
         user_version(&conn).unwrap()
     }
 
+    /// Canonical v1-era shape: base tables without any later columns and no
+    /// version stamp. Shared by the legacy-upgrade and parity tests so both
+    /// guard the same fabricated history.
+    const V1_FIXTURE_SCHEMA: &str = "CREATE TABLE comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_path TEXT NOT NULL,
+            comment_type TEXT NOT NULL,
+            source_url TEXT,
+            author_name TEXT NOT NULL,
+            author_url TEXT,
+            author_avatar TEXT,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE webmention_seen (
+            source TEXT NOT NULL, target TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_status TEXT NOT NULL, PRIMARY KEY (source, target)
+        );
+        CREATE TABLE github_profiles (
+            login TEXT PRIMARY KEY, name TEXT,
+            avatar_url TEXT NOT NULL,
+            cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+            valid INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO comments (target_path, comment_type, author_name, content, status)
+            VALUES ('/legacy', 'native', 'Ada', 'first!', 'approved');";
+
+    // ── Migration parity (B-6/D2): stepped upgrade vs fresh snapshot ──
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ColumnShape {
+        coltype: String,
+        notnull: i64,
+        dflt: Option<String>,
+        pk: i64,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct SchemaFingerprint {
+        /// (type, name, table) for every table and index, minus SQLite
+        /// internals (`sqlite_sequence`, auto-indexes).
+        objects: std::collections::BTreeSet<(String, String, String)>,
+        /// Table name → column name → shape. Compared as maps (not ordered
+        /// lists) on purpose: history appends late columns in step order
+        /// (`submitter_ip, content_hash, submitter_ip_hash`) while the
+        /// fresh snapshot declares them in snapshot order
+        /// (`submitter_ip, submitter_ip_hash, content_hash`) — same set,
+        /// different positions, and no read path depends on positions.
+        columns:
+            std::collections::BTreeMap<String, std::collections::BTreeMap<String, ColumnShape>>,
+        /// Index name → whitespace-normalized definition. Table definitions
+        /// are excluded: ALTER history legitimately rewrites them, so raw
+        /// text can never match the snapshot (see `columns` instead).
+        index_sql: std::collections::BTreeMap<String, String>,
+    }
+
+    fn normalize_sql(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Tables created whole by a single step and never ALTERed afterward.
+    /// Their step DDL and the snapshot DDL must be identical modulo
+    /// whitespace — pinned by `never_altered_table_definitions_match_snapshot`,
+    /// not by the DB parity test (which is blind here: `comments` is
+    /// excluded because ALTER history legitimately rewrites its stored text,
+    /// and the v0 fixture predates even the step-1 CHECKs, so a stepped
+    /// upgrade keeps the fixture text for `webmention_seen`/`github_profiles`).
+    const NEVER_ALTERED_TABLES: &[&str] = &[
+        "comment_reactions",
+        "comment_urls",
+        "webmention_seen",
+        "github_profiles",
+    ];
+
+    /// Map `CREATE TABLE` name → whitespace-normalized statement, for one SQL
+    /// source (a MIGRATIONS entry or the snapshot). `--` line comments are
+    /// stripped so comment placement never affects the comparison.
+    fn create_table_defs(sql: &str) -> std::collections::BTreeMap<String, String> {
+        let mut defs = std::collections::BTreeMap::new();
+        for fragment in sql.split(';') {
+            let mut code = String::new();
+            for line in fragment.lines() {
+                let line = match line.find("--") {
+                    Some(i) => &line[..i],
+                    None => line,
+                };
+                code.push_str(line);
+                code.push('\n');
+            }
+            let stmt = code.trim();
+            let mut toks = stmt.split_whitespace();
+            if !toks
+                .next()
+                .is_some_and(|t| t.eq_ignore_ascii_case("CREATE"))
+            {
+                continue;
+            }
+            if !toks.next().is_some_and(|t| t.eq_ignore_ascii_case("TABLE")) {
+                continue;
+            }
+            let mut name = toks.next().unwrap_or("");
+            // Optional `IF NOT EXISTS` between TABLE and the name.
+            if name.eq_ignore_ascii_case("IF") {
+                for _ in 0..2 {
+                    toks.next();
+                }
+                name = toks.next().unwrap_or("");
+            }
+            if name.is_empty() {
+                continue;
+            }
+            defs.insert(name.trim_end_matches('(').to_string(), normalize_sql(stmt));
+        }
+        defs
+    }
+
+    fn fingerprint(conn: &Connection) -> SchemaFingerprint {
+        let mut objects = std::collections::BTreeSet::new();
+        let mut index_sql = std::collections::BTreeMap::new();
+        let mut tables = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master
+                     WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .unwrap();
+            for row in rows {
+                let (typ, name, tbl, sql): (String, String, String, Option<String>) = row.unwrap();
+                if typ == "table" {
+                    tables.push(name.clone());
+                }
+                if typ == "index" {
+                    if let Some(def) = sql {
+                        index_sql.insert(name.clone(), normalize_sql(&def));
+                    }
+                }
+                objects.insert((typ, name, tbl));
+            }
+        }
+        let mut columns = std::collections::BTreeMap::new();
+        for table in &tables {
+            // Table names are internal (never user input); PRAGMA takes no params.
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let mut cols = std::collections::BTreeMap::new();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        ColumnShape {
+                            coltype: row.get(2)?,
+                            notnull: row.get(3)?,
+                            dflt: row.get(4)?,
+                            pk: row.get(5)?,
+                        },
+                    ))
+                })
+                .unwrap();
+            for row in rows {
+                let (name, shape) = row.unwrap();
+                cols.insert(name, shape);
+            }
+            columns.insert(table.clone(), cols);
+        }
+        SchemaFingerprint {
+            objects,
+            columns,
+            index_sql,
+        }
+    }
+
+    /// Scanner behind the `migration_steps_pin_statement_counts_and_literals`
+    /// pin: true when `;` appears inside a `'...'` or `"..."` string literal
+    /// (`''` / `""` count as escapes, not terminators).
+    fn contains_semicolon_in_literal(stmt: &str) -> bool {
+        let mut chars = stmt.chars().peekable();
+        let mut quote: Option<char> = None;
+        while let Some(c) = chars.next() {
+            match quote {
+                None => {
+                    if c == '\'' || c == '"' {
+                        quote = Some(c);
+                    }
+                }
+                Some(q) => {
+                    if c == q {
+                        // A doubled quote is an escape, not the terminator.
+                        if chars.peek() == Some(&q) {
+                            chars.next();
+                        } else {
+                            quote = None;
+                        }
+                    }
+                }
+            }
+            if c == ';' && quote.is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn splitter_assumption_probe_flags_semicolon_in_literal() {
+        // Scratch probes for the `;`-splitter assumption behind
+        // `apply_migration_step` — these strings are NOT migration SQL, and
+        // this test never touches MIGRATIONS itself.
+        assert!(contains_semicolon_in_literal(
+            "ALTER TABLE t ADD COLUMN c TEXT DEFAULT 'a;b'"
+        ));
+        assert!(contains_semicolon_in_literal(
+            "CREATE TABLE t (a TEXT DEFAULT 'it''s; ok')"
+        ));
+        assert!(contains_semicolon_in_literal(r#"SELECT ";"#));
+        assert!(!contains_semicolon_in_literal(
+            "ALTER TABLE t ADD COLUMN c TEXT DEFAULT 'plain'"
+        ));
+        assert!(!contains_semicolon_in_literal(
+            "CHECK (status IN ('pending', 'approved'))"
+        ));
+        assert!(!contains_semicolon_in_literal("SELECT 1"));
+    }
+
+    #[test]
+    fn migration_steps_pin_statement_counts_and_literals() {
+        // Pin the splitter's input shape: exact per-step statement counts
+        // plus no `;` inside any string literal across all MIGRATIONS
+        // entries. Extend the counts deliberately when appending a version.
+        const EXPECTED_STATEMENT_COUNTS: [usize; 9] = [0, 5, 3, 2, 1, 1, 4, 1, 2];
+        assert_eq!(
+            MIGRATIONS.len(),
+            EXPECTED_STATEMENT_COUNTS.len(),
+            "appending a version means extending EXPECTED_STATEMENT_COUNTS"
+        );
+        for (version, step) in MIGRATIONS.iter().enumerate() {
+            let stmts = split_step_statements(step);
+            assert_eq!(
+                stmts.len(),
+                EXPECTED_STATEMENT_COUNTS[version],
+                "step {version} statement count changed; update the pin deliberately"
+            );
+            for stmt in stmts {
+                assert!(
+                    !contains_semicolon_in_literal(stmt),
+                    "step {version} hides a `;` inside a string literal, breaking the `;`-splitter"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn never_altered_table_definitions_match_snapshot() {
+        // Static pin for the CHECK / table-UNIQUE drift class the DB parity
+        // test cannot see (see NEVER_ALTERED_TABLES): for tables no step ever
+        // ALTERs, the step DDL and `schema.sql` must define them identically
+        // modulo whitespace. A CHECK widened in one source only (or a
+        // table-level UNIQUE added on one side) fails here.
+        let snapshot = include_str!("../../migrations/schema.sql");
+        let snapshot_defs = create_table_defs(snapshot);
+        let mut step_defs = std::collections::BTreeMap::new();
+        for step in MIGRATIONS {
+            step_defs.extend(create_table_defs(step));
+        }
+        for table in NEVER_ALTERED_TABLES {
+            let step_def = step_defs.get(*table);
+            let snapshot_def = snapshot_defs.get(*table);
+            assert!(
+                step_def.is_some() && snapshot_def.is_some(),
+                "CREATE TABLE {table} must exist in both MIGRATIONS and schema.sql"
+            );
+            assert_eq!(
+                step_def, snapshot_def,
+                "CREATE TABLE {table} diverged between MIGRATIONS and schema.sql"
+            );
+        }
+    }
+
+    #[test]
+    fn stepped_v0_upgrade_matches_fresh_install() {
+        // The union of versioned MIGRATIONS steps must equal the
+        // fresh-install snapshot: upgrade a fabricated v0 DB through every
+        // step, then diff sqlite_master + table_info against a fresh
+        // install. Any step that stops matching schema.sql (a dropped
+        // column, table, or index — the v8 reactions near-miss class) fails
+        // this test.
+        let (upgraded, _dir1) = test_pool("parity_upgraded.db");
+        {
+            let conn = upgraded.get().unwrap();
+            conn.execute_batch(V1_FIXTURE_SCHEMA).unwrap();
+            assert_eq!(user_version(&conn).unwrap(), 0);
+        }
+        run_migrations(&upgraded, None).unwrap();
+
+        let (fresh, _dir2) = test_pool("parity_fresh.db");
+        run_migrations(&fresh, None).unwrap();
+
+        assert_eq!(db_version(&upgraded), LATEST_SCHEMA_VERSION);
+        assert_eq!(db_version(&fresh), LATEST_SCHEMA_VERSION);
+
+        let stepped = fingerprint(&upgraded.get().unwrap());
+        let snapshot = fingerprint(&fresh.get().unwrap());
+        assert_eq!(
+            stepped, snapshot,
+            "stepped v0 upgrade diverged from the fresh-install snapshot"
+        );
+    }
+
+    #[test]
+    fn ragged_v0_db_upgrades_and_matches_fresh_fingerprint() {
+        // Ragged legacy shape: base comments with only SOME late columns
+        // already present (partial history), webmention_seen present with
+        // rows, github_profiles entirely missing, one index never created,
+        // user_version == 0. The upgrade must fill exactly the gaps, keep
+        // every row, and converge on the fresh-install shape.
+        let (pool, _dir) = test_pool("ragged.db");
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE comments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_path TEXT NOT NULL,
+                    comment_type TEXT NOT NULL,
+                    source_url TEXT,
+                    author_name TEXT NOT NULL,
+                    author_url TEXT,
+                    author_avatar TEXT,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    parent_id INTEGER REFERENCES comments(id),
+                    depth INTEGER NOT NULL DEFAULT 0,
+                    honeypot INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE webmention_seen (
+                    source TEXT NOT NULL, target TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_status TEXT NOT NULL, PRIMARY KEY (source, target)
+                );
+                CREATE INDEX idx_comments_read
+                    ON comments(target_path, status, created_at);
+                INSERT INTO comments (target_path, comment_type, author_name, content, status)
+                    VALUES ('/ragged', 'native', 'Rae', 'kept!', 'approved');
+                INSERT INTO webmention_seen (source, target, last_status)
+                    VALUES ('https://src.example/r', 'https://site.example/ragged', 'alive');",
+            )
+            .unwrap();
+            assert_eq!(user_version(&conn).unwrap(), 0);
+        }
+
+        run_migrations(&pool, None).unwrap();
+        assert_eq!(db_version(&pool), LATEST_SCHEMA_VERSION);
+
+        let conn = pool.get().unwrap();
+        // Rows survived.
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM comments WHERE author_name = 'Rae'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let seen: String = conn
+            .query_row(
+                "SELECT last_status FROM webmention_seen WHERE source = 'https://src.example/r'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(seen, "alive");
+        // Gaps filled: the missing table, the missing columns, the missing indexes.
+        assert!(table_exists(&conn, "github_profiles").unwrap());
+        assert!(table_exists(&conn, "comment_urls").unwrap());
+        assert!(table_exists(&conn, "comment_reactions").unwrap());
+        for col in [
+            "delete_token",
+            "submitter_ip",
+            "content_hash",
+            "submitter_ip_hash",
+        ] {
+            assert!(
+                column_exists(&conn, "comments", col).unwrap(),
+                "missing column {col} after ragged upgrade"
+            );
+        }
+        for idx in [
+            "idx_comments_source_target",
+            "idx_comments_parent",
+            "idx_comment_urls_hash",
+            "idx_comment_reactions_read",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    rusqlite::params![idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing index {idx} after ragged upgrade");
+        }
+        // Converged: same shape as a fresh install.
+        let (fresh, _dir2) = test_pool("ragged_fresh.db");
+        run_migrations(&fresh, None).unwrap();
+        assert_eq!(
+            fingerprint(&conn),
+            fingerprint(&fresh.get().unwrap()),
+            "ragged v0 upgrade diverged from the fresh-install snapshot"
+        );
+    }
+
     #[test]
     fn migrations_run_idempotently() {
         let (pool, _dir) = test_pool("test.db");
@@ -384,35 +860,7 @@ mod tests {
         let (pool, _dir) = test_pool("legacy.db");
         {
             let conn = pool.get().unwrap();
-            conn.execute_batch(
-                "CREATE TABLE comments (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    target_path TEXT NOT NULL,
-                    comment_type TEXT NOT NULL,
-                    source_url TEXT,
-                    author_name TEXT NOT NULL,
-                    author_url TEXT,
-                    author_avatar TEXT,
-                    content TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-                CREATE TABLE webmention_seen (
-                    source TEXT NOT NULL, target TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    last_status TEXT NOT NULL, PRIMARY KEY (source, target)
-                );
-                CREATE TABLE github_profiles (
-                    login TEXT PRIMARY KEY, name TEXT,
-                    avatar_url TEXT NOT NULL,
-                    cached_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    valid INTEGER NOT NULL DEFAULT 1
-                );
-                INSERT INTO comments (target_path, comment_type, author_name, content, status)
-                    VALUES ('/legacy', 'native', 'Ada', 'first!', 'approved');",
-            )
-            .unwrap();
+            conn.execute_batch(V1_FIXTURE_SCHEMA).unwrap();
             assert_eq!(user_version(&conn).unwrap(), 0);
         }
 
@@ -587,8 +1035,9 @@ mod tests {
     fn v7_backfill_hashes_match_hash_ip() {
         use crate::ip_hash::hash_ip;
 
-        // A realistic pre-v7 database: every column a v6 database would
-        // have, raw peer addresses stored, no hash column yet.
+        // A realistic pre-v7 database: every table, column, and index a v6
+        // database would have (base tables plus all objects through the v6
+        // step), raw peer addresses stored, no hash column yet.
         fn fabricated_v6_db(name: &str) -> (SqlitePool, tempfile::TempDir) {
             let (pool, dir) = test_pool(name);
             {
@@ -613,6 +1062,33 @@ mod tests {
                         submitter_ip TEXT,
                         content_hash TEXT
                     );
+                    CREATE TABLE webmention_seen (
+                        source TEXT NOT NULL, target TEXT NOT NULL,
+                        last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        last_status TEXT NOT NULL, PRIMARY KEY (source, target)
+                    );
+                    CREATE TABLE github_profiles (
+                        login TEXT PRIMARY KEY, name TEXT,
+                        avatar_url TEXT NOT NULL,
+                        cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        valid INTEGER NOT NULL DEFAULT 1
+                    );
+                    CREATE INDEX idx_comments_read
+                        ON comments(target_path, status, created_at);
+                    CREATE UNIQUE INDEX idx_comments_source_target
+                        ON comments(source_url, target_path)
+                        WHERE source_url IS NOT NULL;
+                    CREATE INDEX idx_comments_parent ON comments(parent_id);
+                    CREATE TABLE comment_urls (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        comment_id INTEGER NOT NULL REFERENCES comments(id),
+                        url TEXT NOT NULL,
+                        domain TEXT NOT NULL,
+                        url_hash TEXT NOT NULL
+                    );
+                    CREATE INDEX idx_comment_urls_comment ON comment_urls(comment_id);
+                    CREATE INDEX idx_comment_urls_domain ON comment_urls(domain);
+                    CREATE INDEX idx_comment_urls_hash ON comment_urls(url_hash);
                     INSERT INTO comments (target_path, comment_type, author_name, content, submitter_ip)
                         VALUES ('/v4', 'native', 'Ada', 'hello', '1.2.3.4'),
                                ('/v6', 'native', 'Bob', 'hi', '::1'),

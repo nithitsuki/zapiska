@@ -109,6 +109,17 @@ All notable changes to zapiska are documented here. The format follows
   per read path (`(?N IS NULL OR ...)` predicates). No behavior change:
   rows and ordering are identical, pinned by round-trip tests asserting all
   eighteen fields per query variant.
+- Schema upgrades are now data: `src/db/pool.rs` holds a `MIGRATIONS`
+  array (index is the version, the stamp is the index, `LATEST` is derived
+  from its length) applied by iterate-and-apply instead of `if current < N`
+  blocks. Column additions still route through the existence-checked
+  `add_column_if_missing` safety net; every other statement is
+  `IF NOT EXISTS`. `migrations/schema.sql` stays the fresh-install snapshot
+  artifact. A new parity test upgrades a fabricated v0 database through all
+  steps and diffs `sqlite_master` plus `PRAGMA table_info` against a fresh
+  install, so step/snapshot drift (the v8 reactions near-miss class) fails
+  the suite. Refuse-newer-DB, idempotent catch-up, the duplicate-pair
+  pre-flight, and the v7 backfill are unchanged.
 
 ## [0.2.0] - 2026-08-07
 

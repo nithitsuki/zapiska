@@ -1,4 +1,13 @@
 -- Canonical schema snapshot for fresh installs (currently version 8).
+-- Derivation direction: the versioned upgrade steps in src/db/pool.rs
+-- (MIGRATIONS) are the source of truth for upgrades; this file is the
+-- canonical snapshot for fresh installs. Their union must stay equal — the
+-- `stepped_v0_upgrade_matches_fresh_install` test diffs object sets, column
+-- shapes, and index definitions between a stepped v0 upgrade and a fresh
+-- install, while `never_altered_table_definitions_match_snapshot` pins exact
+-- CREATE TABLE text (modulo whitespace) for tables no step ever ALTERs.
+-- Change both sides together: append a MIGRATIONS entry AND
+-- update this snapshot.
 -- Upgrades of existing databases are versioned via PRAGMA user_version in
 -- src/db/pool.rs (LATEST_SCHEMA_VERSION). Do not rely on this file alone
 -- for upgrades: column additions are gated per version there.
