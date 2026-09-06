@@ -25,10 +25,22 @@ All notable changes to zapiska are documented here. The format follows
   salted identities are present.
 - Startup warning when the database holds IP hashes but `IP_HASH_SECRET` is
   unset (lost or rotated secret splits IP-hash continuity).
+- `DB_QUICK_CHECK` (default `true`): startup runs `PRAGMA quick_check` and
+  refuses to start when the database reports corruption, with a message
+  pointing at backup restore. Set to `false` only to bypass the gate for
+  recovery.
 - This `CHANGELOG.md`.
 
 ### Changed
 
+- `GET /healthz` is now a readiness probe: it issues `SELECT 1` through the
+  connection pool (bounded to two seconds) and answers `200 ok` when healthy,
+  `503 unavailable` when the database does not answer. Docker and compose
+  health checks flip unhealthy on database failure instead of staying green.
+- A legacy database holding duplicate `(source_url, target_path)` rows no
+  longer aborts boot with a raw SQLite unique-index error: startup fails
+  loud with the offending pairs and the dedup remedy (keep the newest row
+  per pair, see the deployment docs).
 - Rate-limit default bursts raised (windows stay 60 s): native `50` to `100`,
   webmention `30` to `60`, read `60` to `300`, admin moderate `10` to `30`.
   Operators with an existing `.env` copied from the old `.env.example` keep

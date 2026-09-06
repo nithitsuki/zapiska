@@ -10,6 +10,11 @@ pub struct Config {
     pub allowed_cors_origin: String,
     pub admin_token: String,
     pub database_path: String,
+    /// Run `PRAGMA quick_check` at startup and refuse to serve traffic when
+    /// the database reports corruption. On by default (quick_check does most
+    /// of the checking of `integrity_check` but runs much faster, so boot
+    /// latency is small); set `DB_QUICK_CHECK=false` to skip.
+    pub db_quick_check: bool,
     pub github_token: Option<String>,
     pub max_content_len: usize,
     pub max_author_len: usize,
@@ -222,6 +227,7 @@ impl Default for Config {
             allowed_cors_origin: "https://nithitsuki.com".to_string(),
             admin_token: String::new(),
             database_path: "./comments.db".to_string(),
+            db_quick_check: true,
             github_token: None,
             max_content_len: 2000,
             max_author_len: 100,
@@ -535,6 +541,7 @@ impl Config {
             allowed_cors_origin,
             admin_token,
             database_path,
+            db_quick_check: env_bool("DB_QUICK_CHECK", defaults.db_quick_check),
             github_token,
             max_content_len,
             max_author_len,
@@ -601,6 +608,7 @@ impl std::fmt::Display for RedactedConfig<'_> {
                 allowed_cors_origin: {}, \
                 admin_token: ***, \
                 database_path: {}, \
+                db_quick_check: {}, \
                 github_token: {}, \
                 max_content_len: {}, \
                 max_author_len: {}, \
@@ -646,6 +654,7 @@ impl std::fmt::Display for RedactedConfig<'_> {
             self.0.public_target_origin,
             self.0.allowed_cors_origin,
             self.0.database_path,
+            self.0.db_quick_check,
             gh,
             self.0.max_content_len,
             self.0.max_author_len,
@@ -729,6 +738,7 @@ mod tests {
         "PUBLIC_TARGET_ORIGIN",
         "ALLOWED_CORS_ORIGIN",
         "DATABASE_PATH",
+        "DB_QUICK_CHECK",
         "GITHUB_TOKEN",
         "MAX_CONTENT_LEN",
         "MAX_AUTHOR_LEN",
@@ -1317,6 +1327,7 @@ mod tests {
             comment_lang_allowed: vec!["en".to_string()],
             comment_lang_blocked: Vec::new(),
             comment_lang_allow_emoji: "always".to_string(),
+            db_quick_check: true,
         };
         let rendered = format!("{}", config.redacted_display());
         assert!(
@@ -1560,6 +1571,38 @@ mod tests {
                 defaults.max_webmentions_per_domain_per_hour
             );
             assert_eq!(from_env.max_thread_depth, defaults.max_thread_depth);
+        });
+    }
+
+    #[test]
+    fn db_quick_check_defaults_on() {
+        with_env(&[("ADMIN_TOKEN", "test")], || {
+            let config = Config::from_env().unwrap();
+            assert!(
+                config.db_quick_check,
+                "DB_QUICK_CHECK must default ON (corruption detection beats boot latency)"
+            );
+        });
+    }
+
+    #[test]
+    fn db_quick_check_opt_out() {
+        with_env(
+            &[("ADMIN_TOKEN", "test"), ("DB_QUICK_CHECK", "false")],
+            || {
+                let config = Config::from_env().unwrap();
+                assert!(
+                    !config.db_quick_check,
+                    "DB_QUICK_CHECK=false must disable the startup check"
+                );
+            },
+        );
+        with_env(&[("ADMIN_TOKEN", "test"), ("DB_QUICK_CHECK", "0")], || {
+            let config = Config::from_env().unwrap();
+            assert!(
+                !config.db_quick_check,
+                "DB_QUICK_CHECK=0 must disable the startup check"
+            );
         });
     }
 

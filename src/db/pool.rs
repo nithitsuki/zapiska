@@ -252,8 +252,20 @@ pub fn run_migrations(
     // schema.sql without an explicit versioned step (e.g. webmention_seen,
     // github_profiles for very old DBs). Safe now — all columns exist.
     {
+        ensure_no_duplicate_source_target(&conn)?;
         let schema = include_str!("../../migrations/schema.sql");
-        conn.execute_batch(schema)?;
+        conn.execute_batch(schema)
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                if !e.to_string().contains("idx_comments_source_target") {
+                    return e.into();
+                }
+                // Belt-and-braces: translate the raw SQLite unique-index
+                // error into the actionable dedup message.
+                match duplicate_source_target_pairs(&conn) {
+                    Ok(dupes) if !dupes.is_empty() => duplicate_source_target_error(&dupes),
+                    _ => e.into(),
+                }
+            })?;
     }
 
     set_user_version(&conn, LATEST_SCHEMA_VERSION)?;
@@ -262,6 +274,45 @@ pub fn run_migrations(
     debug_assert!(table_exists(&conn, "comments")?);
 
     Ok(())
+}
+
+/// List `(source_url, target_path)` pairs held by more than one row.
+/// Non-NULL duplicates are what the partial unique index
+/// `idx_comments_source_target` rejects at snapshot time.
+fn duplicate_source_target_pairs(
+    conn: &Connection,
+) -> Result<Vec<(String, String, i64)>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT source_url, target_path, COUNT(*) FROM comments
+         WHERE source_url IS NOT NULL
+         GROUP BY source_url, target_path HAVING COUNT(*) > 1
+         LIMIT 5",
+    )?;
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect()
+}
+
+/// Pre-flight for the canonical snapshot: fail loud with the dedup remedy
+/// instead of aborting boot on a raw SQLite unique-index error (B-3).
+fn ensure_no_duplicate_source_target(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+    let dupes = duplicate_source_target_pairs(conn)?;
+    if dupes.is_empty() {
+        return Ok(());
+    }
+    Err(duplicate_source_target_error(&dupes))
+}
+
+fn duplicate_source_target_error(dupes: &[(String, String, i64)]) -> Box<dyn std::error::Error> {
+    let samples: Vec<String> = dupes
+        .iter()
+        .map(|(s, t, n)| format!("source_url='{s}' target_path='{t}' ({n} rows)"))
+        .collect();
+    format!(
+        "legacy database holds {} duplicate (source_url, target_path) group(s) conflicting with unique index idx_comments_source_target (first 5 shown: {}): dedup before upgrade, keeping the newest row per pair, for example: DELETE FROM comments WHERE id NOT IN (SELECT MAX(id) FROM comments WHERE source_url IS NOT NULL GROUP BY source_url, target_path); then restart",
+        dupes.len(),
+        samples.join("; ")
+    )
+    .into()
 }
 
 /// Populate `submitter_ip_hash` for rows that have a raw IP but no hash,
@@ -622,6 +673,51 @@ mod tests {
             assert_eq!(null_hash, None);
             assert_eq!(db_version(&pool), LATEST_SCHEMA_VERSION);
         }
+    }
+
+    #[test]
+    fn legacy_duplicate_source_target_fails_with_actionable_error() {
+        // A pre-versioning database that predates the partial unique index
+        // idx_comments_source_target and holds two rows with the same
+        // (source_url, target_path) pair.
+        let (pool, _dir) = test_pool("dupes.db");
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE comments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_path TEXT NOT NULL,
+                    comment_type TEXT NOT NULL,
+                    source_url TEXT,
+                    author_name TEXT NOT NULL,
+                    author_url TEXT,
+                    author_avatar TEXT,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO comments (target_path, comment_type, source_url, author_name, content, status)
+                    VALUES ('/dup', 'webmention', 'https://src.example/post', 'Ada', 'first', 'approved'),
+                           ('/dup', 'webmention', 'https://src.example/post', 'Bob', 'second', 'pending');",
+            )
+            .unwrap();
+            assert_eq!(user_version(&conn).unwrap(), 0);
+        }
+
+        let err = run_migrations(&pool, None).unwrap_err().to_string();
+        assert!(
+            err.contains("idx_comments_source_target"),
+            "error must name the conflicting index, got: {err}"
+        );
+        assert!(
+            err.contains("https://src.example/post"),
+            "error must identify the offending pair, got: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("dedup") || err.contains("DELETE FROM"),
+            "error must name the dedup remedy, got: {err}"
+        );
     }
 
     #[test]

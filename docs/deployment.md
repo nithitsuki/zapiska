@@ -297,6 +297,22 @@ import response carries a `warning` when it detects this mismatch, and the
 server logs a warning at startup when the database holds hashes but the
 secret is unset.
 
+### Legacy duplicate `(source_url, target_path)` rows
+
+Very old databases may predate the partial unique index
+`idx_comments_source_target` and hold two rows with the same
+`(source_url, target_path)` pair. Startup refuses to boot with an error
+naming the index and the offending pairs instead of failing on a raw SQLite
+message. Dedup first, keeping the newest row per pair, then restart:
+
+```sql
+DELETE FROM comments WHERE id NOT IN (
+  SELECT MAX(id) FROM comments
+  WHERE source_url IS NOT NULL
+  GROUP BY source_url, target_path
+);
+```
+
 ## Turnstile
 
 Turnstile is off by default. When enabled, every native comment submission
@@ -345,4 +361,19 @@ Schema creation is idempotent and runs at startup.
 curl http://127.0.0.1:3000/healthz
 ```
 
-The response is `ok` with status `200`.
+A healthy server answers `ok` with status `200`. The endpoint issues
+`SELECT 1` through the connection pool (bounded to two seconds), so it is a
+readiness probe, not just liveness: a wedged database (full disk,
+corruption, lost volume) answers `unavailable` with status `503`, and the
+Docker and compose health checks flip unhealthy accordingly.
+
+## Startup integrity gate
+
+| Variable | Default | Description |
+|---|---|---|
+| `DB_QUICK_CHECK` | `true` | Run `PRAGMA quick_check` at startup and refuse to start when the database reports corruption. Accepts `true` (any case) or `1`. Set to `false` only to bypass the gate for recovery. |
+
+`quick_check` does most of the checking of `PRAGMA integrity_check` but runs
+much faster, so the boot cost is small. A failure names the
+corruption and tells you to restore from backup (or re-import a known-good
+JSON export) before starting.

@@ -14,6 +14,9 @@ pub(crate) mod webhook;
 pub(crate) mod webmention_post;
 
 use axum::Router;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use std::sync::Arc;
 use tower_governor::GovernorLayer;
 use utoipa::OpenApi;
@@ -189,8 +192,33 @@ async fn comments_js() -> (
         (status = 200, description = "Server is healthy", body = String),
     ),
 )]
-async fn healthz() -> &'static str {
-    "ok"
+async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
+    // Readiness, not just liveness: the orchestrator must see failures when
+    // the database stops answering (full disk, corruption, lost volume).
+    // The probe is bounded so a wedged pool fails fast instead of hanging
+    // the healthcheck past its timeout.
+    let pool = state.pool.clone();
+    let probed = tokio::time::timeout(std::time::Duration::from_secs(2), async move {
+        tokio::task::spawn_blocking(move || {
+            pool.get()
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                        .ok()
+                })
+                .map(|v| v == 1)
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if probed {
+        (StatusCode::OK, "ok")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+    }
 }
 
 /// Reported binary and data-format versions. All values are compile-time
@@ -226,6 +254,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::http::test_support::helpers;
+    use crate::state::AppState;
 
     fn test_state() -> (AppState, tempfile::TempDir) {
         helpers::test_state()
@@ -268,6 +297,66 @@ mod tests {
         assert_eq!(resp.status(), 200);
     }
 
+    #[tokio::test]
+    async fn healthz_body_is_ok_on_healthy_db() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/healthz"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(body.as_ref(), b"ok", "healthy body stays compatible");
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_503_when_db_unreachable() {
+        let (mut state, _dir) = test_state();
+        // A pool whose file can never open: every probe fails. A short
+        // connection timeout keeps the failure fast — r2d2 would otherwise
+        // retry for its 30 s default (and the orphaned probe would hold
+        // runtime teardown until it errors).
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(
+            "/nonexistent-dir-zapiska-healthz/comments.db",
+        );
+        state.pool = r2d2::Pool::builder()
+            .min_idle(Some(0))
+            .connection_timeout(std::time::Duration::from_millis(200))
+            .build(manager)
+            .unwrap();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/healthz"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            503,
+            "healthz must fail when the database does not answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn healthz_exhausted_pool_trips_probe_bound() {
+        let (state, _dir) = test_state();
+        // Check out every connection (r2d2 default max_size is 10) so the
+        // probe cannot get one: it must hit the 2 s probe bound and answer
+        // 503, not wait out the pool's 30 s connection timeout.
+        let _held: Vec<_> = (0..10).map(|_| state.pool.get().unwrap()).collect();
+        let app = build_app(state);
+        let start = std::time::Instant::now();
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/healthz"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 503, "exhausted pool reads as unhealthy");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "probe must be bounded, not wait out the pool timeout: {:?}",
+            start.elapsed()
+        );
+    }
     #[tokio::test]
     async fn version_reports_single_sourced_versions() {
         let (state, _dir) = test_state();
