@@ -15,21 +15,43 @@ same rule.
 
 ## Server-side request forgery
 
-The webmention worker fetches source pages. Before a fetch, zapiska:
+All outbound fetches of untrusted URLs — webmention sources and native
+comment author pages (avatar lookup) — go through `SafeFetcher`
+(`src/fetch.rs`), the single guarded door. Before and during a fetch, it:
 
-1. Rejects `localhost`, `.local`, `.internal`, and `.localhost` host names.
-2. Resolves the host name.
-3. Rejects blocked IPv4 and IPv6 ranges.
-4. Rechecks a literal host IP in each redirect target.
+1. Rejects non-HTTP(S) schemes and hostless URLs.
+2. Rejects `localhost`, `.local`, `.internal`, and `.localhost` host names
+   (trailing-dot forms like `localhost.` included).
+3. Resolves the host name and rejects blocked IPv4 and IPv6 ranges.
+4. Follows redirects manually with redirect-following disabled, re-resolving
+   and re-checking **every** redirect target before connecting.
+5. Fails closed past 5 redirect hops (`TooManyRedirects`).
+6. Caps bodies at 1 MiB, enforced while streaming (a `Content-Length`
+   pre-check plus a chunked-read limit — oversized bodies never
+   materialize), and parses the survivor exactly once.
 
-The blocked ranges include private, loopback, link-local, CGNAT, documentation,
-benchmark, and IPv4-mapped IPv6 ranges.
+Any refusal (blocked target, redirect loop, oversized body, `410 Gone`,
+network error) is a typed `FetchError`; avatar lookup maps every refusal to
+the dicebear fallback, and the worker maps `Gone` to the seen-ledger delete
+path. The shared HTTP client is only for operator-configured endpoints
+(GitHub API, moderation webhooks, notifications, Turnstile) and must never
+fetch untrusted URLs directly.
 
-The current client permits HTTP and HTTPS. It uses the configured fetch timeout
-and a ten second connection timeout. It does not set an explicit redirect
-count. The redirect policy does not perform asynchronous DNS resolution for
-each redirect hop. Do not treat the current worker as a complete defence
-against DNS rebinding.
+The blocked ranges include private, loopback, link-local, CGNAT,
+documentation (including TEST-NET-2/3), benchmark, unspecified, and
+IPv4-mapped IPv6 ranges.
+
+The fetcher permits HTTP and HTTPS with a ten second connection timeout.
+Webmention fetches use the configured `FETCH_TIMEOUT_MS` (threaded from the
+worker spawn args into every job); author-page avatar fetches use the 4 s
+default, matching the default configuration.
+
+Do not treat the fetcher as a complete defence against DNS rebinding:
+resolution happens before connect without address pinning, so a hostile DNS
+name that flips between the check and the connection can still slip
+through. IPv6 translation ranges (NAT64, 6to4, Teredo with embedded private
+IPv4) are likewise not yet re-checked — see the follow-up note in
+`src/ssrf.rs`.
 
 ## Admin authentication
 

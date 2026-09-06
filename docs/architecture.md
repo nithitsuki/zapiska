@@ -37,6 +37,7 @@ src/
   worker.rs              Webmention worker
   mf2.rs                 Microformats parser
   ssrf.rs                Host and IP checks
+  fetch.rs               One guarded outbound-fetch door (SafeFetcher)
   notify/
     mod.rs              Notification dispatch
     batcher.rs          In-memory notification windows
@@ -69,8 +70,9 @@ src/
       lookup.rs           Author, URL, path, and context lookup
 ```
 
-The modules `worker`, `mf2`, `ssrf`, `webmention_post`, and
-`reqwest_client` compile only with the `webmentions` feature.
+The modules `worker`, `mf2`, `ssrf`, `fetch`, and `webmention_post`
+compile only with the `webmentions` feature (`http/reqwest_client` remains
+only as a re-export shim over `fetch`).
 
 ## Feature flags
 
@@ -144,8 +146,10 @@ The webmention endpoint is available only with the `webmentions` feature.
 2. The handler compares the target origin with `PUBLIC_TARGET_ORIGIN`.
 3. The handler rejects equal source and target URLs.
 4. The handler sends the job to a bounded channel and returns `202`.
-5. The worker checks the source hostname and resolved IP addresses.
-6. The worker fetches the source through the shared HTTP client.
+5. SafeFetcher checks each hop's hostname and resolved IP addresses, with a
+   5-hop redirect cap and a 1 MiB streaming body cap.
+6. The worker fetches the source through SafeFetcher (never the shared
+   HTTP client, which serves operator-configured endpoints only).
 7. The worker checks that the source links to the target.
 8. The worker parses h-entry and h-card data.
 9. The worker upserts the comment by source URL and target path.
@@ -154,9 +158,13 @@ The webmention endpoint is available only with the `webmentions` feature.
 The queue capacity is `WORKER_BACKLOG`, with a default of `64`. A full queue
 returns `503`. A source update keeps the existing moderation status.
 
-The current client permits HTTP and HTTPS. The client checks the source before
-the request. Its custom redirect policy checks each redirect host and literal
-IP against the blocklist. The client does not set a five-hop redirect limit.
+SafeFetcher permits HTTP and HTTPS. It resolves and checks the source
+before the request and re-checks every redirect target with a fresh
+resolution, so named-host and trailing-dot redirects into private networks
+are refused. Redirects are capped at five hops (fail-closed) and bodies at
+1 MiB streamed; the fetched page is parsed exactly once and shared by the
+backlink check and the h-entry parse. The backlink match ignores URL
+fragments but treats query, path case, and trailing slash as significant.
 
 ## Database
 

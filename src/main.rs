@@ -5,8 +5,6 @@ use zapiska::config::Config;
 use zapiska::db::pool;
 use zapiska::db::repo::Repo;
 use zapiska::github::{GitHubLookup, RealGitHub};
-#[cfg(feature = "webmentions")]
-use zapiska::http::reqwest_client;
 use zapiska::http::{build_app, shutdown};
 use zapiska::notify::NotificationBatcher;
 use zapiska::state::AppState;
@@ -38,12 +36,17 @@ async fn main() {
         );
     }
 
-    // Build an HTTP client. With webmentions enabled, it uses the SSRF-safe
-    // builder; without, a plain client suffices for GitHub lookup.
-    #[cfg(feature = "webmentions")]
-    let http_client = reqwest_client::build_client(&config);
-    #[cfg(not(feature = "webmentions"))]
+    // Shared HTTP client for operator-configured endpoints only (GitHub API,
+    // moderation webhooks, notification channels, Turnstile siteverify).
+    // Untrusted author/webmention URLs are fetched through SafeFetcher (its
+    // own redirect-disabled client with per-hop SSRF checks), never this one.
     let http_client = reqwest::Client::builder()
+        .user_agent(format!(
+            "webmention.nithitsuki.com/{}",
+            zapiska::APP_VERSION
+        ))
+        .timeout(std::time::Duration::from_millis(config.fetch_timeout_ms))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("failed to build HTTP client");
 

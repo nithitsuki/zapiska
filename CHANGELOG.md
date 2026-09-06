@@ -66,6 +66,25 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Fixed
 
+- Closed the unauthenticated SSRF hole in native-comment avatar fetch:
+  `author_url` pages are now fetched through `SafeFetcher`
+  (`src/fetch.rs`), the single guarded door also used by webmention
+  fetches. Every hop is resolved and checked against the blocklist (named
+  hosts and trailing-dot forms included), redirects are capped at 5 hops
+  (fail-closed), and bodies are capped at 1 MiB while streaming. Any refusal
+  falls back to the dicebear avatar like every other fetch failure. The old
+  redirect-policy client no longer exists as a fetch path
+  (`src/http/reqwest_client.rs` is a re-export shim); the shared client is
+  for operator-configured endpoints only. Blocklist gaps closed alongside:
+  trailing-dot hostnames (`localhost.`), TEST-NET-2/3 documentation ranges,
+  and IPv6 unspecified/documentation addresses. DNS-rebinding TOCTOU
+  (check-then-connect without address pinning) and IPv6 translation ranges
+  (NAT64/6to4/Teredo) remain documented limitations, not claimed defenses.
+  Follow-up hardening: webmention fetches honor the configured
+  `FETCH_TIMEOUT_MS` (threaded from the worker spawn args, pinned by test);
+  URLs with userinfo credentials are refused before connecting without
+  echoing the credentials into errors; the now-unreferenced synchronous
+  redirect policy was deleted.
 - `PUBLIC_TARGET_ORIGIN` is validated at startup (absolute `http(s)` URL with
   a host). A typo'd origin now fails boot with a `ConfigError` instead of
   panicking per webmention request and per queued worker job.

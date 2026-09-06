@@ -56,10 +56,8 @@ pub fn extract_photo(html: &str, base_url: &Url) -> Option<String> {
     None
 }
 
-/// Check if the HTML from `source` contains a link to `target`.
-pub fn has_backlink(html: &str, target: &str) -> bool {
-    let doc = Html::parse_document(html);
-
+/// Check if the parsed source document contains a link to `target`.
+pub fn has_backlink(doc: &Html, target: &str) -> bool {
     // Check <a href="..."> and <link href="..."> elements.
     for sel in [&*A_HREF, &*LINK_HREF] {
         for el in doc.select(sel) {
@@ -73,24 +71,42 @@ pub fn has_backlink(html: &str, target: &str) -> bool {
     false
 }
 
+/// Backlink normalization DECISION (review finding 04/#14, pinned by tests
+/// below): compare URLs with fragments stripped, everything else exact.
+///
+/// - Fragment ignored: `<a href="https://site/post#fn">` links to
+///   `https://site/post` — fragments never change the fetched resource, so a
+///   fragment variant is unambiguously the same mention.
+/// - Query significant: `?utm=…` changes the server response, so it must
+///   match exactly (no false-positive mentions from parameterized URLs).
+/// - Case: scheme/host compare case-insensitively (URL serialization
+///   normalizes them); path stays case-sensitive (servers may distinguish).
+/// - Trailing slash significant: `/post` and `/post/` are different
+///   resources until proven otherwise — fail closed, not clever.
+///
+/// Relative hrefs resolve against the target before comparing, as before.
 fn urls_match(found: &str, target: &str) -> bool {
-    // Simple match: found equals target, or resolves to target.
+    // Fast path: exact match (covers the common case with no parsing).
     if found == target {
         return true;
     }
-    // If found is a relative URL, resolve against target's origin.
+    // Normalized path: resolve (absolute or relative) against the target,
+    // strip fragments on both sides, compare the serialization.
     if let Ok(target_url) = Url::parse(target)
-        && let Ok(resolved) = target_url.join(found)
+        && let Ok(mut resolved) = target_url.join(found)
     {
-        return resolved.as_str() == target;
+        let mut normalized_target = target_url.clone();
+        resolved.set_fragment(None);
+        normalized_target.set_fragment(None);
+        return resolved.as_str() == normalized_target.as_str();
     }
     false
 }
 
-/// Parse the first h-entry from the HTML and extract author/content.
-/// Returns `None` if no h-entry is found.
-pub fn parse_h_entry(html: &str) -> Option<ParsedMention> {
-    let doc = Html::parse_document(html);
+/// Parse the first h-entry from the already-parsed document and extract
+/// author/content. Returns `None` if no h-entry is found. Takes `&Html`
+/// (not `&str`) so the worker parses each fetched page exactly once.
+pub fn parse_h_entry(doc: &Html) -> Option<ParsedMention> {
     let entry = doc.select(&H_ENTRY).next()?;
 
     // Content: .e-content HTML, then .p-summary, then .p-name, then fallback.
@@ -204,29 +220,110 @@ fn parse_author(
 mod tests {
     use super::*;
 
+    fn doc(html: &str) -> Html {
+        Html::parse_document(html)
+    }
+
     #[test]
     fn backlink_found_in_anchor() {
         let html =
             r#"<html><body><a href="https://nithitsuki.com/blog/hello">my post</a></body></html>"#;
-        assert!(has_backlink(html, "https://nithitsuki.com/blog/hello"));
+        assert!(has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello"
+        ));
     }
 
     #[test]
     fn backlink_not_found() {
         let html = r#"<html><body><a href="https://other.example">link</a></body></html>"#;
-        assert!(!has_backlink(html, "https://nithitsuki.com/blog/hello"));
+        assert!(!has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello"
+        ));
     }
 
     #[test]
     fn backlink_found_in_link_tag() {
         let html = r#"<html><head><link href="https://nithitsuki.com/blog/post" rel="mention" /></head></html>"#;
-        assert!(has_backlink(html, "https://nithitsuki.com/blog/post"));
+        assert!(has_backlink(&doc(html), "https://nithitsuki.com/blog/post"));
     }
 
     #[test]
     fn backlink_relative_url() {
         let html = r#"<html><body><a href="/blog/hello">link</a></body></html>"#;
-        assert!(has_backlink(html, "https://nithitsuki.com/blog/hello"));
+        assert!(has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello"
+        ));
+    }
+
+    // ── Backlink normalization decision (finding 04/#14) ────
+    // Fragment ignored; query/case-of-path/trailing-slash significant.
+
+    #[test]
+    fn backlink_fragment_on_link_ignored() {
+        let html =
+            r#"<html><body><a href="https://nithitsuki.com/blog/hello#fn1">link</a></body></html>"#;
+        assert!(has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello"
+        ));
+    }
+
+    #[test]
+    fn backlink_fragment_on_target_ignored() {
+        let html =
+            r#"<html><body><a href="https://nithitsuki.com/blog/hello">link</a></body></html>"#;
+        assert!(has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello#fn1"
+        ));
+    }
+
+    #[test]
+    fn backlink_query_mismatch_rejected() {
+        let html = r#"<html><body><a href="https://nithitsuki.com/blog/hello?utm=x">link</a></body></html>"#;
+        assert!(!has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello"
+        ));
+    }
+
+    #[test]
+    fn backlink_query_exact_match_accepted() {
+        let html =
+            r#"<html><body><a href="https://nithitsuki.com/blog/hello?a=b">link</a></body></html>"#;
+        assert!(has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello?a=b"
+        ));
+    }
+
+    #[test]
+    fn backlink_scheme_host_case_insensitive_path_sensitive() {
+        let html =
+            r#"<html><body><a href="HTTPS://NITHITSUKI.COM/blog/hello">link</a></body></html>"#;
+        assert!(has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello"
+        ));
+        let html =
+            r#"<html><body><a href="https://nithitsuki.com/blog/Hello">link</a></body></html>"#;
+        assert!(!has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello"
+        ));
+    }
+
+    #[test]
+    fn backlink_trailing_slash_significant() {
+        let html =
+            r#"<html><body><a href="https://nithitsuki.com/blog/hello/">link</a></body></html>"#;
+        assert!(!has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello"
+        ));
     }
 
     #[test]
@@ -240,7 +337,7 @@ mod tests {
             <div class="e-content"><p>Great post, thanks!</p></div>
         </div>"#;
 
-        let parsed = parse_h_entry(html).unwrap();
+        let parsed = parse_h_entry(&doc(html)).unwrap();
         assert_eq!(parsed.author_name, "Alice Green");
         assert_eq!(parsed.author_url, Some("https://alice.blog".to_string()));
         assert_eq!(
@@ -257,7 +354,7 @@ mod tests {
             <div class="e-content"><p>Nice!</p></div>
         </div>"#;
 
-        let parsed = parse_h_entry(html).unwrap();
+        let parsed = parse_h_entry(&doc(html)).unwrap();
         assert_eq!(parsed.author_name, "Bob");
         assert!(parsed.author_url.is_none());
     }
@@ -268,7 +365,7 @@ mod tests {
             <span class="p-author">Charlie</span>
         </div>"#;
 
-        let parsed = parse_h_entry(html).unwrap();
+        let parsed = parse_h_entry(&doc(html)).unwrap();
         assert_eq!(parsed.author_name, "Charlie");
         assert_eq!(parsed.content, "Mentioned this page.");
     }
@@ -276,7 +373,7 @@ mod tests {
     #[test]
     fn parse_h_entry_missing_returns_none() {
         let html = r#"<html><body><p>no h-entry here</p></body></html>"#;
-        assert!(parse_h_entry(html).is_none());
+        assert!(parse_h_entry(&doc(html)).is_none());
     }
 
     #[test]
@@ -286,7 +383,7 @@ mod tests {
             <div class="e-content">Hi</div>
         </div>"#;
 
-        let parsed = parse_h_entry(html).unwrap();
+        let parsed = parse_h_entry(&doc(html)).unwrap();
         assert_eq!(parsed.author_name, "Charlie");
         assert_eq!(parsed.author_url, Some("https://charlie.blog".to_string()));
     }
@@ -298,7 +395,7 @@ mod tests {
             <div class="e-content"><p><strong>bold</strong> and <em>italic</em></p></div>
         </div>"#;
 
-        let parsed = parse_h_entry(html).unwrap();
+        let parsed = parse_h_entry(&doc(html)).unwrap();
         assert!(parsed.content.contains("<strong>"));
         assert!(parsed.content.contains("<em>"));
     }

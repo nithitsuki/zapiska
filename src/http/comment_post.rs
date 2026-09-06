@@ -558,37 +558,35 @@ async fn resolve_avatar(
 
 /// Fetch a URL, parse the HTML, and try to extract an avatar.
 /// Tries h-card photo first, then favicon.
+///
+/// The untrusted author URL goes through [`crate::fetch::SafeFetcher`] — the
+/// same guarded door as webmention fetches — never a bare client. Any refusal
+/// (blocked target, redirect loop, oversized body, network error) returns
+/// `None` so the caller falls back to dicebear, like every other failure.
 #[cfg(feature = "webmentions")]
-async fn fetch_page_avatar(http_client: &reqwest::Client, url: &Url) -> Option<String> {
-    let resp = http_client
-        .get(url.as_str())
-        .timeout(std::time::Duration::from_secs(4))
-        .send()
-        .await
-        .ok()?;
+async fn fetch_page_avatar(_http_client: &reqwest::Client, url: &Url) -> Option<String> {
+    // NOTE: the shared client is deliberately unused here — SafeFetcher owns
+    // its redirect-disabled client so per-hop SSRF checks cannot be skipped.
+    let fetched = crate::fetch::SafeFetcher::new().fetch(url).await.ok()?;
 
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let html = resp.text().await.ok()?;
-
-    // Try h-card photo first
+    // Try h-card photo first (reads the single FetchedDoc parse tree).
     use crate::mf2;
-    if let Some(parsed) = mf2::parse_h_entry(&html) {
+    if let Some(parsed) = mf2::parse_h_entry(&fetched.doc) {
         if let Some(avatar) = parsed.author_avatar {
             if let Ok(abs) = url.join(&avatar) {
                 return Some(abs.to_string());
             }
         }
-        // Also check the author's u-photo directly
-        if let Some(avatar) = mf2::extract_photo(&html, url) {
+        // Also check the author's u-photo directly.
+        let text = fetched.text();
+        if let Some(avatar) = mf2::extract_photo(&text, url) {
             return Some(avatar);
         }
     }
 
-    // Fallback to favicon
-    crate::avatar::best_favicon(&html, url)
+    // Fallback to favicon.
+    let text = fetched.text();
+    crate::avatar::best_favicon(&text, url)
 }
 
 #[cfg(test)]
@@ -852,6 +850,29 @@ mod tests {
         assert_eq!(
             c.author_avatar,
             Some("https://api.dicebear.com/7.x/notionists/svg?seed=alice.blog".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_author_url_falls_back_to_dicebear_without_panic() {
+        // T05: the unauthenticated SSRF hole — a loopback author_url must be
+        // refused before connecting and fall back to dicebear, not fail the
+        // submission.
+        let (state, _dir) = test_state();
+        let app = build_app(state.clone());
+        let body =
+            "target_path=/ssrf-avatar&author_name=Alice&content=hi&author_url=http://127.0.0.1:9/";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(resp.status(), 201);
+
+        let pending = state.repo.list_pending(10, None, None).await.unwrap();
+        let c = pending
+            .iter()
+            .find(|c| c.target_path == "/ssrf-avatar")
+            .unwrap();
+        assert_eq!(
+            c.author_avatar,
+            Some("https://api.dicebear.com/7.x/notionists/svg?seed=127.0.0.1".to_string())
         );
     }
 

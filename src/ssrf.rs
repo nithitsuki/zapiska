@@ -27,9 +27,25 @@ static BLOCKED_NETS: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
         "192.0.2.0/24",
         "192.168.0.0/16",
         "198.18.0.0/15",
+        // T05: TEST-NET-2/3 (documentation, RFC 5737) — same class as the
+        // already-blocked 192.0.2.0/24; omitted before, closed here.
+        "198.51.100.0/24",
+        "203.0.113.0/24",
         "240.0.0.0/4",
     ];
-    let v6 = ["::1/128", "fc00::/7", "fe80::/10"];
+    // T05: added "::/128" (unspecified) and "2001:db8::/32" (documentation,
+    // RFC 3849). Deliberately DEFERRED (see follow-up note on
+    // `is_blocked_ip`): NAT64 "64:ff9b::/96", 6to4 "2002::/16", and Teredo
+    // "2001::/32" with embedded private IPv4, plus zone-ID literals
+    // ("[fe80::1%eth0]") — these need embedded-IPv4 re-checks and scoped
+    // connect handling that belong in a dedicated pass, not this hotfix.
+    let v6 = [
+        "::/128",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+        "2001:db8::/32",
+    ];
     v4.iter()
         .chain(v6.iter())
         .map(|s| IpNet::from_str(s).expect("hardcoded CIDR is valid"))
@@ -52,13 +68,42 @@ fn is_blocked_ip_inner(ip: IpAddr) -> bool {
     BLOCKED_NETS.iter().any(|net| net.contains(&ip))
 }
 
+/// Normalize a hostname for blocklist checks: lowercase and strip trailing
+/// DNS dots, so `http://localhost./` cannot dodge the string checks that
+/// `http://localhost/` hits. WHATWG URL parsing already normalizes numeric
+/// IP forms (`127.1`, `0x7f000001`) to dotted quads in `host_str()`, so the
+/// caller should always pass the serialized host, not the raw input.
+pub fn normalize_host(host: &str) -> String {
+    host.trim_end_matches('.').to_lowercase()
+}
+
 /// Check if a hostname string belongs to a blocked namespace.
 pub fn is_blocked_host(host: &str) -> bool {
-    let lower = host.to_lowercase();
+    let lower = normalize_host(host);
     lower == "localhost"
         || lower.ends_with(".local")
         || lower.ends_with(".internal")
         || lower.ends_with(".localhost")
+}
+
+/// Check if a host string is a literal loopback address (IPv4 127.x.x.x or
+/// IPv6 ::1), tolerating a trailing DNS dot and IPv6 brackets. Used by the
+/// fetcher so `allow_loopback` test plumbing keeps working per hop without
+/// reopening named-host bypasses (`localhost` is NOT loopback here — it must
+/// still go through DNS resolution and the blocklist).
+pub fn is_loopback_host(host: &str) -> bool {
+    let bare = host.trim_end_matches('.');
+    let bare = bare
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(bare);
+    if bare == "::1" {
+        return true;
+    }
+    if let Ok(ip) = std::net::IpAddr::from_str(bare) {
+        return ip.is_loopback();
+    }
+    false
 }
 
 /// Extract the registrable (eTLD+1) domain from a hostname.
@@ -98,15 +143,18 @@ pub fn registrable_domain(host: &str) -> String {
 }
 
 /// Resolve `host` to IP addresses and block if any fall into a private range.
-/// Returns `Ok(())` if the host is safe to connect to.
+/// Returns `Ok(())` if the host is safe to connect to. The host is
+/// normalized first (trailing DNS dot stripped), so `localhost.` resolves
+/// and checks exactly like `localhost`.
 pub async fn resolve_and_check(host: &str) -> Result<(), SsrfError> {
-    if is_blocked_host(host) {
-        return Err(SsrfError::BlockedHost(host.to_string()));
+    let normalized = normalize_host(host);
+    if is_blocked_host(&normalized) {
+        return Err(SsrfError::BlockedHost(normalized));
     }
 
-    let addrs = tokio::net::lookup_host((host, 0))
+    let addrs = tokio::net::lookup_host((normalized.as_str(), 0))
         .await
-        .map_err(|e| SsrfError::LookupFailed(host.to_string(), e.to_string()))?;
+        .map_err(|e| SsrfError::LookupFailed(normalized.clone(), e.to_string()))?;
 
     for addr in addrs {
         let ip = addr.ip();
@@ -116,26 +164,6 @@ pub async fn resolve_and_check(host: &str) -> Result<(), SsrfError> {
     }
 
     Ok(())
-}
-
-/// Build a reqwest `redirect::Policy` that calls `resolve_and_check` at each hop.
-pub fn ssrf_safe_redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(move |attempt| {
-        let url = attempt.url();
-        let host = url.host_str().unwrap_or("");
-        if host.is_empty() || is_blocked_host(host) {
-            return attempt.stop();
-        }
-        // Synchronous check of the IP (requires the IP to be known without DNS).
-        // For a full defense use `resolve_and_check` before making the request;
-        // this policy serves as a belt-and-suspenders for the common case.
-        if let Ok(ip) = std::net::IpAddr::from_str(host)
-            && is_blocked_ip(ip)
-        {
-            return attempt.stop();
-        }
-        attempt.follow()
-    })
 }
 
 #[cfg(test)]
@@ -345,5 +373,41 @@ mod tests {
     #[test]
     fn wildcard_localhost_string() {
         assert!(is_blocked_host("anything.localhost"));
+    }
+
+    // ── T05 gap-closure table (must fail before the fix) ───
+
+    #[test]
+    fn t05_trailing_dot_blocked() {
+        // `http://localhost./` must not dodge the hostname check.
+        assert!(is_blocked_host("localhost."));
+        assert!(is_blocked_host("LOCALHOST."));
+        assert!(is_blocked_host("db.internal."));
+        assert!(is_blocked_host("host.local."));
+        assert_eq!(normalize_host("Example.COM."), "example.com");
+    }
+
+    #[test]
+    fn t05_test_net_2_and_3_blocked() {
+        // TEST-NET-2/3 (documentation) were missing beside 192.0.2.0/24.
+        assert!(is_blocked_ip(Ipv4Addr::new(198, 51, 100, 1).into()));
+        assert!(is_blocked_ip(Ipv4Addr::new(203, 0, 113, 1).into()));
+    }
+
+    #[test]
+    fn t05_ipv6_unspecified_and_documentation_blocked() {
+        let unspec: Ipv6Addr = "::".parse().unwrap();
+        assert!(is_blocked_ip(unspec.into()));
+        let doc: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        assert!(is_blocked_ip(doc.into()));
+    }
+
+    #[test]
+    fn t05_loopback_host_helper() {
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("127.0.0.1."));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("8.8.8.8"));
+        assert!(!is_loopback_host("localhost"));
     }
 }

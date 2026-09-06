@@ -25,8 +25,10 @@ pub struct AppState {
     pub language: LanguageGate,
     #[cfg(feature = "webmentions")]
     pub wm_sender: JobSender,
-    /// Shared HTTP client (used for all outbound requests: GitHub enrichment,
-    /// webmention fetches, and moderation webhooks).
+    /// Shared HTTP client for operator-configured endpoints only (GitHub
+    /// enrichment, moderation webhooks, notification delivery, Turnstile).
+    /// Untrusted author/webmention URL fetches must go through SafeFetcher,
+    /// never this client directly.
     pub http_client: Client,
     /// In-memory rate limiter for per-IP daily caps and per-domain hourly caps.
     pub limiter: Arc<Limiter>,

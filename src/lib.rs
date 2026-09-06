@@ -7,6 +7,8 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod config;
 pub mod db;
 pub mod error;
+#[cfg(feature = "webmentions")]
+pub mod fetch;
 pub mod github;
 pub mod http;
 pub mod ip_hash;

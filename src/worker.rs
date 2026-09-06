@@ -1,12 +1,13 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::Client;
 use tokio::sync::mpsc;
 use url::Url;
 
 use crate::db::repo::{NewComment, NewWebmentionSeen, Repo};
+use crate::fetch::{DEFAULT_FETCH_TIMEOUT, FetchError, SafeFetcher};
 use crate::github::{GitHubLookup, Profile};
-use crate::http::reqwest_client::{FetchError, fetch_url};
 use crate::mf2::{ParsedMention, has_backlink, parse_h_entry};
 use crate::notify::{NewCommentInfo, NotificationBatcher};
 use crate::sanitize;
@@ -62,12 +63,12 @@ pub fn spawn_worker_for_state(
     github: Arc<dyn GitHubLookup>,
     target_origin: String,
     max_content_len: usize,
-    _timeout_ms: u64,
+    timeout_ms: u64,
     notifier: Arc<NotificationBatcher>,
 ) {
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            if let Err(e) = process_job(
+            if let Err(e) = process_job_with_timeout(
                 &job,
                 &repo,
                 &client,
@@ -75,6 +76,7 @@ pub fn spawn_worker_for_state(
                 &target_origin,
                 max_content_len,
                 false,
+                Duration::from_millis(timeout_ms),
                 &notifier,
             )
             .await
@@ -90,6 +92,8 @@ pub fn spawn_worker_for_state(
 
 /// Process a single webmention job. Exposed as `pub` so integration tests can
 /// call it directly. `allow_loopback` relaxes the SSRF check for mock servers.
+/// Uses the default fetch timeout; the spawned worker uses
+/// [`process_job_with_timeout`] with the configured `FETCH_TIMEOUT_MS`.
 #[allow(clippy::too_many_arguments)]
 pub async fn process_job(
     job: &WebmentionJob,
@@ -99,6 +103,34 @@ pub async fn process_job(
     target_origin: &str,
     max_content_len: usize,
     allow_loopback: bool,
+    notifier: &Arc<NotificationBatcher>,
+) -> Result<(), WorkerError> {
+    process_job_with_timeout(
+        job,
+        repo,
+        client,
+        github,
+        target_origin,
+        max_content_len,
+        allow_loopback,
+        DEFAULT_FETCH_TIMEOUT,
+        notifier,
+    )
+    .await
+}
+
+/// [`process_job`] with an explicit fetch timeout. The spawned worker passes
+/// the configured timeout through here; tests pin non-default budgets here.
+#[allow(clippy::too_many_arguments)]
+pub async fn process_job_with_timeout(
+    job: &WebmentionJob,
+    repo: &Repo,
+    client: &Client,
+    github: &Arc<dyn GitHubLookup>,
+    target_origin: &str,
+    max_content_len: usize,
+    allow_loopback: bool,
+    fetch_timeout: Duration,
     notifier: &Arc<NotificationBatcher>,
 ) -> Result<(), WorkerError> {
     let target_path = derive_target_path(&job.target, target_origin)?;
@@ -119,9 +151,24 @@ pub async fn process_job(
         return Ok(());
     }
 
-    // 2. SSRF-safe fetch of the source URL.
-    let html = match fetch_url(client, &job.source, allow_loopback).await {
-        Ok(h) => h,
+    // 2. SSRF-safe fetch of the source URL through the one guarded door
+    // (per-hop checks, hop cap, streaming byte cap; parsed once).
+    // `allow_loopback` stays plumbed for mock-server tests (T20 owns the
+    // Processor refactor that removes it).
+    // NOTE: scraper::Html is !Send: `map` collapses the document into Send
+    // data (bool + parsed mention) with no await in between, so no !Send
+    // value is ever live across a later await.
+    let fetched = SafeFetcher::new()
+        .with_allow_loopback(allow_loopback)
+        .with_timeout(fetch_timeout)
+        .fetch_str(&job.source)
+        .await;
+    let outcome = fetched.map(|doc| {
+        // 3. Backlink check + h-entry parse read the single parse tree.
+        (has_backlink(&doc.doc, &job.target), parse_h_entry(&doc.doc))
+    });
+    let (backlink_ok, parsed): (bool, Option<ParsedMention>) = match outcome {
+        Ok(found) => found,
         Err(FetchError::Gone(_)) => {
             handle_gone_source(job, repo).await;
             return Ok(());
@@ -129,8 +176,9 @@ pub async fn process_job(
         Err(e) => return Err(WorkerError::from(e)),
     };
 
-    // 3. Verify the source page contains a link to the target.
-    if !has_backlink(&html, &job.target) {
+    // 3b. No-backlink policy (unchanged): tombstone a previously-alive
+    // source, reject the job.
+    if !backlink_ok {
         if seen.is_some_and(|s| s.last_status == "alive") {
             let _ = repo
                 .upsert_webmention_seen(NewWebmentionSeen {
@@ -143,8 +191,7 @@ pub async fn process_job(
         return Err(WorkerError::NoBacklink);
     }
 
-    // 4. Parse h-entry and resolve author info.
-    let parsed = parse_h_entry(&html);
+    // 4. Author info from the h-entry parsed above (no re-parse).
     let (author_name, author_url, author_avatar) = resolve_author_info(&job.source, &parsed);
 
     // 5. GitHub enrichment if author URL points to GitHub.
@@ -301,5 +348,75 @@ async fn handle_gone_source(job: &WebmentionJob, repo: &Repo) {
         && (comment.status == "approved" || comment.status == "pending")
     {
         let _ = repo.update_status(comment.id, "deleted").await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TIMEOUT_TARGET: &str = "https://nithitsuki.com/blog/wm-timeout";
+
+    fn slow_source_html() -> String {
+        format!(
+            r#"<!DOCTYPE html><html><body>
+<article class="h-entry"><div class="e-content"><p>Slow post</p></div></article>
+<a href="{TIMEOUT_TARGET}">backlink</a></body></html>"#
+        )
+    }
+
+    #[tokio::test]
+    async fn fetch_timeout_smaller_than_origin_delay_fails() {
+        // G4 blocker pin: the worker must honor a non-default fetch timeout.
+        // Pre-fix the timeout was hardcoded to the default, so an 80 ms
+        // budget against a 1200 ms origin must fail here — with the 4 s
+        // default the same fetch would succeed.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/slow"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(1200))
+                    .set_body_string(slow_source_html()),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool =
+            crate::db::pool::create_pool(&dir.path().join("wm-timeout.db").to_string_lossy())
+                .unwrap();
+        crate::db::pool::run_migrations(&pool, None).unwrap();
+        let repo = Repo::new(pool);
+        let github: Arc<dyn GitHubLookup> = Arc::new(crate::github::StubGitHub);
+        let notifier = Arc::new(NotificationBatcher::new(&crate::config::Config::default()));
+        let client = Client::builder().build().unwrap();
+        let job = WebmentionJob {
+            source: format!("{}/slow", server.uri()),
+            target: TIMEOUT_TARGET.to_string(),
+        };
+
+        let err = process_job_with_timeout(
+            &job,
+            &repo,
+            &client,
+            &github,
+            "https://nithitsuki.com",
+            2000,
+            true,
+            Duration::from_millis(80),
+            &notifier,
+        )
+        .await
+        .expect_err("80 ms budget vs 1200 ms origin must time out");
+        match err {
+            WorkerError::Fetch(FetchError::Http { source, .. }) => {
+                assert!(source.is_timeout(), "expected a timeout, got: {source}")
+            }
+            other => panic!("expected timeout Http error, got: {other}"),
+        }
     }
 }
