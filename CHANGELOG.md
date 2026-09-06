@@ -187,6 +187,22 @@ All notable changes to zapiska are documented here. The format follows
   reaction behavior changes: existing `?`-aborts and upsert logic are
   untouched. Retry/skip policies now have a type to match on instead of
   error substrings.
+- Related storage writes are now atomic (`src/db/repo/`): `Repo::with_conn`
+  runs N statements on one pooled connection and `Repo::with_tx` wraps them
+  in `BEGIN IMMEDIATE` (contention surfaces as `Busy` for backoff retry).
+  Native comment store (insert plus auto-approve status plus extracted-URL
+  rows), webmention store (upsert plus ledger row), and gone handling
+  (ledger `gone` plus comment deletion) each commit or roll back as one
+  unit — a mid-unit failure leaves no torn comment-without-URLs or
+  mention-without-seen. Invalid URL rows (empty fields, `Constraint`) are
+  skipped with a warn log while the comment still commits; `Busy`/`Io`/
+  `Other` abort the whole unit. Reaction approval is a compare-and-swap on
+  the seen emoji, so an emoji change racing an approval keeps the new emoji
+  pending. The admin export reads all five tables on one connection in one
+  read transaction (a single WAL snapshot), and the public read API batches
+  list plus total plus reaction counts per request the same way. Import stays
+  per-row. Follow-up (not fixed here): pool `max_size`/`get_timeout` (B-12)
+  — pool acquisition still waits without a timeout.
 
 ## [0.2.0] - 2026-08-07
 

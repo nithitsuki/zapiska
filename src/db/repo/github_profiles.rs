@@ -53,28 +53,34 @@ impl Repo {
 
     /// Dump the whole profile cache (admin JSON export).
     pub async fn list_all_github_profiles(&self) -> RepoResult<Vec<GithubProfile>> {
-        self.spawn(move |conn| {
-            let mut stmt = conn
-                .prepare("SELECT login, name, avatar_url, cached_at, valid FROM github_profiles ORDER BY login")
-                .map_err(RepoError::from)?;
-            let rows = stmt
-                .query_map([], |row| {
-                    let valid_int: i64 = row.get(4)?;
-                    Ok(GithubProfile {
-                        login: row.get(0)?,
-                        name: row.get(1)?,
-                        avatar_url: row.get(2)?,
-                        cached_at: row.get(3)?,
-                        valid: valid_int != 0,
-                    })
-                })
-                .map_err(RepoError::from)?;
-            let mut result = Vec::new();
-            for row in rows {
-                result.push(row.map_err(RepoError::from)?);
-            }
-            Ok(result)
-        })
-        .await
+        self.spawn(list_all_profiles_on_conn).await
     }
+}
+
+/// Whole profile cache on the caller's connection (export snapshot).
+pub(crate) fn list_all_profiles_on_conn(
+    conn: &rusqlite::Connection,
+) -> RepoResult<Vec<GithubProfile>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT login, name, avatar_url, cached_at, valid FROM github_profiles ORDER BY login",
+        )
+        .map_err(RepoError::from)?;
+    let rows = stmt
+        .query_map([], |row| {
+            let valid_int: i64 = row.get(4)?;
+            Ok(GithubProfile {
+                login: row.get(0)?,
+                name: row.get(1)?,
+                avatar_url: row.get(2)?,
+                cached_at: row.get(3)?,
+                valid: valid_int != 0,
+            })
+        })
+        .map_err(RepoError::from)?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(RepoError::from)?);
+    }
+    Ok(result)
 }

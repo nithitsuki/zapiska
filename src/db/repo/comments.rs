@@ -1,70 +1,276 @@
 use rusqlite::OptionalExtension;
 use rusqlite::params;
+use std::collections::HashMap;
 
 use super::select_comments;
-use super::{COMMENT_COLUMNS, Comment, NewComment, Repo, RepoError, RepoResult, row_to_comment};
+use super::{
+    COMMENT_COLUMNS, Comment, NewComment, Repo, RepoError, RepoResult, UrlErrorAction,
+    row_to_comment, url_error_policy,
+};
+
+/// Connection-scoped SQL behind the async wrappers: each takes the caller's
+/// `&Connection` (a live `Transaction` derefs to one) so single-shot methods
+/// and multi-statement T15 units share the exact same statements.
+pub(crate) fn insert_comment_on_conn(
+    conn: &rusqlite::Connection,
+    input: &NewComment,
+) -> RepoResult<i64> {
+    conn.execute(
+        "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            input.target_path,
+            input.comment_type,
+            input.source_url,
+            input.author_name,
+            input.author_url,
+            input.author_avatar,
+            input.content,
+            input.parent_id,
+            input.depth,
+            input.honeypot as i64,
+            input.delete_token,
+            input.submitter_ip,
+            input.content_hash,
+            input.submitter_ip_hash,
+        ],
+    )
+    .map_err(RepoError::from)?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub(crate) fn upsert_by_source_on_conn(
+    conn: &rusqlite::Connection,
+    input: &NewComment,
+) -> RepoResult<i64> {
+    conn.execute(
+        "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         ON CONFLICT(source_url, target_path)
+         WHERE source_url IS NOT NULL
+         DO UPDATE SET
+             author_name = excluded.author_name,
+             author_url = excluded.author_url,
+             author_avatar = excluded.author_avatar,
+             content = excluded.content,
+             updated_at = datetime('now')",
+        params![
+            input.target_path,
+            input.comment_type,
+            input.source_url,
+            input.author_name,
+            input.author_url,
+            input.author_avatar,
+            input.content,
+            input.parent_id,
+            input.depth,
+            input.honeypot as i64,
+            input.delete_token,
+            input.submitter_ip,
+            input.content_hash,
+            input.submitter_ip_hash,
+        ],
+    )
+    .map_err(RepoError::from)?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub(crate) fn update_status_on_conn(
+    conn: &rusqlite::Connection,
+    id: i64,
+    status: &str,
+) -> RepoResult<()> {
+    let affected = conn
+        .execute(
+            "UPDATE comments SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![status, id],
+        )
+        .map_err(RepoError::from)?;
+    if affected == 0 {
+        return Err(RepoError::NotFound(format!("comment id {} not found", id)));
+    }
+    Ok(())
+}
+
+pub(crate) fn get_by_source_on_conn(
+    conn: &rusqlite::Connection,
+    source_url: &str,
+) -> RepoResult<Option<Comment>> {
+    let sql = select_comments("source_url = ?1", "id ASC");
+    conn.query_row(&sql, params![source_url], row_to_comment)
+        .optional()
+        .map_err(RepoError::from)
+}
+
+pub(crate) fn list_approved_on_conn(
+    conn: &rusqlite::Connection,
+    path: &str,
+    limit: i64,
+    before: Option<i64>,
+) -> RepoResult<Vec<Comment>> {
+    let sql = format!(
+        "{} LIMIT ?3",
+        select_comments(
+            "target_path = ?1 AND status = 'approved' AND (?2 IS NULL OR id < ?2)",
+            "id DESC",
+        )
+    );
+    let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
+    let rows = stmt
+        .query_map(params![path, before, limit], row_to_comment)
+        .map_err(RepoError::from)?;
+    let mut comments = Vec::new();
+    for row in rows {
+        comments.push(row.map_err(RepoError::from)?);
+    }
+    Ok(comments)
+}
+
+pub(crate) fn list_approved_oldest_on_conn(
+    conn: &rusqlite::Connection,
+    path: &str,
+    limit: i64,
+    after: Option<i64>,
+) -> RepoResult<Vec<Comment>> {
+    let sql = format!(
+        "{} LIMIT ?3",
+        select_comments(
+            "target_path = ?1 AND status = 'approved' AND (?2 IS NULL OR id > ?2)",
+            "id ASC",
+        )
+    );
+    let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
+    let rows = stmt
+        .query_map(params![path, after, limit], row_to_comment)
+        .map_err(RepoError::from)?;
+    let mut comments = Vec::new();
+    for row in rows {
+        comments.push(row.map_err(RepoError::from)?);
+    }
+    Ok(comments)
+}
+
+pub(crate) fn count_approved_on_conn(conn: &rusqlite::Connection, path: &str) -> RepoResult<i64> {
+    conn.query_row(
+        "SELECT count(*) FROM comments WHERE target_path = ?1 AND status = 'approved'",
+        params![path],
+        |row| row.get(0),
+    )
+    .map_err(RepoError::from)
+}
+
+pub(crate) fn list_all_comments_on_conn(conn: &rusqlite::Connection) -> RepoResult<Vec<Comment>> {
+    let sql = format!("SELECT {COMMENT_COLUMNS} FROM comments ORDER BY id ASC");
+    let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
+    let rows = stmt
+        .query_map([], row_to_comment)
+        .map_err(RepoError::from)?;
+    let mut comments = Vec::new();
+    for row in rows {
+        comments.push(row.map_err(RepoError::from)?);
+    }
+    Ok(comments)
+}
 
 impl Repo {
     pub async fn insert_comment(&self, input: NewComment) -> RepoResult<i64> {
-        self.spawn(move |conn| {
-            conn.execute(
-                "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                params![
-                    input.target_path,
-                    input.comment_type,
-                    input.source_url,
-                    input.author_name,
-                    input.author_url,
-                    input.author_avatar,
-                    input.content,
-                    input.parent_id,
-                    input.depth,
-                    input.honeypot as i64,
-                    input.delete_token,
-                    input.submitter_ip,
-                    input.content_hash,
-                    input.submitter_ip_hash,
-                ],
-            )
-            .map_err(RepoError::from)?;
-            Ok(conn.last_insert_rowid())
+        self.spawn(move |conn| insert_comment_on_conn(conn, &input))
+            .await
+    }
+
+    pub async fn upsert_by_source(&self, input: NewComment) -> RepoResult<i64> {
+        self.spawn(move |conn| upsert_by_source_on_conn(conn, &input))
+            .await
+    }
+
+    /// Store a native comment with its auto-approve status and extracted-URL
+    /// rows in ONE `BEGIN IMMEDIATE` commit (B-7/B-14). Replaces the old
+    /// three-acquire `insert → update_status → insert_urls` sequence whose
+    /// URL step swallowed every error with `let _ =`.
+    ///
+    /// URL policy ([`url_error_policy`]): an invalid row (empty fields, or a
+    /// storage `Constraint`) is skipped with a warn log and the comment still
+    /// commits; `Busy`/`Io`/`Other` abort the whole unit (rollback, no torn
+    /// comment-without-URLs).
+    pub async fn create_native_comment(
+        &self,
+        input: NewComment,
+        auto_approve: bool,
+        urls: Vec<(String, String, String)>,
+    ) -> RepoResult<i64> {
+        self.with_tx(move |tx| {
+            let id = insert_comment_on_conn(tx, &input)?;
+            if auto_approve {
+                update_status_on_conn(tx, id, "approved")?;
+            }
+            let mut skipped_urls = 0u32;
+            for (url, domain, url_hash) in &urls {
+                if url.is_empty() || domain.is_empty() || url_hash.is_empty() {
+                    skipped_urls += 1;
+                    tracing::warn!(
+                        comment_id = id,
+                        url = %url,
+                        skipped = skipped_urls,
+                        "skipping invalid extracted-URL row (empty field)"
+                    );
+                    continue;
+                }
+                match super::urls::insert_url_on_conn(tx, id, url, domain, url_hash) {
+                    Ok(()) => {}
+                    Err(e) => match url_error_policy(&e) {
+                        UrlErrorAction::SkipRow => {
+                            skipped_urls += 1;
+                            tracing::warn!(
+                                comment_id = id,
+                                url = %url,
+                                skipped = skipped_urls,
+                                err = %e,
+                                "skipping bad URL row"
+                            );
+                        }
+                        UrlErrorAction::Abort => return Err(e),
+                    },
+                }
+            }
+            Ok(id)
         })
         .await
     }
 
-    pub async fn upsert_by_source(&self, input: NewComment) -> RepoResult<i64> {
-        self.spawn(move |conn| {
-            conn.execute(
-                "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-                 ON CONFLICT(source_url, target_path)
-                 WHERE source_url IS NOT NULL
-                 DO UPDATE SET
-                     author_name = excluded.author_name,
-                     author_url = excluded.author_url,
-                     author_avatar = excluded.author_avatar,
-                     content = excluded.content,
-                     updated_at = datetime('now')",
-                params![
-                    input.target_path,
-                    input.comment_type,
-                    input.source_url,
-                    input.author_name,
-                    input.author_url,
-                    input.author_avatar,
-                    input.content,
-                    input.parent_id,
-                    input.depth,
-                    input.honeypot as i64,
-                    input.delete_token,
-                    input.submitter_ip,
-                    input.content_hash,
-                    input.submitter_ip_hash,
-                ],
-            )
-            .map_err(RepoError::from)?;
-            Ok(conn.last_insert_rowid())
+    /// Newest-first page plus its total and approved reaction counts, all on
+    /// ONE connection (read batch for `GET /api/comments?sort=newest`).
+    pub async fn list_approved_page(
+        &self,
+        path: &str,
+        limit: i64,
+        before: Option<i64>,
+    ) -> RepoResult<(Vec<Comment>, i64, HashMap<i64, HashMap<String, i64>>)> {
+        let path = path.to_string();
+        self.with_conn(move |conn| {
+            let comments = list_approved_on_conn(conn, &path, limit, before)?;
+            let total = count_approved_on_conn(conn, &path)?;
+            let ids: Vec<i64> = comments.iter().map(|c| c.id).collect();
+            let counts = super::reactions::reaction_counts_on_conn(conn, &ids)?;
+            Ok((comments, total, counts))
+        })
+        .await
+    }
+
+    /// Oldest-first page plus its total and approved reaction counts, all on
+    /// ONE connection (read batch for `GET /api/comments?sort=oldest`).
+    pub async fn list_approved_oldest_page(
+        &self,
+        path: &str,
+        limit: i64,
+        after: Option<i64>,
+    ) -> RepoResult<(Vec<Comment>, i64, HashMap<i64, HashMap<String, i64>>)> {
+        let path = path.to_string();
+        self.with_conn(move |conn| {
+            let comments = list_approved_oldest_on_conn(conn, &path, limit, after)?;
+            let total = count_approved_on_conn(conn, &path)?;
+            let ids: Vec<i64> = comments.iter().map(|c| c.id).collect();
+            let counts = super::reactions::reaction_counts_on_conn(conn, &ids)?;
+            Ok((comments, total, counts))
         })
         .await
     }
@@ -76,27 +282,8 @@ impl Repo {
         before: Option<i64>,
     ) -> RepoResult<Vec<Comment>> {
         let path = path.to_string();
-        self.spawn(move |conn| {
-            let sql = format!(
-                "{} LIMIT ?3",
-                select_comments(
-                    "target_path = ?1 AND status = 'approved' AND (?2 IS NULL OR id < ?2)",
-                    "id DESC",
-                )
-            );
-            let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
-
-            let rows = stmt
-                .query_map(params![path, before, limit], row_to_comment)
-                .map_err(RepoError::from)?;
-
-            let mut comments = Vec::new();
-            for row in rows {
-                comments.push(row.map_err(RepoError::from)?);
-            }
-            Ok(comments)
-        })
-        .await
+        self.spawn(move |conn| list_approved_on_conn(conn, &path, limit, before))
+            .await
     }
 
     /// List approved comments for a path, oldest first (ascending id order).
@@ -109,27 +296,8 @@ impl Repo {
         after: Option<i64>,
     ) -> RepoResult<Vec<Comment>> {
         let path = path.to_string();
-        self.spawn(move |conn| {
-            let sql = format!(
-                "{} LIMIT ?3",
-                select_comments(
-                    "target_path = ?1 AND status = 'approved' AND (?2 IS NULL OR id > ?2)",
-                    "id ASC",
-                )
-            );
-            let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
-
-            let rows = stmt
-                .query_map(params![path, after, limit], row_to_comment)
-                .map_err(RepoError::from)?;
-
-            let mut comments = Vec::new();
-            for row in rows {
-                comments.push(row.map_err(RepoError::from)?);
-            }
-            Ok(comments)
-        })
-        .await
+        self.spawn(move |conn| list_approved_oldest_on_conn(conn, &path, limit, after))
+            .await
     }
 
     /// List approved comments across ALL paths, newest first (global feed).
@@ -191,15 +359,8 @@ impl Repo {
 
     pub async fn count_approved(&self, path: &str) -> RepoResult<i64> {
         let path = path.to_string();
-        self.spawn(move |conn| {
-            conn.query_row(
-                "SELECT count(*) FROM comments WHERE target_path = ?1 AND status = 'approved'",
-                params![path],
-                |row| row.get(0),
-            )
-            .map_err(RepoError::from)
-        })
-        .await
+        self.spawn(move |conn| count_approved_on_conn(conn, &path))
+            .await
     }
 
     pub async fn list_pending(
@@ -342,19 +503,8 @@ impl Repo {
 
     pub async fn update_status(&self, id: i64, status: &str) -> RepoResult<()> {
         let status = status.to_string();
-        self.spawn(move |conn| {
-            let affected = conn
-                .execute(
-                    "UPDATE comments SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
-                    params![status, id],
-                )
-                .map_err(RepoError::from)?;
-            if affected == 0 {
-                return Err(RepoError::NotFound(format!("comment id {} not found", id)));
-            }
-            Ok(())
-        })
-        .await
+        self.spawn(move |conn| update_status_on_conn(conn, id, &status))
+            .await
     }
 
     pub async fn get_comment(&self, id: i64) -> RepoResult<Option<Comment>> {
@@ -496,31 +646,14 @@ impl Repo {
 
     pub async fn get_comment_by_source(&self, source_url: &str) -> RepoResult<Option<Comment>> {
         let source_url = source_url.to_string();
-        self.spawn(move |conn| {
-            let sql = select_comments("source_url = ?1", "id ASC");
-            conn.query_row(&sql, params![source_url], row_to_comment)
-                .optional()
-                .map_err(RepoError::from)
-        })
-        .await
+        self.spawn(move |conn| get_by_source_on_conn(conn, &source_url))
+            .await
     }
 
     /// Dump every comment (all statuses, all paths), oldest first.
     /// Used by the admin JSON export.
     pub async fn list_all_comments(&self) -> RepoResult<Vec<Comment>> {
-        self.spawn(move |conn| {
-            let sql = format!("SELECT {COMMENT_COLUMNS} FROM comments ORDER BY id ASC");
-            let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
-            let rows = stmt
-                .query_map([], row_to_comment)
-                .map_err(RepoError::from)?;
-            let mut comments = Vec::new();
-            for row in rows {
-                comments.push(row.map_err(RepoError::from)?);
-            }
-            Ok(comments)
-        })
-        .await
+        self.spawn(list_all_comments_on_conn).await
     }
 
     /// Import a full comment row, preserving its id, status, and timestamps.
@@ -575,6 +708,160 @@ impl Repo {
             Ok(())
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod t15_native_unit_tests {
+    use super::super::{NewComment, Repo};
+    use crate::db::RepoError;
+    use crate::db::pool::{create_pool, run_migrations};
+
+    fn setup() -> (Repo, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t15_native.db");
+        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        run_migrations(&pool, None).unwrap();
+        (Repo::new(pool), dir)
+    }
+
+    fn native_comment(target: &str) -> NewComment {
+        NewComment {
+            target_path: target.to_string(),
+            comment_type: "native".to_string(),
+            source_url: None,
+            author_name: "T15".to_string(),
+            author_url: None,
+            author_avatar: None,
+            content: "native unit".to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
+            submitter_ip_hash: None,
+            content_hash: None,
+        }
+    }
+
+    fn urls(n: usize) -> Vec<(String, String, String)> {
+        (0..n)
+            .map(|i| {
+                (
+                    format!("https://n15.example/p{i}"),
+                    "n15.example".to_string(),
+                    format!("hn15-{i}"),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn url_constraint_skips_row_with_log_but_commits_comment() {
+        // Decision under test: a URL row that is itself invalid (Constraint)
+        // is skipped with a warn log; the comment still commits. An empty
+        // URL can never satisfy a moderation-lookup index, so it classifies
+        // as Constraint without touching storage health.
+        let (repo, _dir) = setup();
+        let id = repo
+            .create_native_comment(
+                native_comment("/t15-url-skip"),
+                false,
+                vec![
+                    (
+                        "https://ok.example/".to_string(),
+                        "ok.example".to_string(),
+                        "hok".to_string(),
+                    ),
+                    ("".to_string(), "".to_string(), "".to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(repo.get_comment(id).await.unwrap().is_some());
+        let stored = repo.get_comment_urls(id).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].url, "https://ok.example/");
+    }
+
+    #[tokio::test]
+    async fn url_error_policy_fails_txn_on_busy_io_other() {
+        // Decision under test: storage-health failures (Busy/Io/Other) abort
+        // the whole comment transaction — never a torn comment-without-URLs.
+        assert!(matches!(
+            super::super::url_error_policy(&RepoError::Busy("locked".to_string())),
+            super::super::UrlErrorAction::Abort
+        ));
+        assert!(matches!(
+            super::super::url_error_policy(&RepoError::Io("disk".to_string())),
+            super::super::UrlErrorAction::Abort
+        ));
+        assert!(matches!(
+            super::super::url_error_policy(&RepoError::Other("corrupt".to_string())),
+            super::super::UrlErrorAction::Abort
+        ));
+        assert!(matches!(
+            super::super::url_error_policy(&RepoError::Constraint("bad row".to_string())),
+            super::super::UrlErrorAction::SkipRow
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_comment_type_fails_whole_unit_with_nothing_committed() {
+        let (repo, _dir) = setup();
+        let mut bad = native_comment("/t15-bad-type");
+        bad.comment_type = "bogus".to_string();
+        let err = repo
+            .create_native_comment(bad, false, urls(2))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RepoError::Constraint(_)));
+        let pending = repo.list_pending(100, None, None).await.unwrap();
+        assert!(pending.iter().all(|c| c.target_path != "/t15-bad-type"));
+    }
+
+    #[tokio::test]
+    async fn approved_page_batches_list_count_and_counts_in_one_acquire() {
+        let (repo, _dir) = setup();
+        for i in 0..3 {
+            let mut c = native_comment("/t15-page");
+            c.author_name = format!("P{i}");
+            let id = repo.insert_comment(c).await.unwrap();
+            repo.update_status(id, "approved").await.unwrap();
+        }
+        let ids: Vec<i64> = repo
+            .list_approved("/t15-page", 10, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        let (r0, _) = repo.upsert_reaction(ids[0], "👍", "h:t15p").await.unwrap();
+        repo.update_reaction_status(r0, "approved").await.unwrap();
+
+        repo.reset_acquire_count();
+        let (comments, total, counts) = repo
+            .list_approved_page("/t15-page", 10, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.acquire_count(),
+            1,
+            "list+count+reaction_counts must share ONE connection"
+        );
+        assert_eq!(comments.len(), 3);
+        assert_eq!(total, 3);
+        assert_eq!(counts.get(&ids[0]).and_then(|m| m.get("👍")), Some(&1));
+
+        repo.reset_acquire_count();
+        let (comments, total, _) = repo
+            .list_approved_oldest_page("/t15-page", 2, None)
+            .await
+            .unwrap();
+        assert_eq!(repo.acquire_count(), 1);
+        assert_eq!(comments.len(), 2);
+        assert!(comments[0].id < comments[1].id);
+        assert_eq!(total, 3);
     }
 }
 

@@ -90,25 +90,22 @@ pub async fn list_comments(
         }
     };
 
-    let comments = match order {
+    // List + total + approved reaction counts share ONE connection (T15
+    // read batch): one acquire per request instead of three.
+    let (comments, total, reaction_counts) = match order {
         SortOrder::Newest => {
             state
                 .repo
-                .list_approved(&target_path, limit, query.before)
+                .list_approved_page(&target_path, limit, query.before)
                 .await?
         }
         SortOrder::Oldest => {
             state
                 .repo
-                .list_approved_oldest(&target_path, limit, query.after)
+                .list_approved_oldest_page(&target_path, limit, query.after)
                 .await?
         }
     };
-    let total = state.repo.count_approved(&target_path).await?;
-
-    // Approved reaction counts for the returned comments, one query.
-    let comment_ids: Vec<i64> = comments.iter().map(|c| c.id).collect();
-    let reaction_counts = state.repo.reaction_counts(&comment_ids).await?;
 
     let comments: Vec<CommentJson> = comments
         .into_iter()

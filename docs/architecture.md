@@ -220,6 +220,24 @@ four render the same message and HTTP status as before; the type exists so
 restore skip-and-count (T17) and transactional retries (T15) can branch on
 it structurally instead of matching message strings.
 
+Related writes share one pooled connection and one `BEGIN IMMEDIATE`
+transaction through `Repo::with_conn` (caller-owned statements, one acquire)
+and `Repo::with_tx` (the same wrapped in an immediate transaction; contention
+surfaces as `Busy` for backoff retry, never a hang). Native comment store
+(insert plus auto-approve status plus extracted-URL rows), webmention store
+(upsert plus ledger row), and gone handling (ledger `gone` plus comment
+deletion) each commit atomically: a mid-unit failure rolls everything back.
+An invalid URL row (empty fields, `Constraint`) is skipped with a warn log
+while the comment still commits; `Busy`/`Io`/`Other` abort the whole unit.
+Reaction approval is a compare-and-swap on the seen emoji
+(`WHERE id = ? AND status = 'pending' AND reaction = ?`), so an emoji change
+racing an approval leaves the new emoji pending instead of approving it
+sight-unseen. The CAS is repo-ready (`approve_reaction_cas`); handler wiring
+lands in T16 — the admin approve path still uses the blind status update. The admin export reads all five tables on one connection in one
+deferred read transaction (a single WAL snapshot); the public read API batches
+list plus total plus reaction counts per request the same way. Import stays
+per-row (T17 owns restore).
+
 ## Middleware and route scope
 
 The router is assembled from route groups (`src/http/routes.rs`), each with

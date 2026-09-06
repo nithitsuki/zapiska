@@ -291,6 +291,10 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
   http://127.0.0.1:3000/api/admin/export > backup.json
 ```
 
+The export reads all five tables in one transaction on one connection — a
+single WAL snapshot — so it stays consistent while traffic is live: a comment
+created mid-export cannot appear in only some of the arrays.
+
 The export includes comments, webmention state, extracted URLs, GitHub
 profiles, reactions, and an `ip_hash_salted` flag recording whether
 `IP_HASH_SECRET` was set on the exporting server.

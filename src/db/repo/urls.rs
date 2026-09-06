@@ -3,6 +3,34 @@ use serde::{Deserialize, Serialize};
 
 use super::{Repo, RepoError, RepoResult};
 
+/// Single extracted-URL row on the caller's connection (T15 units).
+pub(crate) fn insert_url_on_conn(
+    conn: &rusqlite::Connection,
+    comment_id: i64,
+    url: &str,
+    domain: &str,
+    url_hash: &str,
+) -> RepoResult<()> {
+    conn.execute(
+        "INSERT INTO comment_urls (comment_id, url, domain, url_hash) VALUES (?1, ?2, ?3, ?4)",
+        params![comment_id, url, domain, url_hash],
+    )
+    .map_err(RepoError::from)?;
+    Ok(())
+}
+
+/// All URL rows for a comment on the caller's connection.
+pub(crate) fn insert_urls_on_conn(
+    conn: &rusqlite::Connection,
+    comment_id: i64,
+    urls: &[(String, String, String)],
+) -> RepoResult<()> {
+    for (url, domain, url_hash) in urls {
+        insert_url_on_conn(conn, comment_id, url, domain, url_hash)?;
+    }
+    Ok(())
+}
+
 /// An extracted URL from a comment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommentUrl {
@@ -34,6 +62,29 @@ pub struct UrlCommentRef {
     pub created_at: String,
 }
 
+/// Every extracted URL on the caller's connection (export snapshot).
+pub(crate) fn list_all_urls_on_conn(conn: &rusqlite::Connection) -> RepoResult<Vec<CommentUrl>> {
+    let mut stmt = conn
+        .prepare("SELECT id, comment_id, url, domain, url_hash FROM comment_urls ORDER BY id")
+        .map_err(RepoError::from)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CommentUrl {
+                id: row.get(0)?,
+                comment_id: row.get(1)?,
+                url: row.get(2)?,
+                domain: row.get(3)?,
+                url_hash: row.get(4)?,
+            })
+        })
+        .map_err(RepoError::from)?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(RepoError::from)?);
+    }
+    Ok(result)
+}
+
 impl Repo {
     /// Insert extracted URLs for a comment.
     pub async fn insert_urls(
@@ -41,17 +92,8 @@ impl Repo {
         comment_id: i64,
         urls: Vec<(String, String, String)>,
     ) -> RepoResult<()> {
-        self.spawn(move |conn| {
-            for (url, domain, url_hash) in &urls {
-                conn.execute(
-                    "INSERT INTO comment_urls (comment_id, url, domain, url_hash) VALUES (?1, ?2, ?3, ?4)",
-                    params![comment_id, url, domain, url_hash],
-                )
-                .map_err(RepoError::from)?;
-            }
-            Ok(())
-        })
-        .await
+        self.spawn(move |conn| insert_urls_on_conn(conn, comment_id, &urls))
+            .await
     }
 
     /// Get all URLs for a specific comment.
@@ -184,30 +226,7 @@ impl Repo {
 
     /// Dump every extracted URL (admin JSON export).
     pub async fn list_all_comment_urls(&self) -> RepoResult<Vec<CommentUrl>> {
-        self.spawn(move |conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, comment_id, url, domain, url_hash FROM comment_urls ORDER BY id",
-                )
-                .map_err(RepoError::from)?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(CommentUrl {
-                        id: row.get(0)?,
-                        comment_id: row.get(1)?,
-                        url: row.get(2)?,
-                        domain: row.get(3)?,
-                        url_hash: row.get(4)?,
-                    })
-                })
-                .map_err(RepoError::from)?;
-            let mut result = Vec::new();
-            for row in rows {
-                result.push(row.map_err(RepoError::from)?);
-            }
-            Ok(result)
-        })
-        .await
+        self.spawn(list_all_urls_on_conn).await
     }
 
     /// Remove all URL rows for a comment (used before re-importing them so

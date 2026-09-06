@@ -207,43 +207,41 @@ pub async fn create_comment(
         (None, None)
     };
 
-    // 7. Store. Clone values needed for the webhook payload later.
+    // 7. Store comment + auto-approve status + extracted URLs in ONE
+    // transaction (T15 unit of work): a storage failure rolls everything
+    // back instead of leaving a torn comment-without-URLs. Clone values
+    // needed for the webhook payload later.
     let hook_content = content.clone();
     let hook_name = resolved_name.clone();
     let hook_url = resolved_url.clone();
     let hook_avatar = resolved_avatar.clone();
     let hook_ip = submitter_ip.clone();
     let hook_content_hash = content_hash.clone();
+    let extracted_urls = sanitize::extract_urls(&form.content);
+    let auto_approve = state.config.default_comment_status == "approved";
     let new_id = state
         .repo
-        .insert_comment(NewComment {
-            target_path: target_path.clone(),
-            comment_type: "native".to_string(),
-            source_url: None,
-            author_name: resolved_name,
-            author_url: resolved_url,
-            author_avatar: resolved_avatar,
-            content,
-            parent_id,
-            depth,
-            honeypot: is_honeypot,
-            delete_token: Some(delete_token),
-            submitter_ip,
-            submitter_ip_hash,
-            content_hash,
-        })
+        .create_native_comment(
+            NewComment {
+                target_path: target_path.clone(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: resolved_name,
+                author_url: resolved_url,
+                author_avatar: resolved_avatar,
+                content,
+                parent_id,
+                depth,
+                honeypot: is_honeypot,
+                delete_token: Some(delete_token),
+                submitter_ip,
+                submitter_ip_hash,
+                content_hash,
+            },
+            auto_approve,
+            extracted_urls,
+        )
         .await?;
-
-    // 9. Optionally auto-approve (allowed-by-default moderation).
-    if state.config.default_comment_status == "approved" {
-        let _ = state.repo.update_status(new_id, "approved").await;
-    }
-
-    // 9. Extract and store URLs from content for cross-comment tracking.
-    let urls = sanitize::extract_urls(&form.content);
-    if !urls.is_empty() {
-        let _ = state.repo.insert_urls(new_id, urls).await;
-    }
 
     // 9.5 Notify admin channels (Telegram / Slack / Discord) about the new
     // comment. Batched into digests per NOTIFY_BATCH_SECS; fire-and-forget —

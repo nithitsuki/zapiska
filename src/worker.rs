@@ -170,7 +170,7 @@ pub async fn process_job_with_timeout(
     let (backlink_ok, parsed): (bool, Option<ParsedMention>) = match outcome {
         Ok(found) => found,
         Err(FetchError::Gone(_)) => {
-            handle_gone_source(job, repo).await;
+            handle_gone_source(job, repo).await?;
             return Ok(());
         }
         Err(e) => return Err(WorkerError::from(e)),
@@ -205,27 +205,35 @@ pub async fn process_job_with_timeout(
         "Mentioned this page.".to_string()
     };
 
-    // 7. Upsert into comments table. Webmentions are always top-level.
+    // 7. Upsert into comments table + record webmention_seen as alive in
+    // ONE transaction (T15 unit of work): either both land or neither does.
     //    Only the *first* sighting of a source is a new comment — later pings
     //    are updates and shouldn't spam the admin notification channels.
     let is_new = repo.get_comment_by_source(&job.source).await?.is_none();
     let comment_id = repo
-        .upsert_by_source(NewComment {
-            target_path,
-            comment_type: "webmention".to_string(),
-            source_url: Some(job.source.clone()),
-            author_name: final_name,
-            author_url: author_url.clone(),
-            author_avatar: final_avatar,
-            content,
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            submitter_ip_hash: None,
-            content_hash: None,
-        })
+        .upsert_webmention_with_seen(
+            NewComment {
+                target_path,
+                comment_type: "webmention".to_string(),
+                source_url: Some(job.source.clone()),
+                author_name: final_name,
+                author_url: author_url.clone(),
+                author_avatar: final_avatar,
+                content,
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            },
+            NewWebmentionSeen {
+                source: job.source.clone(),
+                target: job.target.clone(),
+                last_status: "alive".to_string(),
+            },
+        )
         .await?;
 
     // 7.5 Notify admin channels about the new mention (batched digests).
@@ -246,14 +254,6 @@ pub async fn process_job_with_timeout(
             );
         }
     }
-
-    // 8. Record in webmention_seen as alive.
-    repo.upsert_webmention_seen(NewWebmentionSeen {
-        source: job.source.clone(),
-        target: job.target.clone(),
-        last_status: "alive".to_string(),
-    })
-    .await?;
 
     tracing::info!(id = comment_id, source = %job.source, "webmention processed");
     Ok(())
@@ -336,19 +336,14 @@ fn derive_target_path(target: &str, target_origin: &str) -> Result<String, Worke
 }
 
 /// Handle a 410 Gone source: mark as gone in webmention_seen and delete the comment.
-async fn handle_gone_source(job: &WebmentionJob, repo: &Repo) {
-    let _ = repo
-        .upsert_webmention_seen(NewWebmentionSeen {
-            source: job.source.clone(),
-            target: job.target.clone(),
-            last_status: "gone".to_string(),
-        })
-        .await;
-    if let Ok(Some(comment)) = repo.get_comment_by_source(&job.source).await
-        && (comment.status == "approved" || comment.status == "pending")
-    {
-        let _ = repo.update_status(comment.id, "deleted").await;
-    }
+/// One transaction (T15 unit of work): the ledger row and the deletion commit
+/// together, so a crash cannot leave `gone` recorded with the comment alive.
+/// Failures return to the worker loop's warn path (never `let _` here: a
+/// silent gone-unit failure would leave a live comment for a dead source).
+async fn handle_gone_source(job: &WebmentionJob, repo: &Repo) -> Result<(), WorkerError> {
+    repo.mark_webmention_gone(&job.source, &job.target)
+        .await
+        .map_err(WorkerError::from)
 }
 
 #[cfg(test)]
@@ -418,5 +413,53 @@ mod tests {
             }
             other => panic!("expected timeout Http error, got: {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn gone_unit_failure_surfaces_to_the_worker_warn_path() {
+        // Minor-3: a failing mark_webmention_gone must be OBSERVABLE (Err to
+        // the worker loop's warn path), not swallowed by handle_gone_source.
+        // The comments half of the gone unit is broken (table dropped) while
+        // the ledger still reads fine, so only the gone unit itself fails.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(410))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::pool::create_pool(&dir.path().join("gone-err.db").to_string_lossy())
+            .unwrap();
+        crate::db::pool::run_migrations(&pool, None).unwrap();
+        pool.get()
+            .unwrap()
+            .execute_batch("DROP TABLE comments;")
+            .unwrap();
+        let repo = Repo::new(pool);
+        let github: Arc<dyn GitHubLookup> = Arc::new(crate::github::StubGitHub);
+        let notifier = Arc::new(NotificationBatcher::new(&crate::config::Config::default()));
+        let client = Client::builder().build().unwrap();
+        let job = WebmentionJob {
+            source: format!("{}/gone-post", server.uri()),
+            target: "https://nithitsuki.com/blog/wm-gone".to_string(),
+        };
+
+        let err = process_job_with_timeout(
+            &job,
+            &repo,
+            &client,
+            &github,
+            "https://nithitsuki.com",
+            2000,
+            true,
+            Duration::from_secs(5),
+            &notifier,
+        )
+        .await
+        .expect_err("a broken gone unit must surface, not return Ok");
+        assert!(
+            matches!(err, WorkerError::Repo(_)),
+            "expected the repo failure, got: {err}"
+        );
     }
 }

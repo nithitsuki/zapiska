@@ -11,8 +11,8 @@ use axum::extract::State;
 use serde::{Deserialize, Serialize};
 
 use crate::db::repo::{
-    Comment, CommentReaction, CommentUrl, GithubProfile, NewGithubProfile, NewWebmentionSeen,
-    WebmentionSeen,
+    Comment, CommentReaction, CommentUrl, ExportSnapshot, GithubProfile, NewGithubProfile,
+    NewWebmentionSeen, WebmentionSeen,
 };
 use crate::error::AppError;
 use crate::sanitize;
@@ -71,12 +71,16 @@ pub struct ImportResponse {
 }
 
 /// GET /api/admin/export — full JSON dump (backup/migration source).
+/// The five tables come from ONE connection in one read transaction
+/// (T15 unit of work), so the dump is a single WAL snapshot, not five.
 pub async fn export(State(state): State<AppState>) -> Result<Json<ExportFile>, AppError> {
-    let comments = state.repo.list_all_comments().await?;
-    let webmention_seen = state.repo.list_all_webmention_seen().await?;
-    let comment_urls = state.repo.list_all_comment_urls().await?;
-    let github_profiles = state.repo.list_all_github_profiles().await?;
-    let comment_reactions = state.repo.list_all_comment_reactions().await?;
+    let ExportSnapshot {
+        comments,
+        seen: webmention_seen,
+        urls: comment_urls,
+        profiles: github_profiles,
+        reactions: comment_reactions,
+    } = state.repo.export_snapshot().await?;
 
     Ok(Json(ExportFile {
         version: EXPORT_VERSION,
