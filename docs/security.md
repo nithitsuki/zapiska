@@ -43,8 +43,18 @@ IPv4-mapped IPv6 ranges.
 
 The fetcher permits HTTP and HTTPS with a ten second connection timeout.
 Webmention fetches use the configured `FETCH_TIMEOUT_MS` (threaded from the
-worker spawn args into every job); author-page avatar fetches use the 4 s
+worker spawn args through the processor into fetcher construction — the
+processor owns the timeout end to end, and the dead `from_config`
+constructor is gone); author-page avatar fetches use the 4 s
 default, matching the default configuration.
+
+Fetch lifecycle (grace, not just limits): a re-ping after a `gone` ledger
+row always re-fetches and re-verifies — gone→alive resurrection is a fetch
+away, never an early return. One backlink-less 200 flips the ledger but
+deletes nothing; only a second consecutive observation (another miss or a
+410) deletes, and then every comment the source owns (all target paths)
+goes through the moderation machine with one event each. A restored source
+comes back as `pending` through the same machine (deleted→pending fires).
 
 Do not treat the fetcher as a complete defence against DNS rebinding:
 resolution happens before connect without address pinning, so a hostile DNS

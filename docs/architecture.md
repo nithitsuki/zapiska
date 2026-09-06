@@ -166,12 +166,27 @@ The webmention endpoint is available only with the `webmentions` feature.
 4. The handler sends the job to a bounded channel and returns `202`.
 5. SafeFetcher checks each hop's hostname and resolved IP addresses, with a
    5-hop redirect cap and a 1 MiB streaming body cap.
-6. The worker fetches the source through SafeFetcher (never the shared
-   HTTP client, which serves operator-configured endpoints only).
-7. The worker checks that the source links to the target.
-8. The worker parses h-entry and h-card data.
-9. The worker upserts the comment by source URL and target path.
-10. The worker records the source state in `webmention_seen`.
+6. `WebmentionProcessor` (`src/worker.rs`) owns the policy behind a
+   `SourceFetcher` adapter: production wires SafeFetcher (never the shared
+   HTTP client, which serves operator-configured endpoints only), tests
+   inject a canned mock — the old `allow_loopback` production parameter is
+   gone. The spawn loop is a thin drain over `process`.
+7. The processor re-fetches the source in EVERY ledger state
+   (`unknown`/`alive`/`gone`): a re-ping after `gone` re-verifies, so
+   gone→alive resurrection works.
+8. The processor checks that the source links to the target, then parses
+   h-entry and h-card data from the single fetched parse.
+9. The processor upserts the comment by (source URL, target path) plus the
+   ledger row in one commit: updates keep their moderation status while
+   content and `content_hash` (computed by the worker over the raw
+   e-content) refresh; `is_new` notifications key on the pair, so a second
+   page mentioned by the same source notifies on its own.
+10. A 410 (or a second consecutive backlink-less fetch) deletes EVERY
+    comment the source owns, across all target paths, through the T16
+    moderation machine (one `comment.status_changed` event per deleted
+    comment); a restored backlink brings the comment back as `pending`
+    through the same machine (deleted→pending fires, clearing tokens per
+    B10).
 
 The queue capacity is `WORKER_BACKLOG`, with a default of `64`. A full queue
 returns `503`. A source update keeps the existing moderation status.
@@ -182,7 +197,16 @@ resolution, so named-host and trailing-dot redirects into private networks
 are refused. Redirects are capped at five hops (fail-closed) and bodies at
 1 MiB streamed; the fetched page is parsed exactly once and shared by the
 backlink check and the h-entry parse. The backlink match ignores URL
-fragments but treats query, path case, and trailing slash as significant.
+fragments but treats query, path case, and trailing slash as significant —
+deliberately no utm-stripping (a tracking-param allowlist drifts and can
+be gamed; the pinger controls both sides, so exactness costs nothing).
+
+The seen ledger (`webmention_seen`) is a per-pair state machine with
+grace: the `gone` row is the first-miss memory, so one backlink-less 200
+never deletes — deletion waits for the confirmed second observation
+(`MISSES_TO_TOMBSTONE = 2`, a code constant pinned by the blip/cycle
+tests). `Repo::record_seen_alive` / `record_seen_gone` own the writes;
+the processor owns the transitions.
 
 ## Database
 

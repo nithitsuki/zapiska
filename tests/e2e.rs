@@ -241,27 +241,32 @@ async fn e2e_webmention_full_lifecycle() {
         .unwrap();
     assert_eq!(resp.status(), 202, "webmention accepted");
 
-    // ── Manually process the job (bypassing SSRF loopback check) ─
-    // This avoids the need for the worker thread; we call process_job
-    // directly with allow_loopback=true so it can reach the wiremock.
+    // ── Manually process the job (bypassing the SSRF loopback check) ─
+    // The worker-level `allow_loopback` bool is gone: this test injects a
+    // loopback-permitting fetcher explicitly at the FETCHER level (T20).
     let job = zapiska::worker::WebmentionJob {
         source: source_url.clone(),
         target: "https://nithitsuki.com/blog/e2e-wm".to_string(),
     };
     let http_client = reqwest::Client::builder().build().unwrap();
     let github: Arc<dyn zapiska::github::GitHubLookup> = Arc::new(zapiska::github::StubGitHub);
-    zapiska::worker::process_job(
-        &job,
-        &state.repo,
-        &http_client,
-        &github,
-        "https://nithitsuki.com",
+    let fetcher: Arc<dyn zapiska::fetch::SourceFetcher> = Arc::new(
+        zapiska::fetch::SafeFetcher::new()
+            .with_allow_loopback(true)
+            .with_timeout(std::time::Duration::from_secs(5)),
+    );
+    let proc = zapiska::worker::WebmentionProcessor::with_fetcher(
+        state.repo.clone(),
+        fetcher,
+        github,
+        Arc::new(zapiska::notify::NotificationBatcher::default()),
+        http_client,
+        "https://nithitsuki.com".to_string(),
         state.config.max_content_len,
-        true,
-        &Arc::new(zapiska::notify::NotificationBatcher::default()),
-    )
-    .await
-    .unwrap();
+        std::time::Duration::from_secs(5),
+        None,
+    );
+    proc.process(&job).await.unwrap();
 
     // ── Check it appears in the pending queue ─────────────────
     let resp = client

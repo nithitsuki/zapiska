@@ -46,6 +46,9 @@ pub const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
 /// The single SSRF-safe fetcher. Built once per call site (client + caps),
 /// then `fetch`ed through; per-hop policy lives inside [`SafeFetcher::fetch`]
 /// so callers cannot skip it.
+///
+/// Test doubles never touch this type: they implement [`SourceFetcher`] with
+/// canned responses instead of loosening the loopback check below.
 #[derive(Debug, Clone)]
 pub struct SafeFetcher {
     client: Client,
@@ -73,20 +76,6 @@ impl SafeFetcher {
         }
     }
 
-    /// Build a fetcher from server config. `allow_loopback` relaxes the SSRF
-    /// check for literal loopback addresses only (integration tests hitting
-    /// mock servers on 127.0.0.1); production callers pass `false`. Named
-    /// hosts (`localhost`, `*.internal`, trailing-dot forms) are still
-    /// resolved and checked on every hop either way.
-    pub fn from_config(config: &crate::config::Config, allow_loopback: bool) -> Self {
-        Self {
-            client: build_fetch_client(Duration::from_millis(config.fetch_timeout_ms)),
-            max_bytes: DEFAULT_MAX_BYTES,
-            max_redirects: DEFAULT_MAX_REDIRECTS,
-            allow_loopback,
-        }
-    }
-
     /// Override the total request timeout (tests, avatar fast-path).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.client = build_fetch_client(timeout);
@@ -106,7 +95,10 @@ impl SafeFetcher {
         self
     }
 
-    /// Relax the SSRF check for literal loopback addresses (test plumbing).
+    /// Relax the SSRF check for literal loopback addresses. Test-only:
+    /// never enable in production paths (the production default is deny);
+    /// exists so the fetcher's own tests and loopback-bound integration
+    /// harnesses can reach mock servers on 127.0.0.1.
     pub fn with_allow_loopback(mut self, allow_loopback: bool) -> Self {
         self.allow_loopback = allow_loopback;
         self
@@ -236,6 +228,24 @@ impl SafeFetcher {
             .await
             .map_err(|e| FetchError::Blocked(format!("{url}: {e}")))?;
         Ok(())
+    }
+}
+
+/// The fetcher seam behind [`crate::worker::WebmentionProcessor`]: the
+/// processor decides *what* to do with a fetched source, the fetcher decides
+/// *how* a URL becomes bytes. Production wires [`SafeFetcher`] (the guarded
+/// door); tests inject a canned mock with no network instead of loosening
+/// the loopback check — no boolean flips a security invariant anymore.
+#[async_trait::async_trait]
+pub trait SourceFetcher: Send + Sync {
+    /// Fetch `url` as a source page, returning the single-parse document.
+    async fn fetch_source(&self, url: &str) -> Result<FetchedDoc, FetchError>;
+}
+
+#[async_trait::async_trait]
+impl SourceFetcher for SafeFetcher {
+    async fn fetch_source(&self, url: &str) -> Result<FetchedDoc, FetchError> {
+        self.fetch_str(url).await
     }
 }
 
@@ -571,5 +581,56 @@ mod tests {
             .await
             .expect_err("hostless URL must be rejected");
         assert!(matches!(err, FetchError::NoHost(_)));
+    }
+
+    #[tokio::test]
+    async fn production_fetcher_refuses_loopback_with_no_flags() {
+        // T20 pin: the production constructor carries no loopback escape
+        // hatch (the worker-level `allow_loopback` bool is gone). Loopback
+        // is refused out of the box; only the explicit test-only
+        // `with_allow_loopback` builder relaxes it, and only for the
+        // fetcher's own tests.
+        let fetcher = SafeFetcher::new();
+        for target in ["http://127.0.0.1:9/", "http://[::1]/"] {
+            let err = fetcher
+                .fetch_str(target)
+                .await
+                .expect_err(format!("{target} must be refused").as_str());
+            assert!(
+                matches!(err, FetchError::Blocked(_)),
+                "expected Blocked for {target}, got: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_timeout_budgets_the_fetch() {
+        // G4/T20 pin, owned at the fetcher level: the timeout the processor
+        // threads from the spawn args into `with_timeout` is the budget the
+        // fetch honors. An 80 ms budget against a 1200 ms origin must fail
+        // with a timeout; with the 4 s default the same fetch would succeed.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/slow"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(1200))
+                    .set_body_string(source_html()),
+            )
+            .mount(&server)
+            .await;
+        let fetcher = SafeFetcher::new()
+            .with_allow_loopback(true)
+            .with_timeout(std::time::Duration::from_millis(80));
+        let err = fetcher
+            .fetch_str(&format!("{}/slow", server.uri()))
+            .await
+            .expect_err("80 ms budget vs 1200 ms origin must time out");
+        match err {
+            FetchError::Http { source, .. } => {
+                assert!(source.is_timeout(), "expected a timeout, got: {source}")
+            }
+            other => panic!("expected timeout Http error, got: {other}"),
+        }
     }
 }

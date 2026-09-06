@@ -81,6 +81,33 @@ impl Repo {
             .await
     }
 
+    /// Record the `(source, target)` pair as alive: the source fetched and
+    /// the backlink verified. The explicit "mark" half of the seen state
+    /// machine (the other half is [`Repo::record_seen_gone`]); the processor
+    /// owns the transitions, these own the writes.
+    pub async fn record_seen_alive(&self, source: &str, target: &str) -> RepoResult<()> {
+        self.upsert_webmention_seen(NewWebmentionSeen {
+            source: source.to_string(),
+            target: target.to_string(),
+            last_status: "alive".to_string(),
+        })
+        .await
+    }
+
+    /// Record the `(source, target)` pair as gone: a 410, or a backlink-less
+    /// fetch. This flips the ledger only — it never deletes comments by
+    /// itself. Deletion is a second, confirmed step through the moderation
+    /// machine (see the grace policy in `crate::worker`), so a single
+    /// transient miss cannot tombstone a live mention.
+    pub async fn record_seen_gone(&self, source: &str, target: &str) -> RepoResult<()> {
+        self.upsert_webmention_seen(NewWebmentionSeen {
+            source: source.to_string(),
+            target: target.to_string(),
+            last_status: "gone".to_string(),
+        })
+        .await
+    }
+
     /// Dump the whole webmention ledger (admin JSON export).
     pub async fn list_all_webmention_seen(&self) -> RepoResult<Vec<WebmentionSeen>> {
         self.spawn(list_all_seen_on_conn).await
@@ -100,36 +127,11 @@ impl Repo {
         })
         .await
     }
-
-    /// Record a 410-gone source and delete its comment in ONE
-    /// `BEGIN IMMEDIATE` commit: ledger `gone` plus `deleted` status for a
-    /// pending/approved row (idempotent when no comment exists).
-    pub async fn mark_webmention_gone(&self, source: &str, target: &str) -> RepoResult<()> {
-        let source = source.to_string();
-        let target = target.to_string();
-        self.with_tx(move |tx| {
-            upsert_seen_on_conn(
-                tx,
-                &NewWebmentionSeen {
-                    source: source.clone(),
-                    target: target.clone(),
-                    last_status: "gone".to_string(),
-                },
-            )?;
-            if let Some(comment) = super::comments::get_by_source_on_conn(tx, &source)?
-                && (comment.status == "approved" || comment.status == "pending")
-            {
-                super::comments::update_status_on_conn(tx, comment.id, "deleted")?;
-            }
-            Ok(())
-        })
-        .await
-    }
 }
 
 #[cfg(test)]
 mod t15_webmention_unit_tests {
-    use super::super::{NewComment, NewWebmentionSeen, Repo};
+    use super::super::Repo;
     use crate::db::pool::{create_pool, run_migrations};
 
     fn setup() -> (Repo, tempfile::TempDir) {
@@ -140,84 +142,38 @@ mod t15_webmention_unit_tests {
         (Repo::new(pool), dir)
     }
 
-    fn mention(source: &str, target_path: &str) -> NewComment {
-        NewComment {
-            target_path: target_path.to_string(),
-            comment_type: "webmention".to_string(),
-            source_url: Some(source.to_string()),
-            author_name: "T15".to_string(),
-            author_url: None,
-            author_avatar: None,
-            content: "mention".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            submitter_ip_hash: None,
-            content_hash: None,
-        }
-    }
-
     #[tokio::test]
-    async fn gone_marks_seen_gone_and_deletes_comment_atomically() {
+    async fn record_seen_marks_flip_alive_and_gone() {
+        // The explicit state-machine writes: alive on verified fetch, gone
+        // on 410/miss, alive again on resurrection — gone→alive is
+        // representable at the storage level.
         let (repo, _dir) = setup();
-        repo.upsert_webmention_with_seen(
-            mention("https://src.example/gone", "/t15-gone"),
-            NewWebmentionSeen {
-                source: "https://src.example/gone".to_string(),
-                target: "https://site.example/t15-gone".to_string(),
-                last_status: "alive".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-        let id = repo
-            .get_comment_by_source("https://src.example/gone")
-            .await
-            .unwrap()
-            .unwrap()
-            .id;
-        repo.update_status(id, "approved").await.unwrap();
-
-        repo.reset_acquire_count();
-        repo.mark_webmention_gone("https://src.example/gone", "https://site.example/t15-gone")
+        repo.record_seen_alive("https://src.example/s", "https://site.example/t")
             .await
             .unwrap();
-        assert_eq!(
-            repo.acquire_count(),
-            1,
-            "seen+delete must share ONE connection"
-        );
         let seen = repo
-            .get_webmention_seen("https://src.example/gone", "https://site.example/t15-gone")
+            .get_webmention_seen("https://src.example/s", "https://site.example/t")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(seen.last_status, "alive");
+        repo.record_seen_gone("https://src.example/s", "https://site.example/t")
+            .await
+            .unwrap();
+        let seen = repo
+            .get_webmention_seen("https://src.example/s", "https://site.example/t")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(seen.last_status, "gone");
-        assert_eq!(
-            repo.get_comment(id).await.unwrap().unwrap().status,
-            "deleted"
-        );
-    }
-
-    #[tokio::test]
-    async fn gone_is_idempotent_without_a_comment_row() {
-        let (repo, _dir) = setup();
-        repo.mark_webmention_gone(
-            "https://src.example/nothing",
-            "https://site.example/nowhere",
-        )
-        .await
-        .unwrap();
+        repo.record_seen_alive("https://src.example/s", "https://site.example/t")
+            .await
+            .unwrap();
         let seen = repo
-            .get_webmention_seen(
-                "https://src.example/nothing",
-                "https://site.example/nowhere",
-            )
+            .get_webmention_seen("https://src.example/s", "https://site.example/t")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(seen.last_status, "gone");
+        assert_eq!(seen.last_status, "alive");
     }
 }

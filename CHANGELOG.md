@@ -66,6 +66,21 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Fixed
 
+- Webmention gone/resurrection lifecycle: a re-ping after `gone`
+  re-fetches and re-verifies instead of deleting blindly — gone→alive is
+  representable again (a restored backlink brings the comment back as
+  `pending` through the moderation machine: deleted→pending fires,
+  clearing tokens per B10). A single
+  backlink-less 200 flips the ledger but keeps the comment; deletion needs
+  a second consecutive observation and then removes EVERY comment the
+  source owns (all target paths) through the moderation machine, firing one
+  `comment.status_changed` event per deleted comment. Mention updates keep
+  their status and now refresh `content_hash` (computed by the worker over
+  the raw e-content through the shared pipeline); `is_new` notifications
+  key on the (source, target) pair, so a second page mentioned by the same
+  source notifies on its own. Backlink matching stays fragment-ignored /
+  query-significant / case-sensitive-path / significant-trailing-slash
+  (deliberately no utm-stripping).
 - Notification batching pins the fixed-window deadline
   (`opened_at + NOTIFY_BATCH_SECS`) with clock-driven tests — the old
   per-push timers were effectively fixed-window too (the first timer won),
@@ -324,6 +339,14 @@ All notable changes to zapiska are documented here. The format follows
   `subtle`). Consumers recompute, compare in constant time, and enforce a
   ±300 s replay window; a secret-holding consumer rejects unsigned or
   tampered bodies (see `docs/moderation-engine.md` for the verify sketch).
+- Webmention processing is now a `WebmentionProcessor` behind a
+  `SourceFetcher` adapter (`src/worker.rs` + `src/fetch.rs`): the spawn loop
+  is a thin drain, production fetches go through `SafeFetcher` built with
+  the configured `FETCH_TIMEOUT_MS` (the dead `from_config` constructor is
+  gone), and tests inject a canned mock with no network. The old
+  `process_job` / `process_job_with_timeout` functions and the
+  `allow_loopback` production parameter are gone: nothing flips the SSRF
+  check from the call side anymore.
 
 ## [0.2.0] - 2026-08-07
 

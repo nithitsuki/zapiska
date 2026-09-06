@@ -72,13 +72,18 @@ pub fn has_backlink(doc: &Html, target: &str) -> bool {
 }
 
 /// Backlink normalization DECISION (review finding 04/#14, pinned by tests
-/// below): compare URLs with fragments stripped, everything else exact.
+/// below; re-affirmed by T20, which leaves utm-leniency OUT deliberately):
+/// compare URLs with fragments stripped, everything else exact.
 ///
 /// - Fragment ignored: `<a href="https://site/post#fn">` links to
 ///   `https://site/post` — fragments never change the fetched resource, so a
 ///   fragment variant is unambiguously the same mention.
 /// - Query significant: `?utm=…` changes the server response, so it must
 ///   match exactly (no false-positive mentions from parameterized URLs).
+///   T20 explicitly rejects utm-stripping: a tracking-param allowlist
+///   (`utm_*`, `fbclid`, `gclid`, …) drifts, can be gamed into false
+///   positives, and buys nothing — the pinger controls both the link and
+///   the pinged target, so exactness costs honest pingers nothing.
 /// - Case: scheme/host compare case-insensitively (URL serialization
 ///   normalizes them); path stays case-sensitive (servers may distinguish).
 /// - Trailing slash significant: `/post` and `/post/` are different
@@ -323,6 +328,65 @@ mod tests {
         assert!(!has_backlink(
             &doc(html),
             "https://nithitsuki.com/blog/hello"
+        ));
+    }
+
+    #[test]
+    fn backlink_normalization_policy_table() {
+        // T20 decision pin, one row per policy axis: fragment ignored,
+        // query/case-of-path/trailing-slash significant. Changing any cell
+        // is a deliberate policy change, not a refactor accident.
+        let target = "https://nithitsuki.com/blog/hello";
+        let cases = [
+            // (found href, expected match, why)
+            ("https://nithitsuki.com/blog/hello", true, "exact"),
+            (
+                "https://nithitsuki.com/blog/hello#fn1",
+                true,
+                "fragment on link",
+            ),
+            ("/blog/hello", true, "relative resolves"),
+            (
+                "https://nithitsuki.com/blog/hello?utm_source=x",
+                false,
+                "query (even utm) significant",
+            ),
+            (
+                "https://nithitsuki.com/blog/hello?a=b",
+                false,
+                "query mismatch",
+            ),
+            (
+                "HTTPS://NITHITSUKI.COM/blog/hello",
+                true,
+                "scheme/host case-insensitive",
+            ),
+            (
+                "https://nithitsuki.com/blog/Hello",
+                false,
+                "path case-sensitive",
+            ),
+            (
+                "https://nithitsuki.com/blog/hello/",
+                false,
+                "trailing slash significant",
+            ),
+            ("https://nithitsuki.com/blog/other", false, "different path"),
+        ];
+        for (href, expected, why) in cases {
+            let html = format!(r#"<html><body><a href="{href}">link</a></body></html>"#);
+            assert_eq!(
+                has_backlink(&doc(&html), target),
+                expected,
+                "href {href} ({why})"
+            );
+        }
+        // Fragment on the TARGET side is ignored symmetrically.
+        let html =
+            r#"<html><body><a href="https://nithitsuki.com/blog/hello">link</a></body></html>"#;
+        assert!(has_backlink(
+            &doc(html),
+            "https://nithitsuki.com/blog/hello#fn1"
         ));
     }
 

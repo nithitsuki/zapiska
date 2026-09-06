@@ -295,22 +295,44 @@ The handler:
 4. Queues the job.
 5. Returns `202`.
 
-The worker:
+The worker (`WebmentionProcessor`) owns webmention policy behind a
+`SourceFetcher` adapter (production: `SafeFetcher`; tests: a canned mock
+with no network):
 
-1. Checks the source host and resolved IP values.
-2. Fetches the source through the shared client.
-3. Checks for a link to the target.
-4. Parses h-entry and h-card data.
-5. Sanitizes the selected content.
-6. Upserts the comment by source and target path.
-7. Records the result in `webmention_seen`.
+1. Derives the target path, rejecting origin mismatches.
+2. Reads the `(source, target)` ledger row (`unknown` / `alive` / `gone`).
+3. Fetches the source in EVERY ledger state — a re-ping after `gone`
+   re-fetches and re-verifies, so gone→alive is representable.
+4. Checks for a link to the target (fragment ignored; query, path case,
+   and trailing slash significant).
+5. Parses h-entry and h-card data from the single fetched parse.
+6. Sanitizes the content; computes the content hash over the raw e-content
+   through the shared content pipeline.
+7. Upserts the comment by (source URL, target path): an update keeps its
+   moderation status while content and hash refresh.
+8. Records the result in `webmention_seen` (`alive`).
+
+Grace: a single backlink-less 200 flips the ledger to `gone` but keeps the
+comment; deletion needs a second consecutive observation (another miss or a
+410). A 410 (or a confirmed second miss) deletes EVERY comment the source
+owns — all target paths — through the moderation machine, firing one
+`comment.status_changed` event per deleted comment.
+
+Resurrection: when a gone source serves the backlink again, the comment is
+restored to `pending` through the moderation machine (deleted→pending
+fires, clearing tokens per B10). Only the first sighting of a pair
+notifies, keyed on (source, target): one source mentioning two pages
+stores two comments and sends two notifications.
 
 The worker uses a bounded queue. A full queue returns `503`.
 The worker stores webmentions as top-level comments.
 
-The shared client permits HTTP and HTTPS. It uses the configured request
-timeout and a ten second connection timeout. The redirect policy checks hosts
-and literal IP values. It does not set a redirect count.
+SafeFetcher permits HTTP and HTTPS with the configured `FETCH_TIMEOUT_MS`
+(threaded from the worker spawn args through the processor into fetcher
+construction) and a ten second connection timeout. Every redirect target
+is resolved and re-checked with a fresh resolution (5-hop cap,
+fail-closed); bodies are capped at 1 MiB while streaming and parsed
+exactly once.
 
 ## Public read API
 

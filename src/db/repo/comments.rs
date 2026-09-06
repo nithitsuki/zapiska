@@ -53,6 +53,7 @@ pub(crate) fn upsert_by_source_on_conn(
              author_url = excluded.author_url,
              author_avatar = excluded.author_avatar,
              content = excluded.content,
+             content_hash = excluded.content_hash,
              updated_at = datetime('now')",
         params![
             input.target_path,
@@ -100,6 +101,40 @@ pub(crate) fn get_by_source_on_conn(
     conn.query_row(&sql, params![source_url], row_to_comment)
         .optional()
         .map_err(RepoError::from)
+}
+
+/// Scoped webmention read: one source URL mentions one target path, and the
+/// comments upsert conflicts on exactly that pair — so every worker read
+/// keys on the pair, never on the source alone (a source linking two pages
+/// owns two rows; the source-only read is ambiguous between them).
+pub(crate) fn get_by_source_and_target_on_conn(
+    conn: &rusqlite::Connection,
+    source_url: &str,
+    target_path: &str,
+) -> RepoResult<Option<Comment>> {
+    let sql = select_comments("source_url = ?1 AND target_path = ?2", "id ASC");
+    conn.query_row(&sql, params![source_url, target_path], row_to_comment)
+        .optional()
+        .map_err(RepoError::from)
+}
+
+/// Every comment row a source URL owns, across all target paths. The gone
+/// path deletes all of them: a 410 proves the *source* is dead, which
+/// implicates every page it mentioned, not just the re-pinged pair.
+pub(crate) fn list_by_source_on_conn(
+    conn: &rusqlite::Connection,
+    source_url: &str,
+) -> RepoResult<Vec<Comment>> {
+    let sql = select_comments("source_url = ?1", "id ASC");
+    let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
+    let rows = stmt
+        .query_map(params![source_url], row_to_comment)
+        .map_err(RepoError::from)?;
+    let mut comments = Vec::new();
+    for row in rows {
+        comments.push(row.map_err(RepoError::from)?);
+    }
+    Ok(comments)
 }
 
 pub(crate) fn list_approved_on_conn(
@@ -675,6 +710,28 @@ impl Repo {
             .await
     }
 
+    /// Scoped webmention read by the upsert pair `(source_url, target_path)`.
+    /// Worker paths must use this, never [`Repo::get_comment_by_source`]:
+    /// one source mentioning two pages owns two rows.
+    pub async fn get_comment_by_source_and_target(
+        &self,
+        source_url: &str,
+        target_path: &str,
+    ) -> RepoResult<Option<Comment>> {
+        let source_url = source_url.to_string();
+        let target_path = target_path.to_string();
+        self.spawn(move |conn| get_by_source_and_target_on_conn(conn, &source_url, &target_path))
+            .await
+    }
+
+    /// Every comment a source URL owns, across all target paths (gone-path
+    /// fan-out: a dead source implicates all its mentions).
+    pub async fn list_comments_by_source(&self, source_url: &str) -> RepoResult<Vec<Comment>> {
+        let source_url = source_url.to_string();
+        self.spawn(move |conn| list_by_source_on_conn(conn, &source_url))
+            .await
+    }
+
     /// Dump every comment (all statuses, all paths), oldest first.
     /// Used by the admin JSON export.
     pub async fn list_all_comments(&self) -> RepoResult<Vec<Comment>> {
@@ -1160,5 +1217,122 @@ mod tests {
         let rows = repo.list_all_comments().await.unwrap();
         let c = rows.iter().find(|c| c.id == child).unwrap();
         assert_full_fields(c, "/rt-all", parent, child);
+    }
+}
+
+#[cfg(test)]
+mod t20_multitarget_tests {
+    use super::super::{NewComment, Repo};
+    use crate::db::pool::{create_pool, run_migrations};
+
+    fn setup() -> (Repo, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t20_multi.db");
+        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        run_migrations(&pool, None).unwrap();
+        (Repo::new(pool), dir)
+    }
+
+    fn mention(source: &str, target_path: &str, content: &str, hash: Option<&str>) -> NewComment {
+        NewComment {
+            target_path: target_path.to_string(),
+            comment_type: "webmention".to_string(),
+            source_url: Some(source.to_string()),
+            author_name: "T20".to_string(),
+            author_url: None,
+            author_avatar: None,
+            content: content.to_string(),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
+            submitter_ip_hash: None,
+            content_hash: hash.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_read_disambiguates_one_source_two_pages() {
+        // One source mentioning two pages owns two rows: the scoped read
+        // returns each pair, and the source-only read is ambiguous by
+        // construction (it returns the first row only).
+        let (repo, _dir) = setup();
+        let id_a = repo
+            .upsert_by_source(mention("https://src.example/p", "/t20-a", "on A", None))
+            .await
+            .unwrap();
+        let id_b = repo
+            .upsert_by_source(mention("https://src.example/p", "/t20-b", "on B", None))
+            .await
+            .unwrap();
+        assert_ne!(id_a, id_b, "two pairs = two rows");
+        let a = repo
+            .get_comment_by_source_and_target("https://src.example/p", "/t20-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.id, id_a);
+        assert_eq!(a.content, "on A");
+        let b = repo
+            .get_comment_by_source_and_target("https://src.example/p", "/t20-b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(b.id, id_b);
+        assert_eq!(b.content, "on B");
+        assert!(
+            repo.get_comment_by_source_and_target("https://src.example/p", "/t20-c")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let both = repo
+            .list_comments_by_source("https://src.example/p")
+            .await
+            .unwrap();
+        assert_eq!(both.len(), 2);
+        assert!(
+            repo.list_comments_by_source("https://src.example/other")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_refreshes_content_hash_but_preserves_status() {
+        // B-17 worker contract at the storage level: the conflict update
+        // carries the freshly computed hash while the status column is
+        // untouched (the SET list names content_hash and never status).
+        let (repo, _dir) = setup();
+        let id = repo
+            .upsert_by_source(mention(
+                "https://src.example/u",
+                "/t20-u",
+                "v1",
+                Some("h:v1"),
+            ))
+            .await
+            .unwrap();
+        repo.update_status(id, "approved").await.unwrap();
+        let id2 = repo
+            .upsert_by_source(mention(
+                "https://src.example/u",
+                "/t20-u",
+                "v2",
+                Some("h:v2"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(id, id2);
+        let row = repo.get_comment(id).await.unwrap().unwrap();
+        assert_eq!(row.status, "approved", "update preserves status");
+        assert_eq!(row.content, "v2");
+        assert_eq!(
+            row.content_hash.as_deref(),
+            Some("h:v2"),
+            "update refreshes content_hash"
+        );
     }
 }
