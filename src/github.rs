@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::Deserialize;
 
 use crate::db::repo::{NewGithubProfile, Repo};
@@ -50,21 +52,30 @@ pub struct RealGitHub {
     token: Option<String>,
     /// Base URL for the GitHub API (overridable for tests).
     api_base: String,
+    /// Per-request timeout applied to every GitHub API call.
+    timeout: Duration,
 }
 
 impl RealGitHub {
     pub fn new(
         repo: Repo,
-        _timeout_ms: u64,
+        timeout_ms: u64,
         token: Option<String>,
         client: reqwest::Client,
     ) -> Self {
-        RealGitHub::with_base(repo, token, client, "https://api.github.com")
+        Self {
+            client,
+            repo,
+            token,
+            api_base: "https://api.github.com".to_string(),
+            timeout: Duration::from_millis(timeout_ms),
+        }
     }
 
     /// Internal constructor allowing a custom base URL (used in tests).
     pub fn with_base(
         repo: Repo,
+        timeout_ms: u64,
         token: Option<String>,
         client: reqwest::Client,
         api_base: &str,
@@ -74,6 +85,7 @@ impl RealGitHub {
             repo,
             token,
             api_base: api_base.to_string(),
+            timeout: Duration::from_millis(timeout_ms),
         }
     }
 }
@@ -81,8 +93,13 @@ impl RealGitHub {
 #[async_trait::async_trait]
 impl GitHubLookup for RealGitHub {
     async fn lookup(&self, username: &str) -> Option<Profile> {
+        // GitHub usernames are case-insensitive but the `login` column uses
+        // BINARY collation: normalize once here so the cache read and every
+        // cache write below can never diverge by case.
+        let login = username.to_lowercase();
+
         // 1. Check cache.
-        if let Some(cached) = self.repo.get_github_profile(username).await.ok().flatten() {
+        if let Some(cached) = self.repo.get_github_profile(&login).await.ok().flatten() {
             let is_fresh = if cached.valid {
                 // Positive cache: 30-day TTL.
                 is_fresh_enough(&cached.cached_at, 30 * 24 * 60 * 60)
@@ -99,8 +116,8 @@ impl GitHubLookup for RealGitHub {
         }
 
         // 2. Fetch from GitHub API.
-        let url = format!("{}/users/{}", self.api_base, username);
-        let mut req = self.client.get(&url);
+        let url = format!("{}/users/{}", self.api_base, login);
+        let mut req = self.client.get(&url).timeout(self.timeout);
         if let Some(ref token) = self.token {
             req = req.header("Authorization", format!("Bearer {}", token));
         }
@@ -108,13 +125,13 @@ impl GitHubLookup for RealGitHub {
         match req.send().await {
             Ok(resp) if resp.status().is_success() => match resp.json::<GitHubUser>().await {
                 Ok(gh_user) => {
-                    let name = gh_user.name.clone().unwrap_or_else(|| username.to_string());
+                    let name = gh_user.name.clone().unwrap_or_else(|| login.clone());
                     let avatar_url = gh_user.avatar_url.clone();
 
                     let _ = self
                         .repo
                         .upsert_github_profile(NewGithubProfile {
-                            login: username.to_lowercase(),
+                            login: login.clone(),
                             name: gh_user.name,
                             avatar_url: avatar_url.clone(),
                             valid: true,
@@ -133,12 +150,35 @@ impl GitHubLookup for RealGitHub {
                 let _ = self
                     .repo
                     .upsert_github_profile(NewGithubProfile {
-                        login: username.to_lowercase(),
+                        login: login.clone(),
                         name: None,
                         avatar_url: String::new(),
                         valid: false,
                     })
                     .await;
+                None
+            }
+            Ok(resp)
+                if resp.status() == reqwest::StatusCode::FORBIDDEN
+                    || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS =>
+            {
+                // Rate-limit / forbidden: negative-cache like a 404 (SPEC's 1 h
+                // negative TTL, which also aligns with GitHub's hourly
+                // rate-limit window) so a burst cannot re-hammer the API.
+                let _ = self
+                    .repo
+                    .upsert_github_profile(NewGithubProfile {
+                        login: login.clone(),
+                        name: None,
+                        avatar_url: String::new(),
+                        valid: false,
+                    })
+                    .await;
+                tracing::warn!(
+                    username,
+                    status = resp.status().as_u16(),
+                    "GitHub API rate-limited; negative-cached"
+                );
                 None
             }
             Ok(resp) => {
@@ -357,9 +397,9 @@ mod tests {
         let gh = RealGitHub {
             client,
             repo: repo.clone(),
-
             token: None,
             api_base: mock_server.uri(),
+            timeout: Duration::from_secs(4),
         };
 
         let profile = gh.lookup("alice").await;
@@ -398,9 +438,9 @@ mod tests {
         let gh = RealGitHub {
             client,
             repo: repo.clone(),
-
             token: None,
             api_base: mock_server.uri(),
+            timeout: Duration::from_secs(4),
         };
 
         let profile = gh.lookup("noname").await;
@@ -430,9 +470,9 @@ mod tests {
         let gh = RealGitHub {
             client,
             repo: repo.clone(),
-
             token: None,
             api_base: mock_server.uri(),
+            timeout: Duration::from_secs(4),
         };
 
         let profile = gh.lookup("ghost404").await;
@@ -467,9 +507,9 @@ mod tests {
         let gh = RealGitHub {
             client,
             repo: repo.clone(),
-
             token: None,
             api_base: mock_server.uri(),
+            timeout: Duration::from_millis(50),
         };
 
         let profile = gh.lookup("slowpoke").await;
@@ -502,9 +542,9 @@ mod tests {
         let gh = RealGitHub {
             client,
             repo: repo.clone(),
-
             token: None,
             api_base: mock_server.uri(),
+            timeout: Duration::from_secs(4),
         };
 
         let profile = gh.lookup("redirector").await;
@@ -540,9 +580,9 @@ mod tests {
         let gh = RealGitHub {
             client,
             repo: repo.clone(),
-
             token: Some("ghp_test_token".to_string()),
             api_base: mock_server.uri(),
+            timeout: Duration::from_secs(4),
         };
 
         let profile = gh.lookup("hcheck").await;
@@ -621,5 +661,224 @@ mod tests {
         let y = if m <= 2 { y + 1 } else { y };
 
         format!("{y:04}-{m:02}-{d:02} {hour:02}:{min:02}:{sec:02}")
+    }
+
+    // ── T07 hardening tests (red first) ──────────────────────
+
+    #[tokio::test]
+    async fn new_wires_timeout_ms_into_requests() {
+        // Choice: reqwest::Client exposes no timeout getter, so the strongest
+        // assertion available is behavioral — a wiremock that delays well
+        // beyond the requested timeout must return None quickly (per-request
+        // timeout wired from `timeout_ms`), not after the full delay. This
+        // test constructs via `RealGitHub::new` (the production constructor,
+        // which must wire `timeout_ms` into the request) and only overrides
+        // the private `api_base` to point at the mock server.
+        let mock_server = MockServer::start().await;
+        let (repo, _dir) = test_repo();
+
+        Mock::given(method("GET"))
+            .and(path("/users/timeout_probe"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(1500))
+                    .set_body_json(serde_json::json!({
+                        "login": "timeout_probe",
+                        "name": "Slow",
+                        "avatar_url": "https://example.com"
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // Plain client with NO timeout: if `new` ignores `timeout_ms`, the
+        // lookup hangs for the full 1.5 s delay.
+        let client = Client::builder()
+            .https_only(false)
+            .user_agent("test")
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let mut gh = RealGitHub::new(repo, 50, None, client);
+        gh.api_base = mock_server.uri();
+
+        let start = std::time::Instant::now();
+        let profile = gh.lookup("timeout_probe").await;
+        let elapsed = start.elapsed();
+        assert!(profile.is_none(), "delayed response must time out to None");
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "lookup with 50 ms timeout took {elapsed:?}; timeout_ms is not wired"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_429_negative_cached_no_second_request() {
+        let mock_server = MockServer::start().await;
+        let (repo, _dir) = test_repo();
+
+        Mock::given(method("GET"))
+            .and(path("/users/rate_limited"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::builder()
+            .https_only(false)
+            .user_agent("test")
+            .timeout(Duration::from_secs(4))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let gh = RealGitHub::with_base(repo.clone(), 4000, None, client, &mock_server.uri());
+
+        let first = gh.lookup("rate_limited").await;
+        assert!(first.is_none());
+        let second = gh.lookup("rate_limited").await;
+        assert!(second.is_none());
+
+        let received = mock_server.received_requests().await.unwrap();
+        assert_eq!(
+            received.len(),
+            1,
+            "429 must be negatively cached: second lookup within TTL must make zero additional requests"
+        );
+        let cached = repo
+            .get_github_profile("rate_limited")
+            .await
+            .unwrap()
+            .expect("429 should write a negative cache entry");
+        assert!(!cached.valid);
+    }
+
+    #[tokio::test]
+    async fn api_403_negative_cached_no_second_request() {
+        let mock_server = MockServer::start().await;
+        let (repo, _dir) = test_repo();
+
+        Mock::given(method("GET"))
+            .and(path("/users/forbidden_user"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::builder()
+            .https_only(false)
+            .user_agent("test")
+            .timeout(Duration::from_secs(4))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let gh = RealGitHub::with_base(repo.clone(), 4000, None, client, &mock_server.uri());
+
+        let first = gh.lookup("forbidden_user").await;
+        assert!(first.is_none());
+        let second = gh.lookup("forbidden_user").await;
+        assert!(second.is_none());
+
+        let received = mock_server.received_requests().await.unwrap();
+        assert_eq!(
+            received.len(),
+            1,
+            "403 must be negatively cached: second lookup within TTL must make zero additional requests"
+        );
+        let cached = repo
+            .get_github_profile("forbidden_user")
+            .await
+            .unwrap()
+            .expect("403 should write a negative cache entry");
+        assert!(!cached.valid);
+    }
+
+    #[tokio::test]
+    async fn negative_cache_is_case_insensitive() {
+        // GitHub usernames are case-insensitive but SQLite `login` uses
+        // BINARY collation: lookups differing only by case must share one
+        // cache row, or case variants bypass the 403/429 negative cache and
+        // burn the operator's quota. Mocks serve both cases so the count
+        // reflects cache behavior, not mock matching.
+        let mock_server = MockServer::start().await;
+        let (repo, _dir) = test_repo();
+
+        for p in ["/users/Rate_Limited", "/users/rate_limited"] {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(ResponseTemplate::new(429))
+                .mount(&mock_server)
+                .await;
+        }
+
+        let client = Client::builder()
+            .https_only(false)
+            .user_agent("test")
+            .timeout(Duration::from_secs(4))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let gh = RealGitHub::with_base(repo.clone(), 4000, None, client, &mock_server.uri());
+
+        assert!(gh.lookup("Rate_Limited").await.is_none());
+        assert!(gh.lookup("Rate_Limited").await.is_none());
+        assert!(gh.lookup("rate_limited").await.is_none());
+
+        let received = mock_server.received_requests().await.unwrap();
+        assert_eq!(
+            received.len(),
+            1,
+            "case variants must share one negative-cache row; got {} HTTP requests",
+            received.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_and_server_error_write_no_cache_row() {
+        // 302/5xx are transient transport outcomes, not profile facts: they
+        // must not poison the cache in either direction.
+        let mock_server = MockServer::start().await;
+        let (repo, _dir) = test_repo();
+
+        Mock::given(method("GET"))
+            .and(path("/users/moved_user"))
+            .respond_with(
+                ResponseTemplate::new(302).append_header("Location", "http://127.0.0.1/evil"),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/users/broken_user"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::builder()
+            .https_only(false)
+            .user_agent("test")
+            .timeout(Duration::from_secs(4))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let gh = RealGitHub::with_base(repo.clone(), 4000, None, client, &mock_server.uri());
+
+        assert!(gh.lookup("moved_user").await.is_none());
+        assert!(gh.lookup("broken_user").await.is_none());
+        assert!(
+            repo.get_github_profile("moved_user")
+                .await
+                .unwrap()
+                .is_none(),
+            "302 must not write a cache row"
+        );
+        assert!(
+            repo.get_github_profile("broken_user")
+                .await
+                .unwrap()
+                .is_none(),
+            "5xx must not write a cache row"
+        );
     }
 }

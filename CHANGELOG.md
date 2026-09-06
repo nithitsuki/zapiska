@@ -52,6 +52,12 @@ All notable changes to zapiska are documented here. The format follows
   and name lists shrink first and the moderation footer is kept through every
   shrink stage; only the last-resort cut, reached when the unshrunk fields
   alone exceed the limit, can remove it.
+- GitHub lookup now honors its timeout argument: `RealGitHub` applies
+  `timeout_ms` as a per-request timeout instead of silently ignoring it.
+- GitHub 403/429 (rate-limit) responses are now negative-cached like 404s,
+  so a burst cannot burn the operator's API quota with repeated lookups.
+  Cache keys are lowercased once per lookup, so case variants of a username
+  share one row instead of bypassing the negative cache.
 - Legacy upgrade ordering: column additions now run before the canonical
   schema snapshot, whose indexes (for example `idx_comments_parent`) fail on
   databases still missing their columns.
