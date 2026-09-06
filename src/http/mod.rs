@@ -30,6 +30,15 @@ pub fn build_app(state: AppState) -> Router {
     let webmention_governor = layers::webmention_governor(&state.config);
     let read_governor = Arc::new(layers::read_governor(&state.config));
     let admin_moderate_governor = layers::admin_moderate_governor(&state.config);
+    // Login, batch moderation, and export each get their own instance of the
+    // same admin-governor budget (separate buckets, same configured values):
+    // brute-force and bulk-dump abuse are throttled per IP without spending
+    // the single-moderation budget. No new knobs — one pattern everywhere.
+    let admin_login_governor = layers::admin_moderate_governor(&state.config);
+    let admin_batch_governor = layers::admin_moderate_governor(&state.config);
+    let admin_reactions_governor = layers::admin_moderate_governor(&state.config);
+    let admin_reactions_batch_governor = layers::admin_moderate_governor(&state.config);
+    let admin_export_governor = layers::admin_moderate_governor(&state.config);
 
     let cors = layers::cors_layer(&state.config);
     let body_limit = layers::body_limit_layer(&state.config);
@@ -72,20 +81,31 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route(
             "/api/admin/moderate/batch",
-            axum::routing::post(admin::moderate_batch),
+            axum::routing::post(admin::moderate_batch).layer(GovernorLayer {
+                config: Arc::new(admin_batch_governor),
+            }),
         )
-        .route("/api/admin/export", axum::routing::get(admin::export))
+        .route(
+            "/api/admin/export",
+            axum::routing::get(admin::export).layer(GovernorLayer {
+                config: Arc::new(admin_export_governor),
+            }),
+        )
         .route(
             "/api/admin/reactions",
             axum::routing::get(admin::list_reactions),
         )
         .route(
             "/api/admin/reactions/moderate",
-            axum::routing::post(admin::moderate_reaction),
+            axum::routing::post(admin::moderate_reaction).layer(GovernorLayer {
+                config: Arc::new(admin_reactions_governor),
+            }),
         )
         .route(
             "/api/admin/reactions/moderate/batch",
-            axum::routing::post(admin::moderate_reactions_batch),
+            axum::routing::post(admin::moderate_reactions_batch).layer(GovernorLayer {
+                config: Arc::new(admin_reactions_batch_governor),
+            }),
         )
         .route(
             "/api/admin/import",
@@ -107,7 +127,12 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/version", axum::routing::get(version))
         .route("/admin", axum::routing::get(admin_dashboard))
         .route("/embed/comments.js", axum::routing::get(comments_js))
-        .route("/api/admin/login", axum::routing::post(admin::login))
+        .route(
+            "/api/admin/login",
+            axum::routing::post(admin::login).layer(GovernorLayer {
+                config: Arc::new(admin_login_governor),
+            }),
+        )
         .route("/api/admin/logout", axum::routing::post(admin::logout))
         .route(
             "/api/comment",
@@ -190,6 +215,7 @@ async fn comments_js() -> (
     path = "/healthz",
     responses(
         (status = 200, description = "Server is healthy", body = String),
+        (status = 503, description = "Database is unreachable", body = String),
     ),
 )]
 async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
@@ -357,6 +383,175 @@ mod tests {
             start.elapsed()
         );
     }
+
+    /// State with a tight admin budget so throttle tests trip fast without
+    /// touching production values. Note the governor honesty quirk (the
+    /// window value is the per-element replenish period): window 1 means one
+    /// cell back per second, so recovery is observable in-test.
+    fn tight_admin_state() -> (AppState, tempfile::TempDir) {
+        let (mut state, dir) = test_state();
+        state.config.rate_limit_admin_moderate_burst = 2;
+        state.config.rate_limit_admin_moderate_window_secs = 1;
+        (state, dir)
+    }
+
+    fn authed_json_request(method: axum::http::Method, uri: &str, body: &str) -> Request<Body> {
+        let mut req = request(method, uri);
+        *req.body_mut() = Body::from(body.to_owned());
+        req.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        req.headers_mut()
+            .insert(header::CONTENT_LENGTH, body.len().into());
+        req.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test"),
+        );
+        req
+    }
+
+    fn login_request(body: &str) -> Request<Body> {
+        let mut req = request(axum::http::Method::POST, "/api/admin/login");
+        *req.body_mut() = Body::from(body.to_owned());
+        req.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        req.headers_mut()
+            .insert(header::CONTENT_LENGTH, body.len().into());
+        req
+    }
+
+    #[tokio::test]
+    async fn login_throttle_trips_after_burst_then_recovers() {
+        let (state, _dir) = tight_admin_state();
+        let app = build_app(state);
+        // Two rapid failures consume the burst.
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(login_request(r#"{"token":"wrong"}"#))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 401);
+        }
+        // Third rapid attempt trips the per-IP throttle.
+        let resp = app
+            .clone()
+            .oneshot(login_request(r#"{"token":"wrong"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 429, "login must throttle per IP after burst");
+        // Budget replenishes (one cell per window second): poll until a
+        // correct login succeeds again.
+        let mut recovered = false;
+        for _ in 0..30 {
+            let resp = app
+                .clone()
+                .oneshot(login_request(r#"{"token":"test"}"#))
+                .await
+                .unwrap();
+            if resp.status() == 200 {
+                recovered = true;
+                break;
+            }
+            assert_eq!(resp.status(), 429, "still throttled while refilling");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(recovered, "login recovers after refill");
+    }
+
+    #[tokio::test]
+    async fn batch_moderate_burst_trips() {
+        let (state, _dir) = tight_admin_state();
+        let app = build_app(state);
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(authed_json_request(
+                    axum::http::Method::POST,
+                    "/api/admin/moderate/batch",
+                    r#"{"actions":[]}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+        }
+        let resp = app
+            .oneshot(authed_json_request(
+                axum::http::Method::POST,
+                "/api/admin/moderate/batch",
+                r#"{"actions":[]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            429,
+            "batch moderate must throttle after burst"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_burst_trips() {
+        let (state, _dir) = tight_admin_state();
+        let app = build_app(state);
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(authed_json_request(
+                    axum::http::Method::GET,
+                    "/api/admin/export",
+                    "",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+        }
+        let resp = app
+            .oneshot(authed_json_request(
+                axum::http::Method::GET,
+                "/api/admin/export",
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 429, "export must throttle after burst");
+    }
+
+    #[tokio::test]
+    async fn reactions_moderate_burst_trips() {
+        let (state, _dir) = tight_admin_state();
+        let app = build_app(state);
+        // Unknown id passes the governor and 404s in the handler.
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(authed_json_request(
+                    axum::http::Method::POST,
+                    "/api/admin/reactions/moderate",
+                    r#"{"id":999,"action":"approved"}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 404);
+        }
+        let resp = app
+            .oneshot(authed_json_request(
+                axum::http::Method::POST,
+                "/api/admin/reactions/moderate",
+                r#"{"id":999,"action":"approved"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            429,
+            "single reaction moderate must throttle after burst"
+        );
+    }
+
     #[tokio::test]
     async fn version_reports_single_sourced_versions() {
         let (state, _dir) = test_state();

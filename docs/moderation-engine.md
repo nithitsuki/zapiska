@@ -254,6 +254,9 @@ curl -X POST \
 ```
 
 The batch route processes each item independently. Use it for polling jobs.
+Over the throttle budget the batch routes answer `429` with a `Retry-After`
+header but a plain-text body (not the JSON error shape): polling jobs must
+read the headers, not parse the body.
 
 Moderate reactions with the same route shape:
 

@@ -262,7 +262,7 @@ Request:
 }
 ```
 
-Response `200` sets `admin_token` and returns:
+Response `200` sets `__Host-admin_token` and returns:
 
 ```json
 {

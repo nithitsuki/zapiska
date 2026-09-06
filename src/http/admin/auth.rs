@@ -25,19 +25,23 @@ fn extract_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
+/// Session cookie name. The `__Host-` prefix tells browsers to require
+/// `Secure` + `Path=/` + no `Domain` (all hold here), so the token cookie can
+/// never be set or sent over plain HTTP.
+const SESSION_COOKIE_NAME: &str = "__Host-admin_token";
+
 fn set_cookie_value(token: &str, max_age_secs: i64) -> String {
     format!(
-        "admin_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-        token, max_age_secs
+        "{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={max_age_secs}"
     )
 }
 
 // ── Auth middleware ──────────────────────────────────────────
 
 /// True when the request carries a valid admin token (Bearer header or
-/// `admin_token` cookie). Shared by the middleware and endpoints that must
-/// honor admin identity without being fully gated (e.g. reactions in
-/// admin-only mode).
+/// [`SESSION_COOKIE_NAME`] cookie). Shared by the middleware and endpoints
+/// that must honor admin identity without being fully gated (e.g. reactions
+/// in admin-only mode).
 pub(crate) fn request_has_admin_token(state: &AppState, headers: &HeaderMap) -> bool {
     let expected = state.config.admin_token.as_bytes();
 
@@ -54,7 +58,7 @@ pub(crate) fn request_has_admin_token(state: &AppState, headers: &HeaderMap) -> 
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    extract_cookie(cookie_header, "admin_token")
+    extract_cookie(cookie_header, SESSION_COOKIE_NAME)
         .map(|t| validate_token(t.as_bytes(), expected))
         .unwrap_or(false)
 }

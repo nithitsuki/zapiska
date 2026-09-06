@@ -36,11 +36,24 @@ against DNS rebinding.
 Protected `/api/admin/*` routes accept either of these credentials:
 
 - `Authorization: Bearer <ADMIN_TOKEN>`
-- `admin_token=<ADMIN_TOKEN>` session cookie
+- `__Host-admin_token=<ADMIN_TOKEN>` session cookie
 
 The token comparison uses `subtle::ConstantTimeEq`. The login and logout routes
 are outside the protected admin route group. The login route exchanges the
 token for a 30 day cookie.
+
+The session cookie is `__Host-admin_token` with `Path=/`, `HttpOnly`,
+`Secure`, and `SameSite=Lax`. The `__Host-` prefix tells browsers to reject
+the cookie over plain HTTP, so a network observer on an unencrypted fetch
+cannot capture the token. Terminate TLS at the reverse proxy and redirect
+HTTP to HTTPS so the cookie is only ever set and sent over HTTPS.
+
+Login attempts are throttled per IP on the same budget as single-comment
+moderation (same burst and window values, separate buckets): rapid guessing
+against a weak token trips `429` before the handler runs. Batch moderation
+(both comment and reaction batches) and the full-database export share that
+budget too, so a leaked token cannot be used to bulk-modify or dump the
+database at line rate.
 
 The token is loaded at startup and is redacted in the startup configuration
 log. Do not put the token in source control.
@@ -59,7 +72,10 @@ Rate limits use the TCP peer address. The server does not trust
 
 The native comment, deletion, and reaction routes share the native limit. The
 comments and RSS routes share the read limit. The single moderation route has
-the admin moderation limit. Other admin routes do not have this governor.
+the admin moderation limit. The login, batch moderation, single reaction
+moderation, and export routes share those same admin moderation values with
+their own per-route buckets.
+Other admin routes do not have this governor.
 
 The in-memory limiter also applies these caps:
 

@@ -37,6 +37,16 @@ All notable changes to zapiska are documented here. The format follows
   connection pool (bounded to two seconds) and answers `200 ok` when healthy,
   `503 unavailable` when the database does not answer. Docker and compose
   health checks flip unhealthy on database failure instead of staying green.
+- The admin session cookie is now `__Host-admin_token` with `Secure`
+  (keeping `Path=/`, `HttpOnly`, `SameSite=Lax`). Existing sessions are
+  invalidated: log in again after upgrading. Serve the admin dashboard over
+  HTTPS so the `Secure` cookie is accepted.
+- `POST /api/admin/login`, `POST /api/admin/moderate/batch`,
+  `POST /api/admin/reactions/moderate`, `POST /api/admin/reactions/moderate/batch`,
+  and `GET /api/admin/export`
+  are now throttled per IP on the admin moderation budget (same burst and
+  window values, separate per-route buckets). Rapid login guessing and
+  bulk dump/modify abuse trip `429`.
 - A legacy database holding duplicate `(source_url, target_path)` rows no
   longer aborts boot with a raw SQLite unique-index error: startup fails
   loud with the offending pairs and the dedup remedy (keep the newest row

@@ -1,6 +1,6 @@
 //! Admin API: token/cookie auth, moderation, comment listing, author/URL
 //! lookup, and bulk context. Every endpoint is gated by `admin_auth`
-//! (Bearer header or `admin_token` cookie, constant-time comparison).
+//! (Bearer header or `__Host-admin_token` cookie, constant-time comparison).
 //!
 //! Layout:
 //! - `auth.rs` — login/logout + the `admin_auth` middleware.
@@ -393,7 +393,7 @@ mod tests {
                 Request::builder()
                     .method(axum::http::Method::GET)
                     .uri("/api/admin/pending")
-                    .header(header::COOKIE, "admin_token=test")
+                    .header(header::COOKIE, "__Host-admin_token=test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -412,7 +412,7 @@ mod tests {
                 Request::builder()
                     .method(axum::http::Method::GET)
                     .uri("/api/admin/pending")
-                    .header(header::COOKIE, "admin_token=wrong")
+                    .header(header::COOKIE, "__Host-admin_token=wrong")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -438,10 +438,16 @@ mod tests {
         assert!(set_cookie.is_some(), "login must set Set-Cookie header");
         let cookie = set_cookie.unwrap().to_str().unwrap();
         assert!(
-            cookie.contains("admin_token=test"),
-            "cookie has correct value"
+            cookie.contains("__Host-admin_token=test"),
+            "cookie has correct __Host- name and value: {cookie}"
         );
         assert!(cookie.contains("HttpOnly"), "cookie is HttpOnly");
+        assert!(cookie.contains("Secure"), "cookie is Secure");
+        assert!(
+            cookie.contains("SameSite=Lax"),
+            "cookie keeps SameSite=Lax: {cookie}"
+        );
+        assert!(cookie.contains("Path=/"), "cookie keeps Path=/: {cookie}");
         assert!(cookie.contains("Max-Age="), "cookie has max age");
     }
 

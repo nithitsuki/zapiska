@@ -58,6 +58,17 @@ async fn main() {
         check_db_quick(&sqlite_pool).expect("database integrity check failed");
     }
 
+    // A non-loopback bind is directly reachable from the network: TLS must
+    // terminate at the edge (the __Host- admin cookie requires HTTPS) and
+    // the server still must not trust X-Forwarded-For (rate limits key on
+    // the TCP peer). Warning-only — never fail boot for a listen address.
+    if is_public_bind(&config.bind_addr) {
+        tracing::warn!(
+            bind_addr = %config.bind_addr,
+            "listening on a non-loopback address without proxy config: terminate TLS at the edge and note per-IP rate limits see the proxy peer, not the client"
+        );
+    }
+
     // A lost or rotated IP_HASH_SECRET silently splits IP-hash continuity:
     // stored hashes (comments, anyone-mode reaction identities) stop matching
     // freshly computed ones. Fail loud in the logs, not silent in the data.
@@ -138,6 +149,14 @@ async fn main() {
     .await
     .expect("server exited with error");
 }
+
+/// True when the server listens on a non-loopback address, i.e. it is
+/// directly reachable from the network rather than only via a local reverse
+/// proxy. Used for the startup proxy-config warning only.
+fn is_public_bind(addr: &std::net::SocketAddr) -> bool {
+    !addr.ip().is_loopback()
+}
+
 /// Run `PRAGMA quick_check` against the database and refuse to serve traffic
 /// when it reports anything but a clean `ok`. Corruption must fail loud at
 /// boot, not as silent row loss at request time.
@@ -169,7 +188,7 @@ fn check_db_quick(pool: &pool::SqlitePool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::check_db_quick;
+    use super::{check_db_quick, is_public_bind};
     use zapiska::db::pool::{create_pool, run_migrations};
 
     #[test]
@@ -178,6 +197,15 @@ mod tests {
         let pool = create_pool(&dir.path().join("q.db").to_string_lossy()).unwrap();
         run_migrations(&pool, None).unwrap();
         assert!(check_db_quick(&pool).is_ok());
+    }
+
+    #[test]
+    fn public_bind_predicate() {
+        assert!(!is_public_bind(&"127.0.0.1:3000".parse().unwrap()));
+        assert!(!is_public_bind(&"[::1]:3000".parse().unwrap()));
+        assert!(is_public_bind(&"0.0.0.0:3000".parse().unwrap()));
+        assert!(is_public_bind(&"[::]:3000".parse().unwrap()));
+        assert!(is_public_bind(&"192.168.1.10:3000".parse().unwrap()));
     }
 
     #[test]
