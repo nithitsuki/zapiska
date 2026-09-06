@@ -229,6 +229,16 @@ PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = NORMAL;
 ```
 
+One process serves one database file: the batcher windows, the `Limiter`
+counts, and the governor buckets live in memory, so a second process would
+split quotas and double-send digests. `AppState::start` claims a
+`<database>.lock` sibling file holding its PID and refuses when another live
+instance holds it; a stale file from a crash is reclaimed by PID liveness on
+Linux, and a clean shutdown releases it after the notification drain. Two
+instances with different database files never block each other. See
+[ADR-0001](adr/0001-single-process-topology.md) and
+[Deployment](deployment.md).
+
 Schema changes are versioned with `PRAGMA user_version` in
 `src/db/pool.rs`. The `MIGRATIONS` array is the single source of truth for
 upgrades: entry `MIGRATIONS[N]` holds the DDL that brings a database from
@@ -274,8 +284,9 @@ while the comment still commits; `Busy`/`Io`/`Other` abort the whole unit.
 Reaction approval is a compare-and-swap on the seen emoji
 (`WHERE id = ? AND status = 'pending' AND reaction = ?`), so an emoji change
 racing an approval leaves the new emoji pending instead of approving it
-sight-unseen. The CAS is repo-ready (`approve_reaction_cas`); handler wiring
-lands in T16 — the admin approve path still uses the blind status update. The admin export reads all five tables on one connection in one
+sight-unseen. The admin single and batch reaction routes carry the reviewed
+value as `expected_emoji`: a stale value is rejected with `400`, an absent
+value approves whatever is stored. The admin export reads all five tables on one connection in one
 deferred read transaction (a single WAL snapshot); the public read API batches
 list plus total plus reaction counts per request the same way. Import stays
 per-row (T17 owns restore).

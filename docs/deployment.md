@@ -78,7 +78,10 @@ control. A leaked admin token gives access to protected data and actions.
 | `RATE_LIMIT_ADMIN_MODERATE` | `30` | Single comment moderation. |
 | `RATE_LIMIT_ADMIN_MODERATE_WINDOW` | `60` | Admin moderation window in seconds. |
 
-The limits use the TCP peer IP. The server does not trust forwarded IP headers.
+The limits use one normalized client identity per request. With the default
+`TRUST_PROXY=false` the server ignores forwarded IP headers (spoof-proof)
+and keys on the TCP peer address, so proxied visitors share one quota. See
+[Reverse proxy](#reverse-proxy) before enabling `TRUST_PROXY`.
 
 ### Moderation and privacy values
 
@@ -179,6 +182,8 @@ The compose file:
 Use these commands:
 
 ```sh
+docker compose ps
+docker compose logs zapiska
 ```
 
 `docker compose down` keeps the named volume. Remove the volume only when you
@@ -187,11 +192,35 @@ intend to remove the database.
 The compose file builds locally. To use a GHCR image, use `docker run` or an
 image-specific compose file.
 
+## Single instance
+
+Run one zapiska process per database file. Notification windows, in-memory
+rate counters, and governor buckets live in memory, so a second process on
+the same file would split quotas and double-send digests.
+
+Startup claims a `<database>.lock` sibling file (for example
+`/data/comments.db.lock` on the compose volume) and refuses when another
+live instance holds it:
+
+```text
+database is already running in another zapiska instance (pid 42, lock
+/data/comments.db.lock): stop that process first; if no zapiska process is
+running, remove the stale lock file and restart
+```
+
+A crash leaves the lockfile behind; the next start reclaims it when the
+recorded PID has no live process behind it (Linux only — elsewhere remove
+the file by hand after you confirm no process runs). A clean shutdown
+releases it after the notification drain. Two instances with different
+database files never block each other. Do not run compose with `--scale`
+on one volume: the replicas refuse at startup by design.
+
 ## GHCR image
 
 Version tags build `linux/amd64` and `linux/arm64` images.
 
 ```sh
+docker run -d \
   --name zapiska \
   -p 127.0.0.1:3000:3000 \
   -e BIND_ADDR=0.0.0.0:3000 \
@@ -415,6 +444,7 @@ sudo systemctl restart zapiska
 With Docker:
 
 ```sh
+docker compose up -d --build
 ```
 
 Schema creation is idempotent and runs at startup.

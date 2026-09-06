@@ -212,7 +212,9 @@ Create the top-level form on your site:
 </form>
 ```
 
-The hidden `website` field is the current honeypot field. A filled honeypot is
+The hidden `website` field is the default honeypot field (`HONEYPOT_FIELD`,
+default `website`). When the operator renames the trap, custom forms must
+use the configured name. A filled honeypot is
 stored with a flag. The server does not discard it.
 
 The response contains a delete token and the final initial status. It does not
@@ -385,6 +387,7 @@ sudo systemctl restart zapiska
 With Docker:
 
 ```sh
+docker compose up -d --build
 ```
 
 Database schema creation runs at startup and is idempotent.
@@ -412,4 +415,5 @@ Check its status. The public API returns approved comments only.
 ### Rate limits use one shared client address
 
 The server sees the reverse proxy address. Review the proxy and network path
-when several visitors share one address.
+when several visitors share one address. Set `TRUST_PROXY=true` only when
+the proxy overwrites the client-IP headers. See [Deployment](deployment.md).

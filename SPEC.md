@@ -35,8 +35,14 @@ Axum router
 SQLite pool and repository
 ```
 
-All SQLite work runs inside `spawn_blocking`.
+All SQLite work on request paths runs inside `spawn_blocking`.
 The database uses WAL mode.
+
+One process serves one database file: the notification batcher, the
+in-memory limiter, and the governor buckets all live in memory, so a second
+process on the same file would split quotas and double-send digests. Startup
+claims a `<database>.lock` sibling file and refuses when another live
+instance holds it (see `docs/adr/0001-single-process-topology.md`).
 
 ## Feature flags
 
@@ -71,6 +77,8 @@ The server reads environment variables at startup.
 | `PUBLIC_TARGET_ORIGIN` | `https://nithitsuki.com` | Accepted webmention target origin. |
 | `ALLOWED_CORS_ORIGIN` | `https://nithitsuki.com` | One origin, a list, or `*`. |
 | `DATABASE_PATH` | `./comments.db` | SQLite file path. |
+| `DB_QUICK_CHECK` | `true` | Run `PRAGMA quick_check` at startup and refuse to start on corruption. |
+| `TRUST_PROXY` | `false` | Honor `X-Forwarded-For` / `X-Real-IP` / `Forwarded` for client identity. |
 | `GITHUB_TOKEN` | Unset | Optional GitHub API token. |
 | `MAX_CONTENT_LEN` | `2000` | Stored content limit in characters. |
 | `MAX_AUTHOR_LEN` | `100` | Author name limit in characters. |
@@ -189,18 +197,20 @@ cf-turnstile-response=token
 
 ### Processing
 
-`CommentIngress::submit` owns the 13 steps in exactly this order:
+`CommentIngress::submit` owns the 13 steps in exactly this order (the
+`src/ingress.rs` docblock is the contract; route governors and body limits
+run earlier, in the HTTP layers, not inside `submit`):
 
 1. Flag the honeypot (configured field, fallback `website`).
-2. Apply the native rate limit and body limit.
-3. Check Turnstile when enabled.
-4. Check the per-IP daily cap.
-5. Validate the target path and author fields (`github_username` shape
+2. Check Turnstile when enabled.
+3. Check the per-IP daily cap.
+4. Validate the target path and author fields (`github_username` shape
    checked before URL interpolation; bidi/format spoof chars stripped).
-6. Compute the content hash on the raw input.
-7. Sanitize and truncate content.
-8. Apply the language gate to the sanitized text when enabled.
-9. Resolve author and avatar data.
+5. Compute the content hash on the raw input.
+6. Sanitize and truncate content.
+7. Apply the language gate to the sanitized text when enabled.
+8. Resolve author data (GitHub enrichment).
+9. Resolve avatar data (best-effort, through SafeFetcher).
 10. Check the parent comment.
 11. Mint the delete token (128-bit CSPRNG) and capture peer IP data.
 12. Store the row, initial status, and extracted-URL rows (from the
@@ -431,7 +441,8 @@ Use `global` to use one site-wide window.
 Set the window to `0` for immediate delivery.
 
 The batcher stores open windows in memory.
-Open windows are lost when the process stops.
+Open windows flush as final digests on graceful shutdown instead of being
+lost on restart.
 
 Webmention updates do not create a new notification.
 
@@ -476,7 +487,8 @@ The server must:
 - Check webmention source addresses.
 - Compare admin tokens in constant time.
 - Limit request bodies.
-- Limit native, webmention, read, and single moderation routes.
+- Limit native, webmention, read, single moderation, login, batch
+  moderation, reaction moderation, and export routes.
 
 Most repository queries use SQLite parameters.
 The author lookup still builds escaped filter expressions.
@@ -484,8 +496,10 @@ The author lookup still builds escaped filter expressions.
 ## Shutdown
 
 The process listens for Ctrl+C and SIGTERM.
-The current shutdown handler stops the Axum server.
-It does not drain the webmention queue or notification batcher.
+The shutdown handler stops the Axum server, then drains open notification
+windows as final digests (twice, to catch a webmention job finishing
+mid-drain). It does not drain the webmention queue: queued webmentions can
+be lost when the process stops. The database lock releases after the drain.
 
 ## Error response
 

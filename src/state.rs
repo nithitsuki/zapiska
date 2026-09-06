@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -79,6 +80,16 @@ impl AppState {
         ),
         String,
     > {
+        // Single-instance gate first: everything below (pool, notifier
+        // windows, limiter, governors) assumes one process per database.
+        // The guard is retained in the process-wide registry (not in
+        // `AppState`: all test assembly goes through `start_with_github`,
+        // which routes here) and released by `release_db_lock` on clean
+        // shutdown.
+        if let Some(guard) = acquire_db_lock(&config.database_path)? {
+            retain_db_lock(guard);
+        }
+
         // Shared HTTP client for operator-configured endpoints only (GitHub API,
         // moderation webhooks, notification channels, Turnstile siteverify).
         // Untrusted author/webmention URLs are fetched through SafeFetcher (its
@@ -182,6 +193,203 @@ impl AppState {
             limiter: Arc::new(Limiter::new()),
         })
     }
+}
+
+/// Advisory single-instance lock (T23, ADR-0001): one process per database.
+///
+/// The notification batcher, the in-memory [`Limiter`], and the governor
+/// buckets all live in memory, so two processes on the same SQLite file
+/// would silently split quotas and double-send digests (SQLite itself only
+/// serializes writers via `busy_timeout` — it cannot merge our memory).
+/// The lock is a `<database>.lock` sibling file holding the holder's PID,
+/// created atomically (`create_new` = `O_CREAT|O_EXCL`, so two racing
+/// starters admit exactly one winner). A clean shutdown removes it (see
+/// [`DbLock::drop`]); a crashed predecessor leaves it behind, and the next
+/// start reclaims it when the recorded PID has no live process behind it
+/// (Linux `/proc` liveness with a PID-reuse guard — elsewhere existence
+/// alone refuses, and the operator removes the stale file by hand).
+/// Deliberately std-only: no `fs2`/`libc` dependency for one advisory file.
+fn lock_path_for_db(database_path: &str) -> Option<PathBuf> {
+    if database_path == ":memory:" {
+        return None;
+    }
+    let db = PathBuf::from(database_path);
+    // Canonicalize the parent directory so spellings of one database
+    // (`./x.db`, `/abs/x.db`, `dir/./x.db`) share one lockfile. A
+    // not-yet-created directory fails canonicalization — fall back to the
+    // raw join so the lock still applies (claim errors name the directory).
+    let raw_fallback = || Some(PathBuf::from(format!("{database_path}.lock")));
+    let file = match db.file_name() {
+        Some(file) => file.to_owned(),
+        None => return raw_fallback(),
+    };
+    let lock_name = format!("{}.lock", file.to_string_lossy());
+    match db.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(dir) => match std::fs::canonicalize(dir) {
+            Ok(canon) => Some(canon.join(lock_name)),
+            Err(_) => Some(dir.join(lock_name)),
+        },
+        None => Some(PathBuf::from(lock_name)),
+    }
+}
+
+/// Held for the life of the process (see `retain_db_lock`); dropping it
+/// releases the lock.
+struct DbLock {
+    path: PathBuf,
+    pid: u32,
+}
+
+impl Drop for DbLock {
+    fn drop(&mut self) {
+        // Remove only our own lock: a successor that already reclaimed the
+        // path after our crash must keep its file.
+        let owner = std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        if owner == Some(self.pid) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn acquire_db_lock(database_path: &str) -> Result<Option<Arc<DbLock>>, String> {
+    let path = match lock_path_for_db(database_path) {
+        None => return Ok(None),
+        Some(path) => path,
+    };
+    let me = std::process::id();
+    // At most two rounds: fresh claim, or reclaim-one-stale then claim.
+    for _ in 0..2 {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                if let Err(e) = writeln!(file, "{me}") {
+                    return Err(format!(
+                        "cannot write database lock {}: {e}",
+                        path.display()
+                    ));
+                }
+                return Ok(Some(Arc::new(DbLock { path, pid: me })));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let holder = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok());
+                match holder {
+                    Some(pid) if holder_is_live(pid) => {
+                        return Err(format!(
+                            "database is already running in another zapiska instance \
+                             (pid {pid}, lock {}): stop that process first; \
+                             if no zapiska process is running, remove the stale lock file and restart",
+                            path.display()
+                        ));
+                    }
+                    // Dead PID, PID reuse by an unrelated process, or an
+                    // unreadable lockfile: reclaim and retry the claim once.
+                    _ => {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "cannot create database lock {}: {e}; \
+                     check DATABASE_PATH and directory permissions",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "cannot claim database lock {} after reclaiming a stale entry; \
+         another zapiska instance is racing this start — retry, or stop the other process first",
+        path.display()
+    ))
+}
+
+/// True when `pid` names a live process running this binary. The
+/// executable check guards against PID reuse: a recycled PID owned by an
+/// unrelated process must read as stale, not as a running sibling.
+#[cfg(target_os = "linux")]
+fn holder_is_live(pid: u32) -> bool {
+    if std::fs::metadata(format!("/proc/{pid}")).is_err() {
+        return false;
+    }
+    match (
+        std::fs::read_link(format!("/proc/{pid}/exe")),
+        std::env::current_exe(),
+    ) {
+        (Ok(holder), Ok(own)) => same_executable(&holder, &own),
+        // Unreadable exe link (permissions, kernels without the symlink):
+        // fall back to the argv0-name check, fail closed when that is
+        // unreadable too.
+        _ => argv0_names_us(pid),
+    }
+}
+
+/// True when the holder's executable is ours. Tolerates the " (deleted)"
+/// suffix Linux appends when the binary was replaced while the holder runs
+/// (upgrade shape): the running old process is still a live sibling.
+fn same_executable(holder_exe: &std::path::Path, own_exe: &std::path::Path) -> bool {
+    holder_exe == own_exe
+        || holder_exe
+            .to_string_lossy()
+            .strip_suffix(" (deleted)")
+            .is_some_and(|stripped| stripped == own_exe.to_string_lossy())
+}
+
+/// Fallback PID-reuse guard when `/proc/{pid}/exe` is unreadable: the
+/// holder's argv0 must name this binary's file, else the PID was recycled.
+#[cfg(target_os = "linux")]
+fn argv0_names_us(pid: u32) -> bool {
+    let own_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|s| s.to_owned()));
+    match (std::fs::read(format!("/proc/{pid}/cmdline")), own_name) {
+        (Ok(bytes), Some(own)) => {
+            let argv0 = bytes.split(|b| *b == 0).next().unwrap_or(&[]);
+            let argv0 = String::from_utf8_lossy(argv0);
+            !argv0.is_empty() && argv0.contains(&*own.to_string_lossy())
+        }
+        // Unreadable process details: fail closed and refuse.
+        _ => true,
+    }
+}
+
+/// Without `/proc` there is no stale detection: existence alone refuses.
+/// (Linux-only by deployment; see the compose/systemd docs.)
+#[cfg(not(target_os = "linux"))]
+fn holder_is_live(_pid: u32) -> bool {
+    true
+}
+
+/// Process-wide registry of held database locks. The guards live here —
+/// not in [`AppState`] — so every assembly path through `base` enforces
+/// the single-instance gate, while `main` owns the release on clean
+/// shutdown via [`release_db_lock`].
+static INSTANCE_LOCKS: Mutex<Vec<Arc<DbLock>>> = Mutex::new(Vec::new());
+
+fn retain_db_lock(guard: Arc<DbLock>) {
+    INSTANCE_LOCKS
+        .lock()
+        .expect("instance-lock registry")
+        .push(guard);
+}
+
+/// Release the lock for `database_path` (clean shutdown path; `main` calls
+/// this after the notification drain). Dropping the guard removes the
+/// lockfile, so the next start claims it fresh instead of reclaiming.
+pub fn release_db_lock(database_path: &str) {
+    let path = lock_path_for_db(database_path);
+    INSTANCE_LOCKS
+        .lock()
+        .expect("instance-lock registry")
+        .retain(|guard| Some(&guard.path) != path.as_ref());
 }
 
 /// True when the startup warning for a lost/rotated secret must fire: no
@@ -401,5 +609,172 @@ mod start_tests {
             set.contains("TRUST_PROXY") && set.contains("overwrite"),
             "set branch must name the flag and the overwrite duty, got: {set}"
         );
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    use crate::github::StubGitHub;
+
+    fn lock_test_config(db_path: &std::path::Path) -> Config {
+        Config {
+            database_path: db_path.to_string_lossy().to_string(),
+            admin_token: "test".to_string(),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn lock_path_is_none_for_memory_db() {
+        assert_eq!(lock_path_for_db(":memory:"), None);
+    }
+
+    #[tokio::test]
+    async fn second_start_with_same_db_refuses() {
+        // T23: the in-memory batcher/limiter/governors assume one process —
+        // a second instance on the same database must fail loud, not split.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("locked.db");
+        let config = lock_test_config(&db_path);
+        let _held = AppState::start_with_github(config, Arc::new(StubGitHub)).expect("first start");
+        let err =
+            match AppState::start_with_github(lock_test_config(&db_path), Arc::new(StubGitHub)) {
+                Ok(_) => panic!("second start on the same database must refuse"),
+                Err(err) => err,
+            };
+        assert!(
+            err.contains("already running") && err.contains("locked.db.lock"),
+            "refusal must name the cause and the lock file, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_lock_with_dead_pid_is_reclaimed() {
+        // T23: a crashed predecessor leaves a lockfile behind; a PID with no
+        // live process behind it must not block restart.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("stale.db");
+        let lock_path = lock_path_for_db(&db_path.to_string_lossy()).unwrap();
+        std::fs::write(&lock_path, "2147483647\n").unwrap();
+        AppState::start_with_github(lock_test_config(&db_path), Arc::new(StubGitHub))
+            .expect("stale lock must be reclaimed");
+    }
+
+    #[tokio::test]
+    async fn lock_released_on_release() {
+        // T23: a clean shutdown releases the lock so the next start claims
+        // it fresh (this is the path `main` takes after the drain).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("reopen.db");
+        AppState::start_with_github(lock_test_config(&db_path), Arc::new(StubGitHub))
+            .expect("first start");
+        release_db_lock(&db_path.to_string_lossy());
+        AppState::start_with_github(lock_test_config(&db_path), Arc::new(StubGitHub))
+            .expect("post-release start must succeed");
+    }
+
+    #[tokio::test]
+    async fn two_different_databases_start_together() {
+        // T23: the lock is per-database — two instances with different
+        // files must not block each other.
+        let dir = tempfile::tempdir().unwrap();
+        AppState::start_with_github(
+            lock_test_config(&dir.path().join("a.db")),
+            Arc::new(StubGitHub),
+        )
+        .expect("first database");
+        AppState::start_with_github(
+            lock_test_config(&dir.path().join("b.db")),
+            Arc::new(StubGitHub),
+        )
+        .expect("second database");
+    }
+
+    #[test]
+    fn same_db_spellings_share_one_lockfile() {
+        // M1: spellings of one database (`x.db`, `sub/../x.db`) must
+        // contend on one lockfile. (`sub/..` is lexical, not normalized
+        // away by Path equality, so this pins the canonicalization.)
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let plain = dir.path().join("same.db");
+        let dotdot = dir.path().join("sub").join("..").join("same.db");
+        assert_eq!(
+            lock_path_for_db(&plain.to_string_lossy()),
+            lock_path_for_db(&dotdot.to_string_lossy()),
+            "spellings of one database must share one lockfile"
+        );
+    }
+
+    #[test]
+    fn lock_path_falls_back_when_parent_is_missing() {
+        // M1: a not-yet-created directory must still lock (raw join).
+        let missing = std::path::Path::new("/nonexistent-dir-zapiska-m1/deep/x.db");
+        assert_eq!(
+            lock_path_for_db(&missing.to_string_lossy()),
+            Some(std::path::PathBuf::from(
+                "/nonexistent-dir-zapiska-m1/deep/x.db.lock"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn same_db_spellings_contend() {
+        // M1 end to end: the first spelling holds, the second refuses.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let first = dir.path().join("contend.db");
+        let second = dir.path().join("sub").join("..").join("contend.db");
+        AppState::start_with_github(lock_test_config(&first), Arc::new(StubGitHub))
+            .expect("first start");
+        let err = match AppState::start_with_github(lock_test_config(&second), Arc::new(StubGitHub))
+        {
+            Ok(_) => panic!("second spelling must refuse"),
+            Err(err) => err,
+        };
+        assert!(err.contains("already running"), "got: {err}");
+    }
+
+    #[test]
+    fn live_holder_is_detected() {
+        // M3: our own running PID reads as live.
+        assert!(holder_is_live(std::process::id()));
+    }
+
+    #[test]
+    fn dead_holder_is_stale() {
+        // M3: a PID with no process behind it reads as stale.
+        assert!(!holder_is_live(2147483647));
+    }
+
+    #[test]
+    fn same_executable_comparison() {
+        // M3: the PID-reuse guard compares binaries, tolerating the
+        // " (deleted)" suffix of a replaced-while-running binary.
+        let own = std::env::current_exe().unwrap();
+        assert!(same_executable(&own, &own));
+        assert!(!same_executable(std::path::Path::new("/bin/sleep"), &own));
+        let deleted = std::path::PathBuf::from(format!("{} (deleted)", own.display()));
+        assert!(same_executable(&deleted, &own));
+    }
+
+    #[tokio::test]
+    async fn foreign_binary_lock_is_reclaimed() {
+        // M3: a lockfile held by a live but different binary (the PID-reuse
+        // shape) must not block start.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("foreign.db");
+        let lock_path = lock_path_for_db(&db_path.to_string_lossy()).unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("sleep for foreign-PID test");
+        std::fs::write(&lock_path, format!("{}\n", child.id())).unwrap();
+        let started =
+            AppState::start_with_github(lock_test_config(&db_path), Arc::new(StubGitHub)).is_ok();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(started, "foreign-binary lock must be reclaimed");
     }
 }

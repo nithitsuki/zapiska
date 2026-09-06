@@ -261,8 +261,8 @@ ordering, and depth. Content is sanitized again. A failed comment row is
 skipped and counted. URL rows for missing comments are skipped.
 
 Imported reactions are checked for ID, comment ID, value length, status, and
-identifier length. The current reaction import can still return an error when
-the database rejects a row. Keep export files private.
+identifier length. A failed reaction row is skipped and counted like every
+other section — invalid rows never abort the restore. Keep export files private.
 
 ## URL extraction
 
@@ -279,10 +279,11 @@ conversion cannot shift a slice offset. It does not inspect webmention content.
 
 The server logs structured events through `tracing`.
 
-The server does not log comment content or the admin token.
+The server does not log comment content or the admin token. The startup
+configuration display redacts webhook URLs to host plus a truncated path
+prefix. Runtime webhook failure warnings still carry the raw moderation
+webhook URL for diagnosis. Do not put credentials in webhook URL query values.
 Request spans can include the peer IP.
-Webhook URLs can appear in warning logs and startup configuration output.
-Do not put credentials in webhook URL query values.
 
 Review log access when IP storage or external notifications are enabled.
 

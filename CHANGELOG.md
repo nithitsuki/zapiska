@@ -47,6 +47,27 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Changed
 
+- CI gains a compose smoke job (build, up, poll `/healthz` to `ok`, check
+  `/api/version`, tear down) and per-target release smokes: natively
+  runnable Linux binaries boot against a scratch database and must serve
+  `/healthz` and `/api/version`, while the `aarch64` binary runs its
+  `--version` under `qemu-aarch64` instead of a boot. `docs/development.md`
+  describes the new jobs and no longer hardcodes test counts (it gives the
+  commands that print them).
+- SPEC.md and every guide reconciled with shipped behavior in one sweep:
+  the 13-step ingress ordering matches the code (governors and body limits
+  live in the route layers, not in `submit`); `TRUST_PROXY` and
+  `DB_QUICK_CHECK` join the SPEC config table; shutdown and notification
+  sections record the drain instead of loss; the security-rules list covers
+  login/batch/export throttles; the API reference records the configured
+  honeypot name, 32-character delete tokens, sanitized-content URL
+  extraction, the `503` health case, and the full per-section import report
+  with overlap refusal; the moderation guide records worker webhook
+  emission, JSON 429s, and the real 30-request admin budget; deployment and
+  getting-started fill the empty command blocks, repair the GHCR `docker
+  run` snippet, qualify the peer-IP statement with `TRUST_PROXY`, and
+  document the single-instance lock.
+
 - `GET /healthz` is now a readiness probe: it issues `SELECT 1` through the
   connection pool (bounded to two seconds) and answers `200 ok` when healthy,
   `503 unavailable` when the database does not answer. Docker and compose
@@ -379,6 +400,23 @@ All notable changes to zapiska are documented here. The format follows
   `process_job` / `process_job_with_timeout` functions and the
   `allow_loopback` production parameter are gone: nothing flips the SSRF
   check from the call side anymore.
+- Single-instance enforcement (T23, ADR-0001): `AppState::start` claims a
+  `<database>.lock` sibling file holding its PID before the pool opens and
+  refuses when another live instance holds it, with the PID, the lock path,
+  and the remedy in the error. A stale file from a crash is reclaimed by
+  PID liveness on Linux (`/proc` plus a PID-reuse command-line guard);
+  elsewhere existence alone refuses. A clean shutdown releases the lock
+  after the notification drain (`release_db_lock`, called from `main`).
+  Two instances with different database files never block each other.
+  Pinned by lock-contention tests (second start refuses, dead-PID reclaim,
+  release-then-restart, per-database independence). No new dependencies
+  (deliberately std-only).
+- Architecture decision records in `docs/adr/`: single-process topology,
+  export v1 as the compatibility contract, notification bounded retry
+  (duplicates possible on timeout — not at-most-once), and the per-ticket
+  calls worth keeping (SafeFetcher as the only outbound door, restore
+  without events, gone grace of two, refuse-by-default import, the
+  13-step ingress ordering).
 
 ## [0.2.0] - 2026-08-07
 

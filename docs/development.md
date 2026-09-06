@@ -63,8 +63,12 @@ Run the comments-only suite:
 RUSTFLAGS="-D warnings" cargo test --no-default-features --features comments
 ```
 
-The current suite has 342 default-feature tests and 281 comments-only tests.
-The count changes when tests change.
+Print the current test counts with:
+
+```sh
+cargo test 2>&1 | grep "test result"
+cargo test --no-default-features --features comments 2>&1 | grep "test result"
+```
 
 The integration targets are:
 
@@ -98,6 +102,8 @@ The normal jobs are:
 - Format and clippy check.
 - Default build and test.
 - Comments-only build and test.
+- Compose smoke: build the image, start the stack, and poll `/healthz`
+  until it answers `ok`, then check `/api/version` and tear down.
 
 Version tags also build these targets:
 
@@ -107,7 +113,11 @@ Version tags also build these targets:
 - `x86_64-pc-windows-msvc`
 - `aarch64-apple-darwin`
 
-The release job attaches binary archives to the GitHub release. The Docker job
+The release job attaches binary archives to the GitHub release. Before it
+packages, each natively runnable Linux binary boots against a scratch
+database and must serve `/healthz` and `/api/version`; the `aarch64` binary
+runs `qemu-aarch64 --version` plus its own `--version` under qemu instead
+of a boot. The Docker job
 builds `linux/amd64` and `linux/arm64` images and pushes version, major and
 minor, and `latest` tags to GHCR.
 
@@ -133,9 +143,13 @@ to the same length before it checks the bytes.
 
 ### Webmention fetches
 
-The webmention client checks the source host and resolved addresses before a
-fetch. The redirect policy checks redirect hosts and literal IP addresses.
-The client permits HTTP and HTTPS.
+Untrusted URL fetches (webmention sources, author-page avatar lookups) go
+through `SafeFetcher` (`src/fetch.rs`) only. It rejects non-HTTP(S) schemes
+and blocked hosts, resolves each hop and checks the addresses, re-checks
+every redirect target with a fresh resolution, caps redirects at 5 hops
+(fail-closed), and caps bodies at 1 MiB while streaming. The shared HTTP
+client serves operator-configured endpoints only and never fetches
+untrusted URLs. The client permits HTTP and HTTPS.
 
 ### Notifications
 

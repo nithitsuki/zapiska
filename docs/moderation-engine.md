@@ -24,7 +24,8 @@ reaction
 ```
 
 Webmentions use the webmention worker. The worker sends admin notifications for
-new mentions, but it does not send the moderation webhook.
+new mentions, and its gone path emits `comment.status_changed` through the
+same shared moderation sink (signed when `WEBHOOK_SIGNING_SECRET` is set).
 
 ## Configure zapiska
 
@@ -212,8 +213,8 @@ left alone, unlike the old always-write path) and emits no event (the old
 reaction-moderate path emitted even when nothing changed).
 
 Sync `*.created` decisions apply to just-created (hence live) rows only, so
-they stay on the plain write path; folding them into the machine is T19's
-hookup point, not this change.
+they stay on the plain write path with no machine transition and no extra
+event; folding them into the machine stays a follow-up.
 
 ## Authenticate
 
@@ -341,9 +342,9 @@ curl -X POST \
 The batch route processes each item independently. Use it for polling jobs.
 Each changed item emits one `comment.status_changed` event, like the single
 route; unchanged and failed items emit nothing.
-Over the throttle budget the batch routes answer `429` with a `Retry-After`
-header but a plain-text body (not the JSON error shape): polling jobs must
-read the headers, not parse the body.
+Over the throttle budget the batch routes answer `429` in the documented JSON
+error shape with a `Retry-After` header, like every other limiter: polling
+jobs can parse the body and honor the hint.
 
 Moderate reactions with the same route shape:
 
@@ -455,7 +456,7 @@ def receive():
 
 ## Service rules
 
-The single moderation route has a default limit of 10 requests per 60 seconds.
+The single moderation route has a default limit of 30 requests per 60 seconds.
 The batch route is the better choice for polling.
 
 Keep the admin token in an environment variable. Use HTTPS between the service

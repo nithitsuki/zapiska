@@ -94,7 +94,7 @@ Form fields:
 | `github_username` | No | GitHub login for URL and avatar lookup. |
 | `content` | Yes | HTML input. The server sanitizes it. |
 | `parent_id` | No | Approved parent comment ID. Replies need `MAX_THREAD_DEPTH > 0`. |
-| `website` | No | Honeypot field. A non-empty value marks the comment. |
+| `website` | No | Honeypot field when `HONEYPOT_FIELD` is unset (default `website`). When the operator renames the trap, custom forms must use the configured name: a non-empty value in the configured field marks the comment, any other trap-looking field is inert. |
 | `cf-turnstile-response` | Conditional | Required when Turnstile is enabled. |
 
 The server validates the path, name, and author URL. It sanitizes content and
@@ -107,7 +107,7 @@ Response `201`:
 
 ```json
 {
-  "delete_token": "0123456789abcdef",
+  "delete_token": "0123456789abcdef0123456789abcdef",
   "status": "pending"
 }
 ```
@@ -130,7 +130,7 @@ Request:
 
 ```json
 {
-  "token": "0123456789abcdef"
+  "token": "0123456789abcdef0123456789abcdef"
 }
 ```
 
@@ -415,7 +415,7 @@ Return URLs extracted from one native comment.
 }
 ```
 
-The extractor reads the original native form HTML. It accepts absolute,
+The extractor reads the SANITIZED comment content (post-`ammonia`). It accepts absolute,
 double-quoted HTTP and HTTPS `href` values.
 
 ### GET /api/admin/urls/lookup
@@ -536,12 +536,19 @@ The import process:
 - Sorts comments by ID.
 - Restores parent rows before child rows.
 - Re-sanitizes comment content.
-- Checks selected path, type, status, name, URL, parent, and depth values.
+- Checks every row's fields: comments exactly as a native submission, URL,
+  ledger, profile, and reaction rows against structural bounds.
 - Re-derives each comment IP hash from its raw IP with this server's secret.
 - Upserts webmention state and GitHub profiles.
-- Replaces URL rows for each comment.
+- Replaces URL rows for each comment in one atomic commit.
 - Restores reaction rows.
-- Skips failed comment and URL rows without stopping the import.
+- Skips invalid and orphaned rows in every section without stopping the
+  import. Only storage-health failures abort the restore, and the abort
+  response still carries the per-section counts so far: fix the cause and
+  re-import, which is idempotent and heals to the full state.
+- Refuses into a live database before the first write when an exported
+  comment or reaction ID holds different data, unless the body sets
+  `"force": true` to overwrite colliding rows explicitly after review.
 
 Response:
 
@@ -550,9 +557,13 @@ Response:
   "comments_imported": 42,
   "comments_skipped": 1,
   "webmention_seen_imported": 3,
+  "webmention_seen_skipped": 0,
   "comment_urls_imported": 17,
+  "comment_urls_skipped": 0,
   "github_profiles_imported": 5,
+  "github_profiles_skipped": 0,
   "comment_reactions_imported": 12,
+  "comment_reactions_skipped": 0,
   "ip_hashes_recomputed": 40,
   "warning": null
 }
@@ -566,7 +577,10 @@ every export. See [Deployment](deployment.md).
 
 ### GET /healthz
 
-Return `ok` with status `200`.
+Return `ok` with status `200` when the database answers `SELECT 1` through
+the pool. Return `unavailable` with status `503` when it does not: the
+endpoint is a readiness probe, and the Docker and compose health checks flip
+unhealthy on database failure instead of staying green.
 
 ### GET /api/version
 

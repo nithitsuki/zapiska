@@ -25,6 +25,7 @@ async fn main() {
     info!(config = %config.redacted_display(), "server starting");
 
     let bind_addr = config.bind_addr;
+    let database_path = config.database_path.clone();
 
     // All assembly (pool, migrations, gates, repo, notifier, worker) lives
     // in AppState::start — main only serves what it returns.
@@ -55,4 +56,5 @@ async fn main() {
     .expect("server exited with error");
     drain_notifier.drain(&drain_client).await;
     drain_notifier.drain(&drain_client).await;
+    zapiska::state::release_db_lock(&database_path);
 }

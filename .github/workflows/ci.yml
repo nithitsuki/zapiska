@@ -54,10 +54,40 @@ jobs:
       - name: Run tests (comments only)
         run: cargo test --no-default-features --features comments --verbose
 
+  # ── Smoke: compose stack boots and serves a healthy /healthz ──
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start compose stack
+        run: |
+          printf 'ADMIN_TOKEN=ci-smoke-token\nPUBLIC_TARGET_ORIGIN=https://example.com\nALLOWED_CORS_ORIGIN=https://example.com\n' > .env
+          docker compose up -d --build
+      - name: Wait for healthy /healthz
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/healthz 2>/dev/null | grep -q '^ok$'; then
+              echo "healthz ok on attempt $i"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "healthz never answered ok"
+          docker compose ps
+          docker compose logs zapiska
+          exit 1
+      - name: Version endpoint
+        run: curl -fsS http://127.0.0.1:3000/api/version
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose down -v
+          rm -f .env
+
   # ── Release: cross-platform binaries, attached to the GitHub release ──
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, test, test-comments-only]
+    needs: [lint, test, test-comments-only, smoke]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -104,6 +134,36 @@ jobs:
           echo "RUSTFLAGS=-Clinker=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
+      - name: Smoke test binary (native linux)
+        # The runners are x86_64 Linux, so only these two targets execute
+        # here. Windows/macOS artifacts are compile-checked only; aarch64
+        # gets the qemu step below instead of a native boot.
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          BIN="target/${{ matrix.target }}/release/zapiska"
+          "$BIN" --version
+          export ADMIN_TOKEN=ci-smoke-token BIND_ADDR=127.0.0.1:3000 DATABASE_PATH=/tmp/zapiska-ci-smoke.db
+          rm -f /tmp/zapiska-ci-smoke.db /tmp/zapiska-ci-smoke.db.lock /tmp/zapiska-ci-smoke.db-wal /tmp/zapiska-ci-smoke.db-shm
+          ("$BIN" & echo $! > /tmp/zapiska-ci-smoke.pid)
+          STATUS=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/healthz 2>/dev/null | grep -q '^ok$'; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:3000/healthz | grep -q '^ok$' || STATUS=1
+          curl -fsS http://127.0.0.1:3000/api/version || STATUS=1
+          kill "$(cat /tmp/zapiska-ci-smoke.pid)" || true
+          rm -f /tmp/zapiska-ci-smoke.db /tmp/zapiska-ci-smoke.db.lock /tmp/zapiska-ci-smoke.db-wal /tmp/zapiska-ci-smoke.db-shm /tmp/zapiska-ci-smoke.pid
+          exit $STATUS
+      - name: Smoke test binary under qemu (aarch64)
+        # No ARM runner: run `--version` (needs no config) under qemu-user
+        # with the cross libc as sysroot. A full boot stays manual — see
+        # docs/deployment.md — because user-mode networking adds flakes.
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user
+          qemu-aarch64 --version
+          qemu-aarch64 -L /usr/aarch64-linux-gnu "target/${{ matrix.target }}/release/zapiska" --version
       - name: Package
         shell: bash
         run: |
@@ -121,7 +181,7 @@ jobs:
   # ── Release: multi-arch Docker image on GHCR ──
   docker-publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, test, test-comments-only]
+    needs: [lint, test, test-comments-only, smoke]
     permissions:
       packages: write
       contents: read
