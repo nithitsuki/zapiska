@@ -207,32 +207,53 @@ so one prepared statement covers the filtered and unfiltered cases.
 
 ## Middleware and route scope
 
-The public router has these layers and routes:
+The router is assembled from route groups (`src/http/routes.rs`), each with
+its route set and layer recipe in one constructor:
 
-- Body limits on native comment and webmention requests.
-- Native rate limits on comment submission, deletion, and reactions.
-- Read rate limits on the JSON read API and RSS feed.
-- Webmention rate limits on webmention ingress.
-- CORS on the public router.
+- `native_write_routes` — comment submission, deletion, and both reaction
+  methods share one governor bucket and the form body limit.
+- `public_read_routes` — the JSON read API and the RSS feed share one
+  governor bucket.
+- `session_routes` — login is throttled per IP on its own bucket; logout is
+  unthrottled.
+- `webmention_routes` — webmention ingress with the form body limit and its
+  own bucket (only with the `webmentions` feature).
+- `protected_admin_routes` — the authenticated admin group (path list in
+  `ADMIN_ROUTE_PATHS`): single and batch comment moderation, single and
+  batch reaction moderation, and export each draw on their own bucket of the
+  admin budget.
 
-The public router also contains health, embed, Swagger, admin login, and admin
-logout routes. The protected admin route group is merged after the CORS layer.
-Admin routes do not advertise CORS.
+`routes::compose` wraps the public router in the CORS layer first and merges
+the protected admin group after it, so admin responses never advertise CORS.
+The ordering invariant is that function boundary, covered by a test that
+asserts every listed admin path lacks CORS headers.
+
+The public router also contains health, embed, Swagger, and session routes.
+The protected admin route group is merged after the CORS layer. Admin routes
+do not advertise CORS.
 
 Configured CORS values can be one origin, a comma-separated list, or `*`.
 Configured origins use a 600 second preflight cache. Wildcard CORS does not set
 that cache value. The preflight methods are `GET`, `POST`, and `OPTIONS`.
 
-Default rate limits are:
+Default rate limits are a burst bucket plus a sustained rate. The sustained
+column is what the governor enforces after the burst is spent
+(`burst / window` requests per second). A config-level test re-derives this
+table from `Config::default`, so the numbers cannot drift from the code:
 
-| Route group | Burst | Window |
-|---|---:|---:|
-| Native comment, deletion, and reactions | 50 | 60 seconds |
-| Webmention ingress | 30 | 60 seconds |
-| Public comments and RSS | 60 | 60 seconds |
-| Single comment moderation | 10 | 60 seconds |
+| Route group | Burst | Window | Sustained |
+|---|---:|---:|---:|
+| Native comment, deletion, and reactions | 100 | 60 seconds | 1.67/s |
+| Webmention ingress | 60 | 60 seconds | 1.00/s |
+| Public comments and RSS | 300 | 60 seconds | 5.00/s |
+| Single comment moderation | 30 | 60 seconds | 0.50/s |
+| Login, batch moderation, reaction moderation, export (own bucket each) | 30 | 60 seconds | 0.50/s |
 
-The admin rate limit does not cover every admin route. Admin authentication is
+<!-- RATE-LIMITS: native=100/60 webmention=60/60 read=300/60 admin=30/60 -->
+
+The admin rate limit covers single moderation, login, batch moderation
+(both comment and reaction batches), single reaction moderation, and export.
+Other admin routes do not have this governor. Admin authentication is
 required for the protected admin route group.
 
 ## Notification flow

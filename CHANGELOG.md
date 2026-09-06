@@ -120,6 +120,25 @@ All notable changes to zapiska are documented here. The format follows
   install, so step/snapshot drift (the v8 reactions near-miss class) fails
   the suite. Refuse-newer-DB, idempotent catch-up, the duplicate-pair
   pre-flight, and the v7 backfill are unchanged.
+- Rate-limit governors are now honest about `(burst, window)`: the GCRA
+  refill interval is `window / burst` per cell, so the sustained rate after
+  the burst matches the documented `burst / window` per second (native
+  `100`/60 s ≈ 1.67/s, webmention `60`/60 s = 1/s, read `300`/60 s = 5/s,
+  admin `30`/60 s = 0.5/s). Previously the window fed `per_second` directly
+  (one cell per window), throttling sustained traffic far below the
+  documented rates. Env var names are unchanged.
+- Route groups own their layer recipe (`src/http/routes.rs`): native write,
+  public read, session, webmention, and protected admin constructors bundle
+  routes with their governor and body-limit layers in one order. CORS wraps
+  the public router and the protected admin group merges after it in
+  `routes::compose`, so the no-CORS invariant is a function boundary.
+- Governor 429s now return the documented JSON shape
+  (`{"error", "code": "rate_limited"}`) with `Retry-After`, matching
+  handler-side quota 429s, instead of plain-text "Too Many Requests".
+- `docs/architecture.md` and `docs/security.md` rate tables list the real
+  defaults (100/60/300/30, not the stale 50/30/60/10) with sustained-rate
+  columns and login/batch/export rows. A config-level test re-derives the
+  tables from `Config::default`, so doc/code drift fails the suite.
 
 ## [0.2.0] - 2026-08-07
 

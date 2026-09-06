@@ -6,6 +6,7 @@ mod layers;
 pub(crate) mod reactions;
 #[cfg(feature = "webmentions")]
 pub mod reqwest_client;
+pub(crate) mod routes;
 pub mod shutdown;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -18,7 +19,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use std::sync::Arc;
-use tower_governor::GovernorLayer;
 use utoipa::OpenApi;
 
 use crate::openapi::ApiDoc;
@@ -27,168 +27,37 @@ use crate::state::AppState;
 pub fn build_app(state: AppState) -> Router {
     let native_governor = Arc::new(layers::native_comment_governor(&state.config));
     #[cfg(feature = "webmentions")]
-    let webmention_governor = layers::webmention_governor(&state.config);
+    let webmention_governor = Arc::new(layers::webmention_governor(&state.config));
     let read_governor = Arc::new(layers::read_governor(&state.config));
-    let admin_moderate_governor = layers::admin_moderate_governor(&state.config);
-    // Login, batch moderation, and export each get their own instance of the
-    // same admin-governor budget (separate buckets, same configured values):
-    // brute-force and bulk-dump abuse are throttled per IP without spending
-    // the single-moderation budget. No new knobs — one pattern everywhere.
-    let admin_login_governor = layers::admin_moderate_governor(&state.config);
-    let admin_batch_governor = layers::admin_moderate_governor(&state.config);
-    let admin_reactions_governor = layers::admin_moderate_governor(&state.config);
-    let admin_reactions_batch_governor = layers::admin_moderate_governor(&state.config);
-    let admin_export_governor = layers::admin_moderate_governor(&state.config);
+    let admin_governors = routes::AdminGovernors::from_config(&state.config);
+    // Login gets its own instance of the admin-moderation budget (separate
+    // bucket, same configured values): brute-force guessing is throttled per
+    // IP without spending the single-moderation budget. No new knobs.
+    let admin_login_governor = Arc::new(layers::admin_moderate_governor(&state.config));
 
     let cors = layers::cors_layer(&state.config);
     let body_limit = layers::body_limit_layer(&state.config);
 
-    let admin_routes = Router::new()
-        .route(
-            "/api/admin/pending",
-            axum::routing::get(admin::list_pending),
-        )
-        .route("/api/admin/paths", axum::routing::get(admin::list_paths))
-        .route(
-            "/api/admin/comments",
-            axum::routing::get(admin::list_comments),
-        )
-        .route(
-            "/api/admin/comments/{id}",
-            axum::routing::get(admin::get_comment),
-        )
-        .route(
-            "/api/admin/comments/{id}/urls",
-            axum::routing::get(admin::comment_urls),
-        )
-        .route(
-            "/api/admin/urls/lookup",
-            axum::routing::get(admin::url_lookup),
-        )
-        .route(
-            "/api/admin/authors/lookup",
-            axum::routing::get(admin::author_lookup),
-        )
-        .route(
-            "/api/admin/comments/context",
-            axum::routing::post(admin::bulk_context),
-        )
-        .route(
-            "/api/admin/moderate",
-            axum::routing::post(admin::moderate).layer(GovernorLayer {
-                config: Arc::new(admin_moderate_governor),
-            }),
-        )
-        .route(
-            "/api/admin/moderate/batch",
-            axum::routing::post(admin::moderate_batch).layer(GovernorLayer {
-                config: Arc::new(admin_batch_governor),
-            }),
-        )
-        .route(
-            "/api/admin/export",
-            axum::routing::get(admin::export).layer(GovernorLayer {
-                config: Arc::new(admin_export_governor),
-            }),
-        )
-        .route(
-            "/api/admin/reactions",
-            axum::routing::get(admin::list_reactions),
-        )
-        .route(
-            "/api/admin/reactions/moderate",
-            axum::routing::post(admin::moderate_reaction).layer(GovernorLayer {
-                config: Arc::new(admin_reactions_governor),
-            }),
-        )
-        .route(
-            "/api/admin/reactions/moderate/batch",
-            axum::routing::post(admin::moderate_reactions_batch).layer(GovernorLayer {
-                config: Arc::new(admin_reactions_batch_governor),
-            }),
-        )
-        .route(
-            "/api/admin/import",
-            axum::routing::post(admin::import).layer(axum::extract::DefaultBodyLimit::max(
-                admin::MAX_IMPORT_BODY_BYTES,
-            )),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            admin::admin_auth,
-        ));
-
     let swagger = utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
         .url("/api-docs/openapi.json", ApiDoc::openapi());
 
-    let router = Router::new()
+    let public = Router::new()
         .merge(swagger)
         .route("/healthz", axum::routing::get(healthz))
         .route("/api/version", axum::routing::get(version))
         .route("/admin", axum::routing::get(admin_dashboard))
         .route("/embed/comments.js", axum::routing::get(comments_js))
-        .route(
-            "/api/admin/login",
-            axum::routing::post(admin::login).layer(GovernorLayer {
-                config: Arc::new(admin_login_governor),
-            }),
-        )
-        .route("/api/admin/logout", axum::routing::post(admin::logout))
-        .route(
-            "/api/comment",
-            axum::routing::post(comment_post::create_comment)
-                .layer::<_, std::convert::Infallible>(body_limit)
-                .layer(GovernorLayer {
-                    config: native_governor.clone(),
-                }),
-        )
-        .route(
-            "/api/comment/{id}/delete",
-            axum::routing::post(comment_post::delete_comment)
-                .layer::<_, std::convert::Infallible>(body_limit)
-                .layer(GovernorLayer {
-                    config: native_governor.clone(),
-                }),
-        )
-        .route(
-            "/api/comment/{id}/reaction",
-            axum::routing::post(reactions::add_reaction).layer(GovernorLayer {
-                config: native_governor.clone(),
-            }),
-        )
-        .route(
-            "/api/comment/{id}/reaction",
-            axum::routing::delete(reactions::remove_reaction).layer(GovernorLayer {
-                config: native_governor,
-            }),
-        )
-        .route(
-            "/api/comments",
-            axum::routing::get(comments_read::list_comments).layer(GovernorLayer {
-                config: read_governor.clone(),
-            }),
-        )
-        .route(
-            "/feed.xml",
-            axum::routing::get(feed::feed).layer(GovernorLayer {
-                config: read_governor,
-            }),
-        );
+        .merge(routes::session_routes(admin_login_governor))
+        .merge(routes::native_write_routes(native_governor, body_limit))
+        .merge(routes::public_read_routes(read_governor));
 
     #[cfg(feature = "webmentions")]
-    let router = router.route(
-        "/api/webmention",
-        axum::routing::post(webmention_post::receive_webmention)
-            .layer::<_, std::convert::Infallible>(body_limit)
-            .layer(GovernorLayer {
-                config: Arc::new(webmention_governor),
-            }),
-    );
+    let public = public.merge(routes::webmention_routes(webmention_governor, body_limit));
 
-    // CORS intentionally applies to the PUBLIC router only. Admin routes are
-    // server-side (same-origin dashboard); advertising them in preflight
-    // would contradict SPEC §6.7.
-    router.layer(cors).merge(admin_routes).with_state(state)
+    let admin = routes::protected_admin_routes(&state, admin_governors);
+    // CORS wraps the public router only; the protected admin group merges
+    // after it (see routes::compose) — never the reverse.
+    routes::compose(public, cors, admin).with_state(state)
 }
 
 async fn admin_dashboard() -> axum::response::Html<&'static str> {
@@ -384,10 +253,82 @@ mod tests {
         );
     }
 
+    /// State with a tight native budget so throttle tests trip fast without
+    /// touching production values.
+    fn tight_native_state() -> (AppState, tempfile::TempDir) {
+        let (mut state, dir) = test_state();
+        state.config.rate_limit_native_burst = 2;
+        state.config.rate_limit_native_window_secs = 60;
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn ipv4_mapped_and_v4_share_governor_bucket() {
+        // 02-B3: ::ffff:127.0.0.1 and 127.0.0.1 are the same client and must
+        // share one governor bucket (and one Limiter key / ip_hash).
+        let (mut state, _dir) = test_state();
+        state.config.rate_limit_read_burst = 1;
+        state.config.rate_limit_read_window_secs = 60;
+        let app = build_app(state);
+        let v4_req = || helpers::request(axum::http::Method::GET, "/api/comments?path=/x");
+        let mut mapped_req = helpers::request(axum::http::Method::GET, "/api/comments?path=/x");
+        mapped_req
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(
+                "[::ffff:127.0.0.1]:54321".parse::<SocketAddr>().unwrap(),
+            ));
+        let resp = app.clone().oneshot(v4_req()).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let resp = app.oneshot(mapped_req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            429,
+            "mapped and plain loopback must share one bucket"
+        );
+    }
+
+    #[tokio::test]
+    async fn governor_429_returns_documented_json_shape() {
+        // 02-B17: governor-side 429s must return the documented JSON shape
+        // {"error", "code": "rate_limited"} (docs/api.md "Error response"),
+        // not tower_governor's plain-text "Too Many Requests".
+        let (state, _dir) = tight_native_state();
+        let app = build_app(state);
+        let body = "target_path=/x&author_name=Alice&content=hello";
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(helpers::form_request("/api/comment", body))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 201);
+        }
+        let resp = app
+            .oneshot(helpers::form_request("/api/comment", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 429);
+        assert!(
+            resp.headers().get(header::RETRY_AFTER).is_some(),
+            "governor 429 must carry Retry-After like handler 429s"
+        );
+        assert!(
+            resp.headers().get("x-ratelimit-after").is_some(),
+            "governor 429 must preserve tower's x-ratelimit-after hint"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("governor 429 body must be JSON");
+        assert_eq!(json["code"], "rate_limited");
+        assert!(
+            json["error"].as_str().is_some_and(|s| !s.is_empty()),
+            "governor 429 body must carry a human-readable error: {json}"
+        );
+    }
+
     /// State with a tight admin budget so throttle tests trip fast without
-    /// touching production values. Note the governor honesty quirk (the
-    /// window value is the per-element replenish period): window 1 means one
-    /// cell back per second, so recovery is observable in-test.
+    /// touching production values. Burst 2 with window 1 means one cell back
+    /// per 500 ms, so recovery is observable in-test.
     fn tight_admin_state() -> (AppState, tempfile::TempDir) {
         let (mut state, dir) = test_state();
         state.config.rate_limit_admin_moderate_burst = 2;
@@ -715,16 +656,8 @@ mod tests {
         assert!(methods.contains("POST"));
     }
 
-    #[tokio::test]
-    async fn rate_limit_native_endpoint_returns_429_after_burst() {
-        let (state, _dir) = test_state();
-        let tight_config = {
-            use tower_governor::governor::GovernorConfigBuilder;
             use tower_governor::key_extractor::PeerIpKeyExtractor;
 
-            GovernorConfigBuilder::default()
-                .per_second(60)
-                .burst_size(2)
                 .key_extractor(PeerIpKeyExtractor)
                 .finish()
                 .expect("valid")
@@ -736,35 +669,6 @@ mod tests {
                 axum::routing::post(|| async {
                     (axum::http::StatusCode::NOT_IMPLEMENTED, "not implemented")
                 })
-                .layer(GovernorLayer {
-                    config: Arc::new(tight_config),
-                }),
-            )
-            .with_state(state);
-
-        // Send 2 requests within burst.
-        let resp = app
-            .clone()
-            .oneshot(request(axum::http::Method::POST, "/api/comment"))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 501);
-
-        let resp = app
-            .clone()
-            .oneshot(request(axum::http::Method::POST, "/api/comment"))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 501);
-
-        // 3rd request should exceed burst and return 429.
-        let resp = app
-            .oneshot(request(axum::http::Method::POST, "/api/comment"))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 429);
-    }
-
     // ── GET /api/comments tests ─────────────────────────────
 
     async fn seed_comment(state: &AppState, path: &str, author: &str, status: &str) {
@@ -1305,6 +1209,46 @@ mod tests {
             50,
             "default feed limit is 50"
         );
+    }
+
+    #[tokio::test]
+    async fn every_protected_admin_route_lacks_cors() {
+        // routes::compose merges the protected admin group after the public
+        // CORS layer: no admin response may advertise CORS, on any path.
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        assert_eq!(
+            super::routes::ADMIN_ROUTE_PATHS.len(),
+            15,
+            "test and route list must agree on the protected surface"
+        );
+        for path in super::routes::ADMIN_ROUTE_PATHS {
+            // Templates never match literally; exercise a concrete id.
+            let concrete = path.replace("{id}", "1");
+            for method in [axum::http::Method::OPTIONS, axum::http::Method::GET] {
+                let resp = app
+                    .clone()
+                    .oneshot(request_with_origin(
+                        method.clone(),
+                        &concrete,
+                        "https://nithitsuki.com",
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    resp.headers()
+                        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                        .is_none(),
+                    "{concrete} must not advertise CORS"
+                );
+                assert!(
+                    resp.headers()
+                        .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+                        .is_none(),
+                    "{concrete} must not answer preflight"
+                );
+            }
+        }
     }
 
     #[tokio::test]

@@ -589,5 +589,10 @@ API errors use this shape:
 }
 ```
 
+Every `429` uses that shape, whichever limiter fired: the per-IP governors
+and the handler-side quotas (daily IP cap, hourly domain cap) all return
+`{"error", "code": "rate_limited"}` with a `Retry-After` header carrying the
+hint in seconds.
+
 See [Deployment](deployment.md), [Security](security.md), and
 [Moderation engine](moderation-engine.md).
