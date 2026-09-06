@@ -139,6 +139,10 @@ pub async fn import(
             // keep their exported hash verbatim.
             if let Some(ref raw) = c.submitter_ip {
                 if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+                    // Canonicalize through ClientIdentity so a stored
+                    // IPv4-mapped address re-derives the same hash as its
+                    // plain IPv4 form (see src/http/peer.rs).
+                    let ip = crate::http::peer::ClientIdentity::normalize_ip(ip);
                     let fresh =
                         crate::ip_hash::hash_ip(&ip, state.config.ip_hash_secret.as_deref());
                     if c.submitter_ip_hash.as_deref() != Some(fresh.as_str()) {

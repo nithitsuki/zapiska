@@ -60,9 +60,11 @@ log. Do not put the token in source control.
 
 ## Rate limits
 
-Rate limits use the TCP peer address. The server does not trust
 Client identity comes from one seam (`src/http/peer.rs`): the TCP peer
 address, normalized so IPv4-mapped IPv6 (`::ffff:1.2.3.4`) canonicalizes to
+IPv4. Governors, the in-memory limiter, and IP hashes all consume that
+identity, so one client never gets two buckets.
+
 By default the server does not trust `X-Forwarded-For`, `X-Real-IP`, or
 `Forwarded` — spoofed headers are ignored. Set `TRUST_PROXY=true` only when
 a reverse proxy you control overwrites those headers; the server then reads
@@ -90,12 +92,15 @@ reactions or IP storage.
 
 <!-- RATE-LIMITS: native=100/60 webmention=60/60 read=300/60 admin=30/60 -->
 
+The sustained column is the rate the governor enforces after the burst is
+spent (`burst / window` per second). A config-level test re-derives this
+table from the code defaults, so the numbers cannot drift.
 
 The native comment, deletion, and reaction routes share the native limit. The
 comments and RSS routes share the read limit. The single moderation route has
 the admin moderation limit. The login, batch moderation, single reaction
-moderation, and export routes share those same admin moderation values with
-their own per-route buckets.
+moderation, reaction batch moderation, and export routes share those same
+admin moderation values with their own per-route buckets.
 Other admin routes do not have this governor.
 
 Both the governor 429s and the handler-side quota 429s return the documented

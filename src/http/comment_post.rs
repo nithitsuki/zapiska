@@ -1,18 +1,19 @@
 use axum::Form;
 use axum::Json;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::State;
 use serde::Deserialize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::sync::Arc;
 use url::Url;
 
 use crate::db::repo::NewComment;
 use crate::error::AppError;
 use crate::github::GitHubLookup;
+use crate::http::peer::ClientIdentity;
 use crate::sanitize;
-use crate::state::{AppState, ip_daily_key};
+use crate::state::AppState;
 use crate::validate;
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -54,7 +55,7 @@ pub struct CommentForm {
 )]
 pub async fn create_comment(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    peer: ClientIdentity,
     Form(form): Form<CommentForm>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), AppError> {
     // ── Honeypot check ────────────────────────────────────────
@@ -62,7 +63,7 @@ pub async fn create_comment(
     // flagged for moderator review. The moderation system decides what to do.
     let is_honeypot = !form.website.as_deref().unwrap_or("").trim().is_empty();
     if is_honeypot {
-        tracing::info!(ip = %addr.ip(), "honeypot triggered, comment flagged");
+        tracing::info!(ip = %peer.ip(), "honeypot triggered, comment flagged");
     }
 
     // ── Turnstile verification (optional) ─────────────────────
@@ -83,16 +84,16 @@ pub async fn create_comment(
             &state.config.turnstile_verify_url,
             secret,
             token,
-            Some(&addr.ip()),
+            Some(&peer.ip()),
         )
         .await
         {
             Ok(result) if result.success => {
-                tracing::debug!(ip = %addr.ip(), "turnstile verification passed");
+                tracing::debug!(ip = %peer.ip(), "turnstile verification passed");
             }
             Ok(result) => {
                 tracing::info!(
-                    ip = %addr.ip(),
+                    ip = %peer.ip(),
                     codes = ?result.error_codes,
                     "turnstile verification rejected token"
                 );
@@ -113,7 +114,7 @@ pub async fn create_comment(
 
     // ── Per-IP daily cap ──────────────────────────────────────
     if state.config.max_comments_per_ip_per_day > 0 {
-        let key = ip_daily_key(&addr.ip());
+        let key = peer.limiter_key();
         if !state
             .limiter
             .check_and_increment(&key, state.config.max_comments_per_ip_per_day)
@@ -194,13 +195,13 @@ pub async fn create_comment(
     let (parent_id, depth) = resolve_parent(&form.parent_id, target_path, &state).await?;
 
     // 5. Generate delete token for self-service deletion.
-    let delete_token = generate_delete_token(&addr);
+    let delete_token = generate_delete_token(&peer.ip());
     let delete_token_str = delete_token.clone();
 
     // 6. Optionally store submitter IP and hash for spam analysis.
     let (submitter_ip, submitter_ip_hash) = if state.config.store_ip_address {
-        let raw = addr.ip().to_string();
-        let hash = crate::ip_hash::hash_ip(&addr.ip(), state.config.ip_hash_secret.as_deref());
+        let raw = peer.ip().to_string();
+        let hash = crate::ip_hash::hash_ip(&peer.ip(), state.config.ip_hash_secret.as_deref());
         (Some(raw), Some(hash))
     } else {
         (None, None)
@@ -354,12 +355,12 @@ pub async fn create_comment(
 }
 
 /// Generate a random hex token for self-service comment deletion.
-/// Uses a hash of the peer IP, current time, and a monotonic counter.
+/// Uses a hash of the client identity IP, current time, and a monotonic counter.
 /// Not cryptographically secure, but sufficient for anonymous comment deletion
 /// (the delete endpoint is rate-limited).
-fn generate_delete_token(addr: &SocketAddr) -> String {
+fn generate_delete_token(ip: &IpAddr) -> String {
     let mut hasher = DefaultHasher::new();
-    addr.hash(&mut hasher);
+    ip.hash(&mut hasher);
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

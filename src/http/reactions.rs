@@ -12,14 +12,14 @@
 //! raw), giving one reaction per person per comment.
 
 use axum::Json;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use serde::Deserialize;
-use std::net::SocketAddr;
 
 use crate::error::AppError;
 use crate::http::admin::request_has_admin_token;
+use crate::http::peer::ClientIdentity;
 use crate::state::AppState;
 
 /// Identifier used for admin reactions (in either mode).
@@ -45,7 +45,7 @@ pub struct ReactionBody {
 )]
 pub async fn add_reaction(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    peer: ClientIdentity,
     Path(comment_id): Path<i64>,
     headers: HeaderMap,
     Json(body): Json<ReactionBody>,
@@ -79,7 +79,7 @@ pub async fn add_reaction(
     let identifier = if is_admin {
         ADMIN_IDENTIFIER.to_string()
     } else {
-        crate::ip_hash::hash_ip(&addr.ip(), state.config.ip_hash_secret.as_deref())
+        crate::ip_hash::hash_ip(&peer.ip(), state.config.ip_hash_secret.as_deref())
     };
 
     let (reaction_id, changed) = state
@@ -152,7 +152,7 @@ pub async fn add_reaction(
 /// DELETE /api/comment/{id}/reaction — remove one's own active reaction.
 pub async fn remove_reaction(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    peer: ClientIdentity,
     Path(comment_id): Path<i64>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -165,7 +165,7 @@ pub async fn remove_reaction(
     let identifier = if is_admin {
         ADMIN_IDENTIFIER.to_string()
     } else {
-        crate::ip_hash::hash_ip(&addr.ip(), state.config.ip_hash_secret.as_deref())
+        crate::ip_hash::hash_ip(&peer.ip(), state.config.ip_hash_secret.as_deref())
     };
 
     let removed = state.repo.delete_reaction(comment_id, &identifier).await?;

@@ -59,13 +59,14 @@ async fn main() {
     }
 
     // A non-loopback bind is directly reachable from the network: TLS must
-    // terminate at the edge (the __Host- admin cookie requires HTTPS) and
-    // the server still must not trust X-Forwarded-For (rate limits key on
-    // the TCP peer). Warning-only — never fail boot for a listen address.
+    // terminate at the edge (the __Host- admin cookie requires HTTPS). The
+    // proxy-identity half of the warning depends on TRUST_PROXY (see
+    // src/http/peer.rs). Warning-only — never fail boot for a listen address.
     if is_public_bind(&config.bind_addr) {
         tracing::warn!(
             bind_addr = %config.bind_addr,
-            "listening on a non-loopback address without proxy config: terminate TLS at the edge and note per-IP rate limits see the proxy peer, not the client"
+            "{}",
+            public_bind_warning(config.trust_proxy)
         );
     }
 
@@ -157,6 +158,19 @@ fn is_public_bind(addr: &std::net::SocketAddr) -> bool {
     !addr.ip().is_loopback()
 }
 
+/// Advisory startup warning for a non-loopback bind, branched on
+/// `TRUST_PROXY`: without it every visitor shares the proxy peer's quota;
+/// with it the edge must overwrite (not append) the client-IP headers, or
+/// clients pick their own identity. Either way TLS must terminate at the
+/// edge. Warn-only — never fail boot for a listen address.
+fn public_bind_warning(trust_proxy: bool) -> &'static str {
+    if trust_proxy {
+        "listening on a non-loopback address with TRUST_PROXY: terminate TLS at the edge (the __Host- admin cookie requires HTTPS) and make the edge overwrite X-Forwarded-For / X-Real-IP / Forwarded — appended client headers would let clients pick their own identity and quota"
+    } else {
+        "listening on a non-loopback address without proxy config: terminate TLS at the edge and note per-IP rate limits see the proxy peer, not the client"
+    }
+}
+
 /// Run `PRAGMA quick_check` against the database and refuse to serve traffic
 /// when it reports anything but a clean `ok`. Corruption must fail loud at
 /// boot, not as silent row loss at request time.
@@ -206,6 +220,19 @@ mod tests {
         assert!(is_public_bind(&"0.0.0.0:3000".parse().unwrap()));
         assert!(is_public_bind(&"[::]:3000".parse().unwrap()));
         assert!(is_public_bind(&"192.168.1.10:3000".parse().unwrap()));
+    }
+
+    #[test]
+    fn public_bind_warning_branches_on_trust_proxy() {
+        assert!(
+            public_bind_warning(false).contains("without proxy config"),
+            "unset branch keeps the peer-quota advisory"
+        );
+        let set = public_bind_warning(true);
+        assert!(
+            set.contains("TRUST_PROXY") && set.contains("overwrite"),
+            "set branch must name the flag and the overwrite duty, got: {set}"
+        );
     }
 
     #[test]
