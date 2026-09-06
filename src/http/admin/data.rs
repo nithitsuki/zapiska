@@ -1,23 +1,30 @@
 //! Data export/import endpoints for backups and migration.
 //!
 //! - `GET /api/admin/export` - full dump of all five tables as JSON.
-//! - `POST /api/admin/import` — restore a dump (idempotent; preserves ids,
-//!   statuses, and timestamps; re-sanitizes comment content).
-
-use std::collections::HashMap;
+//! - `POST /api/admin/import` — restore a dump via [`Repo::restore`]
+//!   (idempotent; preserves ids, statuses, and timestamps; re-sanitizes
+//!   comment content).
+//!
+//! The handler keeps auth + JSON only: version check, policy mapping
+//! (`ImportFile` + `Config` → [`RestoreInput`]), one
+//! [`Repo::restore`](crate::db::repo::Repo::restore) call, response mapping.
+//! All restore intelligence — ordering, per-row skip semantics, orphan
+//! tolerance, salt re-derivation, overlap refusal — lives in
+//! `src/db/repo/restore.rs`.
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
+use crate::db::RestoreError;
 use crate::db::repo::{
-    Comment, CommentReaction, CommentUrl, ExportSnapshot, GithubProfile, NewGithubProfile,
-    NewWebmentionSeen, WebmentionSeen,
+    Comment, CommentReaction, CommentUrl, ExportSnapshot, GithubProfile, RestoreInput,
+    RestoreReport, WebmentionSeen,
 };
 use crate::error::AppError;
-use crate::sanitize;
 use crate::state::AppState;
-use crate::validate;
 
 /// Format version of the export document. Bump on breaking shape changes;
 /// imports reject any other version.
@@ -53,22 +60,20 @@ pub struct ImportFile {
     pub comment_urls: Option<Vec<CommentUrl>>,
     pub github_profiles: Option<Vec<GithubProfile>>,
     pub comment_reactions: Option<Vec<CommentReaction>>,
+    /// Explicit overwrite policy for id collisions (B-21): `false` (default)
+    /// refuses when an exported id holds different live data, `true`
+    /// overwrites live rows. Restore targets an empty database; set this
+    /// only to deliberately re-run a reviewed migration.
+    #[serde(default)]
+    pub force: bool,
 }
 
-#[derive(Serialize)]
-pub struct ImportResponse {
-    pub comments_imported: usize,
-    pub comments_skipped: usize,
-    pub webmention_seen_imported: usize,
-    pub comment_urls_imported: usize,
-    pub github_profiles_imported: usize,
-    pub comment_reactions_imported: usize,
-    /// Comment hashes re-derived from the raw IP with this server's secret.
-    pub ip_hashes_recomputed: usize,
-    /// Present when the export's salt status mismatches this server, meaning
-    /// reaction identities and unrecomputable hashes may be orphaned.
-    pub warning: Option<String>,
-}
+/// Import response body shape: on success the handler answers the
+/// storage-layer [`RestoreReport`] as JSON (one shared type, so handler
+/// counts and storage counts can never drift), including the per-section
+/// skip counts and the salt-mismatch `warning`. A mid-restore abort answers
+/// 500 with the partial report plus an `error` key (see [`abort_response`]).
+pub type ImportResponse = RestoreReport;
 
 /// GET /api/admin/export — full JSON dump (backup/migration source).
 /// The five tables come from ONE connection in one read transaction
@@ -95,339 +100,339 @@ pub async fn export(State(state): State<AppState>) -> Result<Json<ExportFile>, A
 }
 
 /// POST /api/admin/import — restore an export document. Idempotent: rows are
-/// upserted by natural key, so re-importing the same document is a no-op.
+/// upserted by natural key or id, so re-importing the same document is a
+/// no-op; refusals (unknown version, live-id collision without `force`)
+/// happen before the first write. A mid-restore storage abort answers 500
+/// carrying the counts-so-far (see [`abort_response`]), never a bare message.
 pub async fn import(
     State(state): State<AppState>,
     Json(body): Json<ImportFile>,
-) -> Result<Json<ImportResponse>, AppError> {
+) -> Result<Response, AppError> {
     if body.version != Some(EXPORT_VERSION) {
         return Err(AppError::BadRequest(format!(
             "unsupported export version {:?}, expected {EXPORT_VERSION}",
             body.version
         )));
     }
-
-    let mut response = ImportResponse {
-        comments_imported: 0,
-        comments_skipped: 0,
-        webmention_seen_imported: 0,
-        comment_urls_imported: 0,
-        github_profiles_imported: 0,
-        comment_reactions_imported: 0,
-        ip_hashes_recomputed: 0,
-        warning: None,
+    let input = RestoreInput {
+        comments: body.comments.unwrap_or_default(),
+        seen: body.webmention_seen.unwrap_or_default(),
+        urls: body.comment_urls.unwrap_or_default(),
+        profiles: body.github_profiles.unwrap_or_default(),
+        reactions: body.comment_reactions.unwrap_or_default(),
+        export_salted: body.ip_hash_salted,
+        ip_hash_secret: state.config.ip_hash_secret.clone(),
+        max_content_len: state.config.max_content_len,
+        force: body.force,
     };
-    // Whether any salted-looking identity material crossed the wire. Used
-    // for the salt-mismatch warning below.
-    let mut saw_salted_identities = false;
-    let export_salted = body.ip_hash_salted;
-    let current_salted = state.config.ip_hash_secret.is_some();
-
-    // Comments first (URL rows reference them), sorted by id so the
-    // parent_id foreign key always resolves (parents precede children).
-    if let Some(mut comments) = body.comments {
-        comments.sort_by_key(|c| c.id);
-        for mut c in comments {
-            let id = c.id;
-            if let Err(e) = validate_imported_comment(&mut c, state.config.max_content_len) {
-                tracing::warn!(id, err = %e, "import skipped invalid comment");
-                response.comments_skipped += 1;
-                continue;
-            }
-            if c.submitter_ip_hash.is_some() {
-                saw_salted_identities = true;
-            }
-            // Self-heal IP hashes across secret rotation: when the raw IP is
-            // present, the hash is re-derived with THIS server's secret
-            // instead of trusting the exported value. Rows without a raw IP
-            // keep their exported hash verbatim.
-            if let Some(ref raw) = c.submitter_ip {
-                if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
-                    // Canonicalize through ClientIdentity so a stored
-                    // IPv4-mapped address re-derives the same hash as its
-                    // plain IPv4 form (see src/http/peer.rs).
-                    let ip = crate::http::peer::ClientIdentity::normalize_ip(ip);
-                    let fresh =
-                        crate::ip_hash::hash_ip(&ip, state.config.ip_hash_secret.as_deref());
-                    if c.submitter_ip_hash.as_deref() != Some(fresh.as_str()) {
-                        c.submitter_ip_hash = Some(fresh);
-                        response.ip_hashes_recomputed += 1;
-                    }
-                }
-            }
-            // DB-level failures (e.g. an orphaned parent_id whose parent row
-            // was skipped) are skipped too — a single bad row must never
-            // abort the whole import.
-            if let Err(e) = state.repo.import_comment(c).await {
-                tracing::warn!(id, err = %e, "import skipped failed comment");
-                response.comments_skipped += 1;
-                continue;
-            }
-            response.comments_imported += 1;
-        }
+    match state.repo.restore(input).await {
+        Ok(report) => Ok(Json::<ImportResponse>(report).into_response()),
+        Err(RestoreError::Refused(msg)) => Err(AppError::BadRequest(msg)),
+        Err(RestoreError::Aborted { source, partial }) => Ok(abort_response(&source, &partial)),
     }
-
-    if let Some(rows) = body.webmention_seen {
-        for row in rows {
-            if !matches!(row.last_status.as_str(), "alive" | "gone") {
-                continue;
-            }
-            state
-                .repo
-                .upsert_webmention_seen(NewWebmentionSeen {
-                    source: row.source,
-                    target: row.target,
-                    last_status: row.last_status,
-                })
-                .await?;
-            response.webmention_seen_imported += 1;
-        }
-    }
-
-    if let Some(urls) = body.comment_urls {
-        // Group by comment so each comment is cleared once, then re-inserted
-        // in one batch (idempotent re-import).
-        let mut by_comment: HashMap<i64, Vec<(String, String, String)>> = HashMap::new();
-        for u in urls {
-            by_comment
-                .entry(u.comment_id)
-                .or_default()
-                .push((u.url, u.domain, u.url_hash));
-        }
-        for (comment_id, rows) in by_comment {
-            let count = rows.len();
-            // URL rows referencing comments that don't exist (e.g. skipped
-            // during import) are dropped without aborting the import.
-            if state
-                .repo
-                .delete_urls_for_comment(comment_id)
-                .await
-                .is_err()
-                || state.repo.insert_urls(comment_id, rows).await.is_err()
-            {
-                tracing::warn!(comment_id, "import skipped URL rows for missing comment");
-                continue;
-            }
-            response.comment_urls_imported += count;
-        }
-    }
-
-    if let Some(reactions) = body.comment_reactions {
-        for r in reactions {
-            if let Err(e) = validate_imported_reaction(&r) {
-                tracing::warn!(id = r.id, err = %e, "import skipped invalid reaction");
-                continue;
-            }
-            // Anyone-mode identifiers are salted IP hashes: they cannot be
-            // re-derived on import (no raw IP is stored for reactions).
-            if r.identifier.starts_with("h:") {
-                saw_salted_identities = true;
-            }
-            state.repo.import_comment_reaction(r).await?;
-            response.comment_reactions_imported += 1;
-        }
-    }
-
-    if let Some(profiles) = body.github_profiles {
-        for p in profiles {
-            state
-                .repo
-                .upsert_github_profile(NewGithubProfile {
-                    login: p.login,
-                    name: p.name,
-                    avatar_url: p.avatar_url,
-                    valid: p.valid,
-                })
-                .await?;
-            response.github_profiles_imported += 1;
-        }
-    }
-
-    // Salt-mismatch warning: comment hashes were re-derived above when a raw
-    // IP existed, but reaction identities cannot be healed. A changed or lost
-    // secret orphans anyone-mode reactions (old voters look like strangers)
-    // and any hash kept verbatim for lack of a raw IP.
-    if let Some(exported) = export_salted {
-        if exported != current_salted && saw_salted_identities {
-            let msg = format!(
-                "IP hash salt mismatch: export salted={exported}, this server salted={current_salted}. \
-                 Comment hashes were re-derived where a raw IP existed (see ip_hashes_recomputed); \
-                 reaction identities cannot be re-derived. Keep IP_HASH_SECRET stable and back up .env alongside exports."
-            );
-            tracing::warn!(msg = %msg, "import completed with salt mismatch");
-            response.warning = Some(msg);
-        }
-    }
-
-    Ok(Json(response))
 }
 
-/// Validate a reaction row from an untrusted import document. The reaction
-/// set itself is config, so only structural bounds are enforced here.
-fn validate_imported_reaction(r: &CommentReaction) -> Result<(), String> {
-    if r.id <= 0 {
-        return Err("id must be a positive integer".to_string());
+/// 500 carrying counts-so-far for a mid-restore abort (G4.1): the partial
+/// report plus the storage error, so the operator sees what landed and what
+/// skipped before the failure instead of a bare message.
+fn abort_response(source: &crate::db::RepoError, partial: &RestoreReport) -> Response {
+    tracing::warn!(err = %source, "import aborted mid-restore; returning counts-so-far");
+    let mut body = serde_json::to_value(partial).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert(
+            "error".to_string(),
+            serde_json::Value::String(source.to_string()),
+        );
     }
-    if r.comment_id <= 0 {
-        return Err("comment_id must be a positive integer".to_string());
-    }
-    if r.reaction.is_empty() || r.reaction.chars().count() > 16 {
-        return Err("reaction must be 1-16 characters".to_string());
-    }
-    if !matches!(
-        r.status.as_str(),
-        "pending" | "approved" | "spam" | "deleted"
-    ) {
-        return Err(format!("invalid status '{}'", r.status));
-    }
-    if r.identifier.is_empty() || r.identifier.len() > 128 {
-        return Err("identifier must be 1-128 characters".to_string());
-    }
-    Ok(())
-}
-
-/// Validate a comment from an untrusted import document. Defense in depth:
-/// even though the endpoint is admin-only, imported content is re-sanitized
-/// and every field is re-checked exactly as a native submission would be.
-fn validate_imported_comment(c: &mut Comment, max_content_len: usize) -> Result<(), String> {
-    if c.id <= 0 {
-        return Err("id must be a positive integer".to_string());
-    }
-    validate::validate_target_path(&c.target_path).map_err(|e| e.to_string())?;
-    if !matches!(c.comment_type.as_str(), "native" | "webmention") {
-        return Err(format!("invalid comment_type '{}'", c.comment_type));
-    }
-    if !matches!(
-        c.status.as_str(),
-        "pending" | "approved" | "spam" | "deleted"
-    ) {
-        return Err(format!("invalid status '{}'", c.status));
-    }
-    c.author_name = validate::strip_control_chars(&c.author_name)
-        .trim()
-        .to_string();
-    if c.author_name.is_empty() {
-        return Err("author_name must not be empty".to_string());
-    }
-    if c.author_name.chars().count() > 100 {
-        c.author_name = c.author_name.chars().take(100).collect();
-    }
-    if let Some(ref u) = c.author_url {
-        validate::validate_http_url(u).map_err(|e| e.to_string())?;
-    }
-    if let Some(pid) = c.parent_id {
-        if pid >= c.id {
-            return Err(format!("parent_id {pid} must precede id {}", c.id));
-        }
-    }
-    c.depth = c.depth.clamp(0, 10);
-    c.content = sanitize::sanitize_html(&c.content, max_content_len);
-    Ok(())
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use tower::ServiceExt;
 
-    fn sample() -> Comment {
-        Comment {
-            id: 42,
-            target_path: "/blog/hello".to_string(),
-            comment_type: "native".to_string(),
-            source_url: None,
-            author_name: "Alice".to_string(),
-            author_url: Some("https://alice.blog".to_string()),
-            author_avatar: None,
-            content: "<p>Great post!</p>".to_string(),
-            status: "approved".to_string(),
-            created_at: "2026-08-07 12:00:00".to_string(),
-            updated_at: "2026-08-07 12:00:00".to_string(),
-            parent_id: None,
-            depth: 0,
-            honeypot: false,
-            delete_token: None,
-            submitter_ip: None,
-            submitter_ip_hash: None,
-            content_hash: None,
+    use crate::http::test_support::helpers;
+
+    fn json_request(
+        method: axum::http::Method,
+        uri: &str,
+        body: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        helpers::json_request(method, uri, body)
+    }
+
+    #[tokio::test]
+    async fn import_fk_broken_reaction_skips_with_counts() {
+        // Uniform skip-and-count (B-19): one valid comment plus a reaction
+        // pointing at a comment that was never imported completes with 200
+        // and reports the skip — the old handler `?`-aborted with a 500 on a
+        // half-done restore and the counts never reached the operator.
+        let (state, _dir) = helpers::test_state();
+        let app = crate::http::build_app(state.clone());
+        let body = serde_json::json!({
+            "version": 1,
+            "comments": [{
+                "id": 1, "target_path": "/t17-red", "comment_type": "native",
+                "source_url": null, "author_name": "Ada", "author_url": null,
+                "author_avatar": null, "content": "hello", "status": "approved",
+                "created_at": "2026-08-01 10:00:00", "updated_at": "2026-08-01 10:00:00",
+                "parent_id": null, "depth": 0, "honeypot": false,
+                "delete_token": null, "submitter_ip": null,
+                "submitter_ip_hash": null, "content_hash": null
+            }],
+            "comment_reactions": [{
+                "id": 1, "comment_id": 999, "reaction": "👍",
+                "identifier": "admin", "status": "approved",
+                "created_at": "2026-08-01 10:00:00", "updated_at": "2026-08-01 10:00:00"
+            }]
+        })
+        .to_string();
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "FK-broken reaction must skip, not abort the restore"
+        );
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["comments_imported"], 1);
+        assert_eq!(result["comments_skipped"], 0);
+        assert_eq!(result["comment_reactions_imported"], 0);
+        assert_eq!(result["comment_reactions_skipped"], 1);
+        assert!(state.repo.get_comment(1).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn import_live_db_colliding_ids_refuse() {
+        // B-21 refuse-by-default: a live moderated comment whose id collides
+        // with a differing export row refuses with 400 and stays untouched.
+        let (state, _dir) = helpers::test_state();
+        let id = state
+            .repo
+            .insert_comment(crate::db::repo::NewComment {
+                target_path: "/live".to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "Live".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "live decision".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        state.repo.update_status(id, "approved").await.unwrap();
+        let app = crate::http::build_app(state.clone());
+        let body = serde_json::json!({
+            "version": 1,
+            "comments": [{
+                "id": id, "target_path": "/live", "comment_type": "native",
+                "source_url": null, "author_name": "Backup", "author_url": null,
+                "author_avatar": null, "content": "stale backup",
+                "status": "pending",
+                "created_at": "2026-08-01 10:00:00", "updated_at": "2026-08-01 10:00:00",
+                "parent_id": null, "depth": 0, "honeypot": false,
+                "delete_token": null, "submitter_ip": null,
+                "submitter_ip_hash": null, "content_hash": null
+            }]
+        })
+        .to_string();
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "colliding live id must refuse, not clobber"
+        );
+        let live = state.repo.get_comment(id).await.unwrap().unwrap();
+        assert_eq!(live.content, "live decision");
+        assert_eq!(live.status, "approved");
+    }
+
+    #[tokio::test]
+    async fn import_force_overwrites_colliding_live_row() {
+        // The explicit `"force": true` policy overwrites after review.
+        let (state, _dir) = helpers::test_state();
+        let id = state
+            .repo
+            .insert_comment(crate::db::repo::NewComment {
+                target_path: "/live".to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "Live".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "live".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        let app = crate::http::build_app(state.clone());
+        let body = serde_json::json!({
+            "version": 1,
+            "force": true,
+            "comments": [{
+                "id": id, "target_path": "/live", "comment_type": "native",
+                "source_url": null, "author_name": "Live", "author_url": null,
+                "author_avatar": null, "content": "operator reviewed backup",
+                "status": "approved",
+                "created_at": "2026-08-01 10:00:00", "updated_at": "2026-08-01 10:00:00",
+                "parent_id": null, "depth": 0, "honeypot": false,
+                "delete_token": null, "submitter_ip": null,
+                "submitter_ip_hash": null, "content_hash": null
+            }]
+        })
+        .to_string();
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            state.repo.get_comment(id).await.unwrap().unwrap().content,
+            "operator reviewed backup"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_emits_zero_moderation_webhooks() {
+        // (d): restored statuses are historical data, not transitions — even
+        // with a moderation webhook configured, an import firing approved and
+        // spam rows emits nothing (an import firing thousands of
+        // status_changed would DDoS the engine).
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"action": "approved"})),
+            )
+            .mount(&server)
+            .await;
+        let (mut state, _dir) = helpers::test_state();
+        state.config.moderation_webhook_url = Some(server.uri());
+        let app = crate::http::build_app(state.clone());
+        let body = serde_json::json!({
+            "version": 1,
+            "comments": [
+                {
+                    "id": 1, "target_path": "/t17-hook", "comment_type": "native",
+                    "source_url": null, "author_name": "Ada", "author_url": null,
+                    "author_avatar": null, "content": "approved row",
+                    "status": "approved",
+                    "created_at": "2026-08-01 10:00:00", "updated_at": "2026-08-01 10:00:00",
+                    "parent_id": null, "depth": 0, "honeypot": false,
+                    "delete_token": null, "submitter_ip": null,
+                    "submitter_ip_hash": null, "content_hash": null
+                },
+                {
+                    "id": 2, "target_path": "/t17-hook", "comment_type": "native",
+                    "source_url": null, "author_name": "Bob", "author_url": null,
+                    "author_avatar": null, "content": "spam row",
+                    "status": "spam",
+                    "created_at": "2026-08-01 10:00:00", "updated_at": "2026-08-01 10:00:00",
+                    "parent_id": null, "depth": 0, "honeypot": false,
+                    "delete_token": null, "submitter_ip": null,
+                    "submitter_ip_hash": null, "content_hash": null
+                }
+            ],
+            "comment_reactions": [{
+                "id": 1, "comment_id": 1, "reaction": "👍",
+                "identifier": "admin", "status": "approved",
+                "created_at": "2026-08-01 10:00:00", "updated_at": "2026-08-01 10:00:00"
+            }]
+        })
+        .to_string();
+        let resp = app
+            .oneshot(json_request(
+                axum::http::Method::POST,
+                "/api/admin/import",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        // Fire-and-forget delivery spawns a task: poll up to ~2 s so a late
+        // regressed emission fails instead of passing silently after a nap.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let received = server.received_requests().await.unwrap();
+            assert!(
+                received.is_empty(),
+                "restore must emit zero moderation webhooks, got {}",
+                received.len()
+            );
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+        assert_eq!(
+            state.repo.get_comment(1).await.unwrap().unwrap().status,
+            "approved"
+        );
+        assert_eq!(
+            state.repo.get_comment(2).await.unwrap().unwrap().status,
+            "spam"
+        );
     }
 
-    #[test]
-    fn valid_comment_passes() {
-        let mut c = sample();
-        assert!(validate_imported_comment(&mut c, 2000).is_ok());
-    }
-
-    #[test]
-    fn invalid_status_and_type_rejected() {
-        let mut c = sample();
-        c.status = "evil".to_string();
-        assert!(validate_imported_comment(&mut c, 2000).is_err());
-        let mut c = sample();
-        c.comment_type = "spam".to_string();
-        assert!(validate_imported_comment(&mut c, 2000).is_err());
-    }
-
-    #[test]
-    fn parent_id_must_precede_comment() {
-        let mut c = sample();
-        c.parent_id = Some(43);
-        assert!(validate_imported_comment(&mut c, 2000).is_err());
-        let mut c = sample();
-        c.parent_id = Some(41);
-        assert!(validate_imported_comment(&mut c, 2000).is_ok());
-    }
-
-    #[test]
-    fn content_is_resanitized_and_truncated() {
-        let mut c = sample();
-        c.content = format!("<script>alert(1)</script>{}", "x".repeat(5000));
-        assert!(validate_imported_comment(&mut c, 2000).is_ok());
-        assert!(!c.content.contains("<script>"), "script stripped on import");
-        assert!(c.content.chars().count() <= 2000, "truncated to max len");
-    }
-
-    #[test]
-    fn control_chars_stripped_from_author_name() {
-        let mut c = sample();
-        c.author_name = "Bad\x00Guy".to_string();
-        assert!(validate_imported_comment(&mut c, 2000).is_ok());
-        assert_eq!(c.author_name, "BadGuy");
-    }
-
-    #[test]
-    fn reaction_validation() {
-        let valid = CommentReaction {
-            id: 1,
-            comment_id: 2,
-            reaction: "👍".to_string(),
-            identifier: "admin".to_string(),
-            status: "approved".to_string(),
-            created_at: "2026-08-01 10:00:00".to_string(),
-            updated_at: "2026-08-01 10:00:00".to_string(),
+    #[tokio::test]
+    async fn abort_response_carries_counts_so_far_with_500() {
+        // G4.1 handler half: a mid-restore abort maps to a 500 whose body
+        // carries the partial report plus the storage error.
+        use axum::http::StatusCode;
+        let partial = super::RestoreReport {
+            comments_imported: 2,
+            comments_skipped: 1,
+            ..super::RestoreReport::default()
         };
-        assert!(validate_imported_reaction(&valid).is_ok());
-        let mut bad = valid.clone();
-        bad.id = 0;
-        assert!(validate_imported_reaction(&bad).is_err());
-        let mut bad = valid.clone();
-        bad.reaction = "x".repeat(17);
-        assert!(validate_imported_reaction(&bad).is_err());
-        let mut bad = valid.clone();
-        bad.status = "evil".to_string();
-        assert!(validate_imported_reaction(&bad).is_err());
-        let mut bad = valid.clone();
-        bad.comment_id = 0;
-        assert!(validate_imported_reaction(&bad).is_err());
-    }
-
-    #[test]
-    fn invalid_path_and_url_rejected() {
-        let mut c = sample();
-        c.target_path = "no-slash".to_string();
-        assert!(validate_imported_comment(&mut c, 2000).is_err());
-        let mut c = sample();
-        c.author_url = Some("javascript:alert(1)".to_string());
-        assert!(validate_imported_comment(&mut c, 2000).is_err());
+        let resp =
+            super::abort_response(&crate::db::RepoError::Io("disk full".to_string()), &partial);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["comments_imported"], 2);
+        assert_eq!(body["comments_skipped"], 1);
+        assert!(
+            body["error"].as_str().unwrap().contains("disk full"),
+            "unexpected body: {body}"
+        );
     }
 }

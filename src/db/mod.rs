@@ -91,6 +91,87 @@ impl From<RepoError> for crate::error::AppError {
     }
 }
 
+/// Restore pre-flight refusal vs mid-restore abort (T17 — see
+/// `repo/restore.rs`). Per-row validity outcomes never surface as `Err` (they
+/// skip-and-count into the `RestoreReport`); only these two cases do — and
+/// the abort carries the counts accumulated before the failure.
+#[derive(Debug)]
+pub enum RestoreError {
+    /// Pre-flight refusal (B-21): the export would overwrite live rows that
+    /// hold different data. Checked before the first write, so the database
+    /// is untouched. The operator re-runs with `"force": true` in the import
+    /// body to overwrite live rows explicitly. Identical re-imports (crash
+    /// recovery) never refuse — only *differing* rows collide.
+    Refused(String),
+    /// Storage-health abort: a `Busy`/`Io`/`Other` failure mid-restore (disk
+    /// full, lock contention, corruption — matched structurally on the T14
+    /// variant, never on message text). `partial` is the counts-so-far
+    /// (boxed: aborts are rare, and an inline report would push every
+    /// `Result<_, RestoreError>` over the large-err threshold), so the 500
+    /// carries what landed and what skipped before the failure instead of a
+    /// bare message. Per-row commits before the abort stand; re-import is
+    /// idempotent and heals partial state. Never built from a per-row
+    /// `Constraint` — those skip-and-count inside [`Repo::restore`].
+    Aborted {
+        source: RepoError,
+        partial: Box<RestoreReport>,
+    },
+}
+
+impl RestoreError {
+    /// Abort carrying counts-so-far: every restore section threads its
+    /// running report through, so a mid-restore failure still reports the
+    /// work completed before it.
+    pub fn abort(source: RepoError, partial: &RestoreReport) -> Self {
+        Self::Aborted {
+            source,
+            partial: Box::new(partial.clone()),
+        }
+    }
+}
+
+impl std::fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(msg) => write!(f, "{msg}"),
+            Self::Aborted { source, .. } => write!(f, "{source}"),
+        }
+    }
+}
+
+impl std::error::Error for RestoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Refused(_) => None,
+            Self::Aborted { source, .. } => Some(source),
+        }
+    }
+}
+
+impl From<RepoError> for RestoreError {
+    /// Pre-write failures (the overlap pre-flight runs before the first
+    /// write) abort with an empty partial — exact, not a placeholder.
+    fn from(e: RepoError) -> Self {
+        Self::Aborted {
+            source: e,
+            partial: Box::new(RestoreReport::default()),
+        }
+    }
+}
+
+impl From<RestoreError> for crate::error::AppError {
+    fn from(e: RestoreError) -> Self {
+        match e {
+            // Refusal is an operator-precondition failure (like an unknown
+            // export version): 400 with the remedy in the message. Aborts
+            // keep the storage mapping (500s); the HTTP import handler maps
+            // the partial counts into the 500 body itself.
+            RestoreError::Refused(msg) => Self::BadRequest(msg),
+            RestoreError::Aborted { source, .. } => Self::from(source),
+        }
+    }
+}
+
 #[cfg(test)]
 mod t14_typed_error_tests {
     use super::*;

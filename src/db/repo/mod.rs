@@ -7,7 +7,7 @@ type RepoResult<T> = Result<T, RepoError>;
 
 // ── Data types ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Comment {
     pub id: i64,
     pub target_path: String,
@@ -260,10 +260,12 @@ pub(crate) fn url_error_policy(err: &RepoError) -> UrlErrorAction {
 mod comments;
 mod github_profiles;
 mod reactions;
+mod restore;
 mod urls;
 mod webmentions;
 
 pub use reactions::{CommentReaction, ReactionWithComment};
+pub use restore::{RestoreInput, RestoreReport};
 pub use urls::{CommentUrl, UrlCommentRef, UrlStats};
 
 // ── Helpers ─────────────────────────────────────────────────

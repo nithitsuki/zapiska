@@ -308,6 +308,44 @@ import response carries a `warning` when it detects this mismatch, and the
 server logs a warning at startup when the database holds hashes but the
 secret is unset.
 
+### Restore procedure
+
+Restore targets an empty database. To migrate or recover:
+
+```sh
+# 1. Stop the service and start it against a fresh database file
+#    (or point DATABASE_PATH at an empty file).
+# 2. Restore the export:
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data @backup.json \
+  http://127.0.0.1:3000/api/admin/import
+```
+
+The response reports per-section `*_imported` and `*_skipped` counts plus
+`ip_hashes_recomputed` and a salt-mismatch `warning` when one applies.
+Skipped rows never abort the restore: fix the source data and re-import —
+re-importing the same document is idempotent, so a retried or crashed
+import heals to the full state.
+
+Overlap refusal: importing into a database whose comment or reaction IDs
+already hold different data is refused with `400` before the first write —
+an old backup never silently reverts live moderation decisions. Re-run with
+`"force": true` added to the import body only to deliberately overwrite
+colliding live rows after review.
+
+WARNING: The export file contains raw submitter IPs and `delete_token`
+values alongside content. Anyone holding `backup.json` can delete any
+imported native comment that still carries its token, and can read every
+stored peer address. Treat the export as a secret document: restrict file
+permissions, encrypt off-site copies, and never publish it.
+
+Salt rotation: keep `IP_HASH_SECRET` stable and back it up with `.env`.
+Comment hashes are re-derived on import where a raw IP exists, but
+anyone-mode reaction identities cannot be re-derived — a lost or rotated
+secret orphans them (old voters look like strangers). The import response
+warns when it detects this mismatch.
+
 ### Legacy duplicate `(source_url, target_path)` rows
 
 Very old databases may predate the partial unique index

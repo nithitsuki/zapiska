@@ -31,6 +31,19 @@ pub(crate) fn insert_urls_on_conn(
     Ok(())
 }
 
+/// Delete-all on the caller's connection (restore batches).
+pub(crate) fn delete_urls_for_comment_on_conn(
+    conn: &rusqlite::Connection,
+    comment_id: i64,
+) -> RepoResult<()> {
+    conn.execute(
+        "DELETE FROM comment_urls WHERE comment_id = ?1",
+        params![comment_id],
+    )
+    .map_err(RepoError::from)?;
+    Ok(())
+}
+
 /// An extracted URL from a comment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommentUrl {
@@ -239,6 +252,46 @@ impl Repo {
             )
             .map_err(RepoError::from)?;
             Ok(())
+        })
+        .await
+    }
+
+    /// Replace all URL rows for one comment in ONE `BEGIN IMMEDIATE` commit
+    /// (restore path, B-24): the old delete-then-insert spanned two commits,
+    /// so a crash between them lost the comment's URLs until the next full
+    /// re-import. Returns `(imported, skipped)`: an invalid row
+    /// (`Constraint`) is skipped with a warn log while its siblings still
+    /// commit; `Busy`/`Io`/`Other` roll the whole comment batch back for the
+    /// caller to abort on (same [`super::url_error_policy`] as the native
+    /// store path). Callers pre-validate rows and pre-check the comment, so
+    /// in practice every row lands.
+    pub async fn replace_urls_for_comment(
+        &self,
+        comment_id: i64,
+        rows: Vec<(String, String, String)>,
+    ) -> RepoResult<(usize, usize)> {
+        self.with_tx(move |tx| {
+            delete_urls_for_comment_on_conn(tx, comment_id)?;
+            let mut imported = 0usize;
+            let mut skipped = 0usize;
+            for (url, domain, url_hash) in &rows {
+                match insert_url_on_conn(tx, comment_id, url, domain, url_hash) {
+                    Ok(()) => imported += 1,
+                    Err(e) => match super::url_error_policy(&e) {
+                        super::UrlErrorAction::SkipRow => {
+                            skipped += 1;
+                            tracing::warn!(
+                                comment_id,
+                                url = %url,
+                                err = %e,
+                                "restore skipped bad URL row"
+                            );
+                        }
+                        super::UrlErrorAction::Abort => return Err(e),
+                    },
+                }
+            }
+            Ok((imported, skipped))
         })
         .await
     }

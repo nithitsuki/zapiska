@@ -224,6 +224,25 @@ All notable changes to zapiska are documented here. The format follows
   400, absent behaves as before), so an emoji change racing an approval keeps
   the new emoji pending; approvals from `spam`/`deleted` are explicit
   overrides via plain write.
+- Import is now a storage-layer restore service (`Repo::restore` in
+  `src/db/repo/restore.rs`; `POST /api/admin/import` keeps auth plus JSON
+  only). Per-section handling is uniform: invalid and orphaned rows in every
+  section (comments, ledger, URLs, profiles, reactions) skip with a
+  per-section `*_skipped` count — a single bad reaction row no longer aborts
+  the whole import with a 500 and lost counts. Row failures branch
+  structurally on the typed storage error (`Constraint` skips;
+  `Busy`/`Io`/`Other` abort for retry). Restoring into a live database whose
+  comment or reaction IDs hold different data is refused with `400` before
+  the first write instead of silently reverting live moderation decisions;
+  pass `"force": true` in the import body to overwrite colliding rows
+  explicitly. Re-importing the same document stays idempotent, each
+  comment's URL rows are replaced in one atomic commit, restored statuses
+  write directly with no moderation webhook emission and no
+  compare-and-swap, and URL/ledger/profile rows get structural validation
+  (shapes plus byte-length caps). The response gains
+  `webmention_seen_skipped`, `comment_urls_skipped`,
+  `github_profiles_skipped`, and `comment_reactions_skipped` alongside the
+  existing counts.
 
 ## [0.2.0] - 2026-08-07
 

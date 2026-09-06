@@ -7,7 +7,7 @@ use super::{Repo, RepoError, RepoResult};
 
 /// A single reaction row. One row per (comment, identifier) — changing the
 /// emoji updates the row and resets it to `pending` for re-moderation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommentReaction {
     pub id: i64,
     pub comment_id: i64,

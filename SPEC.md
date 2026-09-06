@@ -354,16 +354,38 @@ The export contains:
   The secret itself is never exported — back up `.env` alongside the JSON.
 
 `POST /api/admin/import` accepts version `1` and a body up to 16 MiB.
+The optional `force` field defaults to `false` (see the overlap rule below).
 
-The import sorts comments by ID and restores parents before children.
-It re-sanitizes content and checks selected field values.
+The import is a storage-layer restore (`Repo::restore`). It sorts comments
+by ID and restores parents before children. It re-sanitizes content and
+checks every row's fields: comments exactly as a native submission, URL,
+ledger, profile, and reaction rows against structural bounds (identifier,
+URL, login, and hash shapes with byte-length caps).
 It re-derives each comment IP hash from the raw IP with the importing
 server's secret and reports the count as `ip_hashes_recomputed`.
-It skips failed comment and URL rows and reports their counts.
+It skips invalid and orphaned rows in every section — failed comments,
+orphaned children, bad URLs, bad ledger, profile, and reaction rows — and
+reports per-section `*_imported` and `*_skipped` counts. Only storage-health
+failures (disk full, lock contention, corruption) abort the restore, and the
+abort response still carries the per-section counts accumulated so far; the
+operator retries, and re-importing the same document is always a no-op for
+identical rows, so a retried or crashed import heals to the full state.
+Each comment's URL rows are replaced in one atomic commit.
 When the export salt flag mismatches the importing server and salted
 identities (hashes, anyone-mode reaction IDs) are present, the response
 carries a `warning`: reaction identities cannot be re-derived, so a lost or
 rotated secret orphans them.
+
+Restored statuses are historical data, not moderation transitions: the
+import writes statuses directly with no webhook emission and no
+compare-and-swap. Only live paths (admin moderation, self-delete, reaction
+upserts) transition statuses and emit `status_changed`.
+
+The import refuses into a live database: when an exported comment or
+reaction ID holds different data than the stored row, the restore aborts
+before the first write with `400` instead of silently reverting live
+moderation decisions. Restore targets an empty database. Re-run with
+`"force": true` to overwrite colliding live rows explicitly after review.
 
 ## Notifications
 
