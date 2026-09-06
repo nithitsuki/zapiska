@@ -146,6 +146,19 @@ pub use urls::{CommentUrl, UrlCommentRef, UrlStats};
 ///   id, target_path, comment_type, source_url, author_name, author_url,
 ///   author_avatar, content, status, created_at, updated_at, parent_id, depth,
 ///   honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
+///
+/// `COMMENT_COLUMNS` is the single source of truth for that list: every
+/// comment read builds its SELECT from it, so adding a column is a one-line
+/// change here plus the mapper below instead of ~12 SQL string edits.
+const COMMENT_COLUMNS: &str = "id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash";
+
+/// Build a comment read query from one predicate template. Optional filters
+/// use `(?N IS NULL OR ...)` so one prepared statement covers both the
+/// filtered and unfiltered cases — no dual-query cursor branches.
+fn select_comments(where_clause: &str, order: &str) -> String {
+    format!("SELECT {COMMENT_COLUMNS} FROM comments WHERE {where_clause} ORDER BY {order}")
+}
+
 fn row_to_comment(row: &rusqlite::Row) -> rusqlite::Result<Comment> {
     Ok(Comment {
         id: row.get(0)?,

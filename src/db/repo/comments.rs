@@ -1,7 +1,8 @@
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 
-use super::{Comment, NewComment, Repo, RepoError, RepoResult, row_to_comment};
+use super::select_comments;
+use super::{COMMENT_COLUMNS, Comment, NewComment, Repo, RepoError, RepoResult, row_to_comment};
 
 impl Repo {
     pub async fn insert_comment(&self, input: NewComment) -> RepoResult<i64> {
@@ -76,33 +77,20 @@ impl Repo {
     ) -> RepoResult<Vec<Comment>> {
         let path = path.to_string();
         self.spawn(move |conn| {
-            let mut stmt = if let Some(_cursor) = before {
-                conn.prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE target_path = ?1 AND status = 'approved' AND id < ?2
-                     ORDER BY id DESC
-                     LIMIT ?3",
+            let sql = format!(
+                "{} LIMIT ?3",
+                select_comments(
+                    "target_path = ?1 AND status = 'approved' AND (?2 IS NULL OR id < ?2)",
+                    "id DESC",
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?
-            } else {
-                conn.prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE target_path = ?1 AND status = 'approved'
-                     ORDER BY id DESC
-                     LIMIT ?2",
-                )
-                .map_err(|e| RepoError::Internal(e.to_string()))?
-            };
+            );
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
 
-            let rows = if let Some(cursor) = before {
-                stmt.query_map(params![path, cursor, limit], row_to_comment)
-                    .map_err(|e| RepoError::Internal(e.to_string()))?
-            } else {
-                stmt.query_map(params![path, limit], row_to_comment)
-                    .map_err(|e| RepoError::Internal(e.to_string()))?
-            };
+            let rows = stmt
+                .query_map(params![path, before, limit], row_to_comment)
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
 
             let mut comments = Vec::new();
             for row in rows {
@@ -124,33 +112,20 @@ impl Repo {
     ) -> RepoResult<Vec<Comment>> {
         let path = path.to_string();
         self.spawn(move |conn| {
-            let mut stmt = if let Some(_cursor) = after {
-                conn.prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE target_path = ?1 AND status = 'approved' AND id > ?2
-                     ORDER BY id ASC
-                     LIMIT ?3",
+            let sql = format!(
+                "{} LIMIT ?3",
+                select_comments(
+                    "target_path = ?1 AND status = 'approved' AND (?2 IS NULL OR id > ?2)",
+                    "id ASC",
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?
-            } else {
-                conn.prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE target_path = ?1 AND status = 'approved'
-                     ORDER BY id ASC
-                     LIMIT ?2",
-                )
-                .map_err(|e| RepoError::Internal(e.to_string()))?
-            };
+            );
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
 
-            let rows = if let Some(cursor) = after {
-                stmt.query_map(params![path, cursor, limit], row_to_comment)
-                    .map_err(|e| RepoError::Internal(e.to_string()))?
-            } else {
-                stmt.query_map(params![path, limit], row_to_comment)
-                    .map_err(|e| RepoError::Internal(e.to_string()))?
-            };
+            let rows = stmt
+                .query_map(params![path, after, limit], row_to_comment)
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
 
             let mut comments = Vec::new();
             for row in rows {
@@ -164,14 +139,12 @@ impl Repo {
     /// List approved comments across ALL paths, newest first (global feed).
     pub async fn list_approved_global(&self, limit: i64) -> RepoResult<Vec<Comment>> {
         self.spawn(move |conn| {
+            let sql = format!(
+                "{} LIMIT ?1",
+                select_comments("status = 'approved'", "id DESC")
+            );
             let mut stmt = conn
-                .prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE status = 'approved'
-                     ORDER BY id DESC
-                     LIMIT ?1",
-                )
+                .prepare(&sql)
                 .map_err(|e| RepoError::Internal(e.to_string()))?;
             let rows = stmt
                 .query_map(params![limit], row_to_comment)
@@ -243,73 +216,22 @@ impl Repo {
     ) -> RepoResult<Vec<Comment>> {
         let path = path.map(|s| s.to_string());
         self.spawn(move |conn| {
-            let (sql, has_path, has_cursor) = match (&path, before) {
-                (Some(_), Some(_)) => (
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE status = 'pending' AND target_path = ?1 AND id < ?2
-                     ORDER BY id DESC
-                     LIMIT ?3",
-                    true, true,
-                ),
-                (Some(_), None) => (
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE status = 'pending' AND target_path = ?1
-                     ORDER BY id DESC
-                     LIMIT ?2",
-                    true, false,
-                ),
-                (None, Some(_)) => (
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE status = 'pending' AND id < ?1
-                     ORDER BY id DESC
-                     LIMIT ?2",
-                    false, true,
-                ),
-                (None, None) => (
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE status = 'pending'
-                     ORDER BY id DESC
-                     LIMIT ?1",
-                    false, false,
-                ),
-            };
-
+            let sql = format!(
+                "{} LIMIT ?3",
+                select_comments(
+                    "status = 'pending' AND (?1 IS NULL OR target_path = ?1) AND (?2 IS NULL OR id < ?2)",
+                    "id DESC",
+                )
+            );
             let mut stmt = conn
-                .prepare(sql)
+                .prepare(&sql)
                 .map_err(|e| RepoError::Internal(e.to_string()))?;
 
-            let rows: Vec<Comment> = match (has_path, has_cursor) {
-                (true, true) => {
-                    let p = path.as_deref().unwrap();
-                    stmt.query_map(params![p, before.unwrap(), limit], row_to_comment)
-                        .map_err(|e| RepoError::Internal(e.to_string()))?
-                        .filter_map(|r| r.ok())
-                        .collect()
-                }
-                (true, false) => {
-                    let p = path.as_deref().unwrap();
-                    stmt.query_map(params![p, limit], row_to_comment)
-                        .map_err(|e| RepoError::Internal(e.to_string()))?
-                        .filter_map(|r| r.ok())
-                        .collect()
-                }
-                (false, true) => {
-                    stmt.query_map(params![before.unwrap(), limit], row_to_comment)
-                        .map_err(|e| RepoError::Internal(e.to_string()))?
-                        .filter_map(|r| r.ok())
-                        .collect()
-                }
-                (false, false) => {
-                    stmt.query_map(params![limit], row_to_comment)
-                        .map_err(|e| RepoError::Internal(e.to_string()))?
-                        .filter_map(|r| r.ok())
-                        .collect()
-                }
-            };
+            let rows: Vec<Comment> = stmt
+                .query_map(params![path, before, limit], row_to_comment)
+                .map_err(|e| RepoError::Internal(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
             Ok(rows)
         })
         .await
@@ -333,34 +255,33 @@ impl Repo {
         self.spawn(move |conn| {
             // When path contains '%', use LIKE (supports wildcards like /blog/%).
             // Otherwise exact match (or empty = no filter).
-            let mut stmt = if path_val.contains('%') {
-                conn.prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE (?1 = '' OR ?1 = 'all' OR status = ?1)
-                       AND (?2 = '' OR target_path LIKE ?2)
-                       AND (?3 = 0 OR id < ?3)
-                       AND (?4 = '' OR submitter_ip = ?4)
-                       AND (?5 = '' OR content_hash = ?5)
-                     ORDER BY id DESC
-                     LIMIT ?6"
-                ).map_err(|e| RepoError::Internal(e.to_string()))?
+            let path_cmp = if path_val.contains('%') {
+                "target_path LIKE ?2"
             } else {
-                conn.prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     WHERE (?1 = '' OR ?1 = 'all' OR status = ?1)
-                       AND (?2 = '' OR target_path = ?2)
+                "target_path = ?2"
+            };
+            let sql = format!(
+                "{} LIMIT ?6",
+                select_comments(
+                    &format!(
+                        "(?1 = '' OR ?1 = 'all' OR status = ?1)
+                       AND (?2 = '' OR {path_cmp})
                        AND (?3 = 0 OR id < ?3)
                        AND (?4 = '' OR submitter_ip = ?4)
-                       AND (?5 = '' OR content_hash = ?5)
-                     ORDER BY id DESC
-                     LIMIT ?6"
-                ).map_err(|e| RepoError::Internal(e.to_string()))?
-            };
+                       AND (?5 = '' OR content_hash = ?5)"
+                    ),
+                    "id DESC",
+                )
+            );
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| RepoError::Internal(e.to_string()))?;
 
             let rows = stmt
-                .query_map(params![status_val, path_val, before_val, ip_val, ch_val, limit], row_to_comment)
+                .query_map(
+                    params![status_val, path_val, before_val, ip_val, ch_val, limit],
+                    row_to_comment,
+                )
                 .map_err(|e| RepoError::Internal(e.to_string()))?;
 
             let mut comments = Vec::new();
@@ -446,14 +367,10 @@ impl Repo {
 
     pub async fn get_comment(&self, id: i64) -> RepoResult<Option<Comment>> {
         self.spawn(move |conn| {
-            conn.query_row(
-                "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                 FROM comments WHERE id = ?1",
-                params![id],
-                row_to_comment,
-            )
-            .optional()
-            .map_err(|e| RepoError::Internal(e.to_string()))
+            let sql = select_comments("id = ?1", "id ASC");
+            conn.query_row(&sql, params![id], row_to_comment)
+                .optional()
+                .map_err(|e| RepoError::Internal(e.to_string()))
         })
         .await
     }
@@ -588,14 +505,10 @@ impl Repo {
     pub async fn get_comment_by_source(&self, source_url: &str) -> RepoResult<Option<Comment>> {
         let source_url = source_url.to_string();
         self.spawn(move |conn| {
-            conn.query_row(
-                "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                 FROM comments WHERE source_url = ?1",
-                params![source_url],
-                row_to_comment,
-            )
-            .optional()
-            .map_err(|e| RepoError::Internal(e.to_string()))
+            let sql = select_comments("source_url = ?1", "id ASC");
+            conn.query_row(&sql, params![source_url], row_to_comment)
+                .optional()
+                .map_err(|e| RepoError::Internal(e.to_string()))
         })
         .await
     }
@@ -604,12 +517,9 @@ impl Repo {
     /// Used by the admin JSON export.
     pub async fn list_all_comments(&self) -> RepoResult<Vec<Comment>> {
         self.spawn(move |conn| {
+            let sql = format!("SELECT {COMMENT_COLUMNS} FROM comments ORDER BY id ASC");
             let mut stmt = conn
-                .prepare(
-                    "SELECT id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash
-                     FROM comments
-                     ORDER BY id ASC",
-                )
+                .prepare(&sql)
                 .map_err(|e| RepoError::Internal(e.to_string()))?;
             let rows = stmt
                 .query_map([], row_to_comment)
@@ -675,5 +585,278 @@ impl Repo {
             Ok(())
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{COMMENT_COLUMNS, NewComment, Repo};
+    use crate::db::pool::{create_pool, run_migrations};
+
+    fn setup() -> (Repo, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comment_roundtrip.db");
+        let pool = create_pool(&path.to_string_lossy()).unwrap();
+        run_migrations(&pool, None).unwrap();
+        (Repo::new(pool), dir)
+    }
+
+    /// A comment with every column populated distinctively, so a SELECT that
+    /// drops or reorders a column fails the field assertions below.
+    fn full_input(target_path: &str, parent_id: Option<i64>) -> NewComment {
+        NewComment {
+            target_path: target_path.to_string(),
+            comment_type: "native".to_string(),
+            source_url: Some("https://src.example/full".to_string()),
+            author_name: "Full Fields".to_string(),
+            author_url: Some("https://full.example/me".to_string()),
+            author_avatar: Some("https://full.example/me.png".to_string()),
+            content: "every column populated".to_string(),
+            parent_id,
+            depth: i64::from(parent_id.is_some()),
+            honeypot: true,
+            delete_token: Some("tok-full-fields".to_string()),
+            submitter_ip: Some("9.9.9.9".to_string()),
+            submitter_ip_hash: Some("h:full-fields".to_string()),
+            content_hash: Some("ch:full-fields".to_string()),
+        }
+    }
+
+    /// Seed a parent plus a fully-populated reply; returns the reply id.
+    async fn seed_full_thread(repo: &Repo, target_path: &str) -> (i64, i64) {
+        let parent = repo
+            .insert_comment(NewComment {
+                target_path: target_path.to_string(),
+                comment_type: "native".to_string(),
+                source_url: None,
+                author_name: "Parent".to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: "parent".to_string(),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        let child = repo
+            .insert_comment(full_input(target_path, Some(parent)))
+            .await
+            .unwrap();
+        (parent, child)
+    }
+
+    /// Assert all 18 comment fields survived the read path.
+    fn assert_full_fields(c: &super::super::Comment, target_path: &str, parent: i64, child: i64) {
+        assert_eq!(c.id, child);
+        assert_eq!(c.target_path, target_path);
+        assert_eq!(c.comment_type, "native");
+        assert_eq!(c.source_url, Some("https://src.example/full".to_string()));
+        assert_eq!(c.author_name, "Full Fields");
+        assert_eq!(c.author_url, Some("https://full.example/me".to_string()));
+        assert_eq!(
+            c.author_avatar,
+            Some("https://full.example/me.png".to_string())
+        );
+        assert_eq!(c.content, "every column populated");
+        assert!(!c.created_at.is_empty(), "created_at must survive");
+        assert!(!c.updated_at.is_empty(), "updated_at must survive");
+        assert_eq!(c.parent_id, Some(parent));
+        assert_eq!(c.depth, 1);
+        assert!(c.honeypot, "honeypot flag must survive");
+        assert_eq!(c.delete_token, Some("tok-full-fields".to_string()));
+        assert_eq!(c.submitter_ip, Some("9.9.9.9".to_string()));
+        assert_eq!(c.content_hash, Some("ch:full-fields".to_string()));
+        assert_eq!(c.submitter_ip_hash, Some("h:full-fields".to_string()));
+    }
+
+    #[tokio::test]
+    async fn comment_columns_lists_all_18_fields() {
+        assert_eq!(
+            COMMENT_COLUMNS.split(',').count(),
+            18,
+            "COMMENT_COLUMNS must list all 18 comment columns: {COMMENT_COLUMNS}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_comment_roundtrip_preserves_all_fields() {
+        let (repo, _dir) = setup();
+        let (parent, child) = seed_full_thread(&repo, "/rt-get").await;
+        let c = repo.get_comment(child).await.unwrap().unwrap();
+        assert_full_fields(&c, "/rt-get", parent, child);
+        assert_eq!(c.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn list_approved_roundtrip_preserves_all_fields() {
+        let (repo, _dir) = setup();
+        let (parent, child) = seed_full_thread(&repo, "/rt-approved").await;
+        repo.update_status(parent, "approved").await.unwrap();
+        repo.update_status(child, "approved").await.unwrap();
+        // No cursor.
+        let rows = repo.list_approved("/rt-approved", 10, None).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let c = rows.iter().find(|c| c.id == child).unwrap();
+        assert_full_fields(c, "/rt-approved", parent, child);
+        assert_eq!(c.status, "approved");
+        // With cursor (id < parent is empty; id < child+1 returns both).
+        let rows = repo
+            .list_approved("/rt-approved", 10, Some(child + 1))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let rows = repo
+            .list_approved("/rt-approved", 10, Some(child))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, parent);
+    }
+
+    #[tokio::test]
+    async fn list_approved_oldest_roundtrip_preserves_all_fields() {
+        let (repo, _dir) = setup();
+        let (parent, child) = seed_full_thread(&repo, "/rt-oldest").await;
+        repo.update_status(parent, "approved").await.unwrap();
+        repo.update_status(child, "approved").await.unwrap();
+        let rows = repo
+            .list_approved_oldest("/rt-oldest", 10, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].id < rows[1].id, "oldest first");
+        let c = rows.iter().find(|c| c.id == child).unwrap();
+        assert_full_fields(c, "/rt-oldest", parent, child);
+        // With after-cursor.
+        let rows = repo
+            .list_approved_oldest("/rt-oldest", 10, Some(parent))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_full_fields(&rows[0], "/rt-oldest", parent, child);
+    }
+
+    #[tokio::test]
+    async fn list_approved_global_roundtrip_preserves_all_fields() {
+        let (repo, _dir) = setup();
+        let (parent, child) = seed_full_thread(&repo, "/rt-global").await;
+        repo.update_status(parent, "approved").await.unwrap();
+        repo.update_status(child, "approved").await.unwrap();
+        let rows = repo.list_approved_global(10).await.unwrap();
+        let c = rows.iter().find(|c| c.id == child).unwrap();
+        assert_full_fields(c, "/rt-global", parent, child);
+    }
+
+    #[tokio::test]
+    async fn list_pending_roundtrip_preserves_all_fields_in_every_combo() {
+        let (repo, _dir) = setup();
+        let (parent, child) = seed_full_thread(&repo, "/rt-pending").await;
+        // Both rows stay pending. Combos: path x cursor.
+        for (path, before) in [
+            (None, None),
+            (Some("/rt-pending"), None),
+            (None, Some(child + 1)),
+            (Some("/rt-pending"), Some(child + 1)),
+        ] {
+            let rows = repo.list_pending(10, before, path).await.unwrap();
+            assert_eq!(rows.len(), 2, "combo path={path:?} before={before:?}");
+            let c = rows.iter().find(|c| c.id == child).unwrap();
+            assert_full_fields(c, "/rt-pending", parent, child);
+            assert_eq!(c.status, "pending");
+        }
+        // Cursor below the reply excludes it.
+        let rows = repo
+            .list_pending(10, Some(child), Some("/rt-pending"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, parent);
+        // Unrelated path matches nothing.
+        let rows = repo
+            .list_pending(10, None, Some("/rt-elsewhere"))
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_comments_roundtrip_preserves_all_fields_per_filter() {
+        let (repo, _dir) = setup();
+        let (parent, child) = seed_full_thread(&repo, "/blog/hello").await;
+        // Exact path, no other filter.
+        let rows = repo
+            .list_comments(None, 10, None, Some("/blog/hello"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let c = rows.iter().find(|c| c.id == child).unwrap();
+        assert_full_fields(c, "/blog/hello", parent, child);
+        // LIKE wildcard path.
+        let rows = repo
+            .list_comments(None, 10, None, Some("/blog/%"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let c = rows.iter().find(|c| c.id == child).unwrap();
+        assert_full_fields(c, "/blog/hello", parent, child);
+        // Cursor variant.
+        let rows = repo
+            .list_comments(None, 10, Some(child + 1), Some("/blog/hello"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        // IP filter.
+        let rows = repo
+            .list_comments(None, 10, None, None, Some("9.9.9.9"), None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_full_fields(&rows[0], "/blog/hello", parent, child);
+        // Content-hash filter.
+        let rows = repo
+            .list_comments(None, 10, None, None, None, Some("ch:full-fields"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_full_fields(&rows[0], "/blog/hello", parent, child);
+        // Status filter.
+        let rows = repo
+            .list_comments(Some("pending"), 10, None, Some("/blog/hello"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_comment_by_source_roundtrip_preserves_all_fields() {
+        let (repo, _dir) = setup();
+        let (parent, child) = seed_full_thread(&repo, "/rt-source").await;
+        let c = repo
+            .get_comment_by_source("https://src.example/full")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_full_fields(&c, "/rt-source", parent, child);
+        assert!(
+            repo.get_comment_by_source("https://src.example/missing")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let _ = child;
+    }
+
+    #[tokio::test]
+    async fn list_all_comments_roundtrip_preserves_all_fields() {
+        let (repo, _dir) = setup();
+        let (parent, child) = seed_full_thread(&repo, "/rt-all").await;
+        let rows = repo.list_all_comments().await.unwrap();
+        let c = rows.iter().find(|c| c.id == child).unwrap();
+        assert_full_fields(c, "/rt-all", parent, child);
     }
 }

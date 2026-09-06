@@ -187,6 +187,10 @@ the canonical `migrations/schema.sql` snapshot and are stamped. Legacy
 A database newer than the binary refuses startup instead of running against
 an unknown schema. Add a new `if current < N` block and bump `LATEST` for
 every future schema change.
+Comment reads build on one `COMMENT_COLUMNS` list plus a single
+`select_comments` query builder in `src/db/repo/`, with `row_to_comment` as
+the only row mapper; optional filters use `(?N IS NULL OR ...)` predicates
+so one prepared statement covers the filtered and unfiltered cases.
 
 ## Middleware and route scope
 

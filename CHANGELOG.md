@@ -102,6 +102,13 @@ All notable changes to zapiska are documented here. The format follows
 - `NOTIFY_BATCH_SECS` and `NOTIFY_BATCH_THRESHOLD` parse failures now report
   `InvalidNotifyBatchSecs` / `InvalidNotifyBatchThreshold` (naming the right
   variable) instead of reusing the `RATE_LIMIT_*` error variants.
+- Comment reads now build on one `COMMENT_COLUMNS` list plus a single
+  `select_comments` query builder (`src/db/repo/`), with `row_to_comment` as
+  the only row mapper. The twelve duplicated 18-column `SELECT` strings and
+  the dual-query cursor branches collapse into one parameterized statement
+  per read path (`(?N IS NULL OR ...)` predicates). No behavior change:
+  rows and ordering are identical, pinned by round-trip tests asserting all
+  eighteen fields per query variant.
 
 ## [0.2.0] - 2026-08-07
 
