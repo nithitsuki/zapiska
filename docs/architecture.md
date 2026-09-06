@@ -213,6 +213,13 @@ Comment reads build on one `COMMENT_COLUMNS` list plus a single
 the only row mapper; optional filters use `(?N IS NULL OR ...)` predicates
 so one prepared statement covers the filtered and unfiltered cases.
 
+Storage failures return a typed `RepoError` converted once at the rusqlite
+boundary: `Constraint` (UNIQUE, FOREIGN KEY, CHECK — the row is invalid),
+`Busy` and `Io` (retryable: locked, I/O, full, unopenable), or `Other`. All
+four render the same message and HTTP status as before; the type exists so
+restore skip-and-count (T17) and transactional retries (T15) can branch on
+it structurally instead of matching message strings.
+
 ## Middleware and route scope
 
 The router is assembled from route groups (`src/http/routes.rs`), each with

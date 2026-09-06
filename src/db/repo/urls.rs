@@ -47,7 +47,7 @@ impl Repo {
                     "INSERT INTO comment_urls (comment_id, url, domain, url_hash) VALUES (?1, ?2, ?3, ?4)",
                     params![comment_id, url, domain, url_hash],
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             }
             Ok(())
         })
@@ -59,7 +59,7 @@ impl Repo {
         self.spawn(move |conn| {
             let mut stmt = conn
                 .prepare("SELECT id, comment_id, url, domain, url_hash FROM comment_urls WHERE comment_id = ?1 ORDER BY id")
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let rows = stmt
                 .query_map(params![comment_id], |row| {
                     Ok(CommentUrl {
@@ -70,10 +70,10 @@ impl Repo {
                         url_hash: row.get(4)?,
                     })
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let mut result = Vec::new();
             for row in rows {
-                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                result.push(row.map_err(RepoError::from)?);
             }
             Ok(result)
         })
@@ -98,7 +98,7 @@ impl Repo {
                     params![url_hash],
                     |row| row.get(0),
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
 
             let first_seen: Option<String> = conn
                 .query_row(
@@ -122,20 +122,20 @@ impl Repo {
                     params![url_hash],
                     |row| row.get(0),
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
 
             let mut stmt = conn
                 .prepare("SELECT DISTINCT c.author_name FROM comment_urls cu JOIN comments c ON c.id = cu.comment_id WHERE cu.url_hash = ?1")
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let unique_author_names: Vec<String> = stmt
                 .query_map(params![url_hash], |row| row.get(0))
-                .map_err(|e| RepoError::Internal(e.to_string()))?
+                .map_err(RepoError::from)?
                 .filter_map(|r| r.ok())
                 .collect();
 
             let mut stmt2 = conn
                 .prepare("SELECT c.id, c.status, c.target_path, c.created_at FROM comment_urls cu JOIN comments c ON c.id = cu.comment_id WHERE cu.url_hash = ?1 ORDER BY c.created_at DESC LIMIT 50")
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let comments: Vec<UrlCommentRef> = stmt2
                 .query_map(params![url_hash], |row| {
                     Ok(UrlCommentRef {
@@ -145,7 +145,7 @@ impl Repo {
                         created_at: row.get(3)?,
                     })
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?
+                .map_err(RepoError::from)?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -171,10 +171,10 @@ impl Repo {
                 .prepare(
                     "SELECT DISTINCT url_hash FROM comment_urls WHERE domain = ?1 ORDER BY url",
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let hashes: Vec<String> = stmt
                 .query_map(params![domain], |row| row.get(0))
-                .map_err(|e| RepoError::Internal(e.to_string()))?
+                .map_err(RepoError::from)?
                 .filter_map(|r| r.ok())
                 .collect();
             Ok(hashes)
@@ -189,7 +189,7 @@ impl Repo {
                 .prepare(
                     "SELECT id, comment_id, url, domain, url_hash FROM comment_urls ORDER BY id",
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let rows = stmt
                 .query_map([], |row| {
                     Ok(CommentUrl {
@@ -200,10 +200,10 @@ impl Repo {
                         url_hash: row.get(4)?,
                     })
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let mut result = Vec::new();
             for row in rows {
-                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                result.push(row.map_err(RepoError::from)?);
             }
             Ok(result)
         })
@@ -218,7 +218,7 @@ impl Repo {
                 "DELETE FROM comment_urls WHERE comment_id = ?1",
                 params![comment_id],
             )
-            .map_err(|e| RepoError::Internal(e.to_string()))?;
+            .map_err(RepoError::from)?;
             Ok(())
         })
         .await

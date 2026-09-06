@@ -121,11 +121,11 @@ impl Repo {
         tokio::task::spawn_blocking(move || {
             let conn = pool
                 .get()
-                .map_err(|e| RepoError::Internal(format!("pool acquire: {}", e)))?;
+                .map_err(|e| RepoError::Other(format!("pool acquire: {}", e)))?;
             f(&conn)
         })
         .await
-        .map_err(|e| RepoError::Internal(format!("spawn_blocking: {}", e)))?
+        .map_err(|e| RepoError::Other(format!("spawn_blocking: {}", e)))?
     }
 }
 

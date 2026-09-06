@@ -177,6 +177,16 @@ All notable changes to zapiska are documented here. The format follows
   form while history keeps the mapped form. No code migration is provided:
   this bites only non-default dual-stack binds combined with anyone-mode
   reactions or IP storage.
+- `RepoError::Internal(String)` is now typed (`src/db/mod.rs`): SQLite
+  failures classify once, at the rusqlite boundary, into `Constraint`
+  (UNIQUE/FOREIGN KEY/CHECK — the row is invalid), `Busy`
+  (`SQLITE_BUSY`/`SQLITE_LOCKED` — retry with backoff), `Io`
+  (`SQLITE_IOERR`/`SQLITE_FULL`/`SQLITE_CANTOPEN`), and `Other` (everything
+  else, including row-decode errors). `Display` and the `AppError` mapping
+  are byte-identical (all four still `500`), so no handler, import, or
+  reaction behavior changes: existing `?`-aborts and upsert logic are
+  untouched. Retry/skip policies now have a type to match on instead of
+  error substrings.
 
 ## [0.2.0] - 2026-08-07
 

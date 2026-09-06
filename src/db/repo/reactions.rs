@@ -57,7 +57,7 @@ impl Repo {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
 
             let active = matches!(
                 existing.as_ref().map(|(_, _, s)| s.as_str()),
@@ -78,7 +78,7 @@ impl Repo {
                      updated_at = datetime('now')",
                 params![comment_id, reaction, identifier],
             )
-            .map_err(|e| RepoError::Internal(e.to_string()))?;
+            .map_err(RepoError::from)?;
 
             let id: i64 = conn
                 .query_row(
@@ -86,7 +86,7 @@ impl Repo {
                     params![comment_id, identifier],
                     |row| row.get(0),
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             Ok((id, true))
         })
         .await
@@ -114,7 +114,7 @@ impl Repo {
                      ORDER BY r.id DESC
                      LIMIT ?3",
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let rows = stmt
                 .query_map(params![status, before, limit], |row| {
                     Ok(ReactionWithComment {
@@ -128,10 +128,10 @@ impl Repo {
                         created_at: row.get(7)?,
                     })
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let mut result = Vec::new();
             for row in rows {
-                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                result.push(row.map_err(RepoError::from)?);
             }
             Ok(result)
         })
@@ -148,7 +148,7 @@ impl Repo {
                      WHERE id = ?2",
                     params![status, id],
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             if affected == 0 {
                 return Err(RepoError::NotFound(format!("reaction id {id} not found")));
             }
@@ -177,7 +177,7 @@ impl Repo {
                 },
             )
             .optional()
-            .map_err(|e| RepoError::Internal(e.to_string()))
+            .map_err(RepoError::from)
         })
         .await
     }
@@ -194,7 +194,7 @@ impl Repo {
                        AND status IN ('pending', 'approved')",
                     params![comment_id, identifier],
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             Ok(affected > 0)
         })
         .await
@@ -217,9 +217,7 @@ impl Repo {
                  WHERE status = 'approved' AND comment_id IN ({placeholders})
                  GROUP BY comment_id, reaction"
             );
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(ids), |row| {
                     Ok((
@@ -228,11 +226,10 @@ impl Repo {
                         row.get::<_, i64>(2)?,
                     ))
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let mut counts: HashMap<i64, HashMap<String, i64>> = HashMap::new();
             for row in rows {
-                let (comment_id, reaction, n) =
-                    row.map_err(|e| RepoError::Internal(e.to_string()))?;
+                let (comment_id, reaction, n) = row.map_err(RepoError::from)?;
                 *counts
                     .entry(comment_id)
                     .or_default()
@@ -253,7 +250,7 @@ impl Repo {
                      FROM comment_reactions
                      ORDER BY id",
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let rows = stmt
                 .query_map([], |row| {
                     Ok(CommentReaction {
@@ -266,10 +263,10 @@ impl Repo {
                         updated_at: row.get(6)?,
                     })
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let mut result = Vec::new();
             for row in rows {
-                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                result.push(row.map_err(RepoError::from)?);
             }
             Ok(result)
         })
@@ -299,7 +296,7 @@ impl Repo {
                     input.updated_at,
                 ],
             )
-            .map_err(|e| RepoError::Internal(e.to_string()))?;
+            .map_err(RepoError::from)?;
             Ok(())
         })
         .await

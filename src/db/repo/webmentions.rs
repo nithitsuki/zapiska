@@ -26,7 +26,7 @@ impl Repo {
                 },
             )
             .optional()
-            .map_err(|e| RepoError::Internal(e.to_string()))
+            .map_err(RepoError::from)
         })
         .await
     }
@@ -41,7 +41,7 @@ impl Repo {
                      last_status = excluded.last_status",
                 params![input.source, input.target, input.last_status],
             )
-            .map_err(|e| RepoError::Internal(e.to_string()))?;
+            .map_err(RepoError::from)?;
             Ok(())
         })
         .await
@@ -56,7 +56,7 @@ impl Repo {
                      FROM webmention_seen
                      ORDER BY source, target",
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let rows = stmt
                 .query_map([], |row| {
                     Ok(WebmentionSeen {
@@ -66,10 +66,10 @@ impl Repo {
                         last_status: row.get(3)?,
                     })
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let mut result = Vec::new();
             for row in rows {
-                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                result.push(row.map_err(RepoError::from)?);
             }
             Ok(result)
         })

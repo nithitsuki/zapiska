@@ -23,7 +23,7 @@ impl Repo {
                 },
             )
             .optional()
-            .map_err(|e| RepoError::Internal(e.to_string()))
+            .map_err(RepoError::from)
         })
         .await
     }
@@ -45,7 +45,7 @@ impl Repo {
                     input.valid as i64
                 ],
             )
-            .map_err(|e| RepoError::Internal(e.to_string()))?;
+            .map_err(RepoError::from)?;
             Ok(())
         })
         .await
@@ -56,7 +56,7 @@ impl Repo {
         self.spawn(move |conn| {
             let mut stmt = conn
                 .prepare("SELECT login, name, avatar_url, cached_at, valid FROM github_profiles ORDER BY login")
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let rows = stmt
                 .query_map([], |row| {
                     let valid_int: i64 = row.get(4)?;
@@ -68,10 +68,10 @@ impl Repo {
                         valid: valid_int != 0,
                     })
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let mut result = Vec::new();
             for row in rows {
-                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                result.push(row.map_err(RepoError::from)?);
             }
             Ok(result)
         })

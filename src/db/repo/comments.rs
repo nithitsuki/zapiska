@@ -27,7 +27,7 @@ impl Repo {
                     input.submitter_ip_hash,
                 ],
             )
-            .map_err(|e| RepoError::Internal(e.to_string()))?;
+            .map_err(RepoError::from)?;
             Ok(conn.last_insert_rowid())
         })
         .await
@@ -63,7 +63,7 @@ impl Repo {
                     input.submitter_ip_hash,
                 ],
             )
-            .map_err(|e| RepoError::Internal(e.to_string()))?;
+            .map_err(RepoError::from)?;
             Ok(conn.last_insert_rowid())
         })
         .await
@@ -84,17 +84,15 @@ impl Repo {
                     "id DESC",
                 )
             );
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
 
             let rows = stmt
                 .query_map(params![path, before, limit], row_to_comment)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
 
             let mut comments = Vec::new();
             for row in rows {
-                comments.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                comments.push(row.map_err(RepoError::from)?);
             }
             Ok(comments)
         })
@@ -119,17 +117,15 @@ impl Repo {
                     "id ASC",
                 )
             );
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
 
             let rows = stmt
                 .query_map(params![path, after, limit], row_to_comment)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
 
             let mut comments = Vec::new();
             for row in rows {
-                comments.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                comments.push(row.map_err(RepoError::from)?);
             }
             Ok(comments)
         })
@@ -143,15 +139,13 @@ impl Repo {
                 "{} LIMIT ?1",
                 select_comments("status = 'approved'", "id DESC")
             );
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
             let rows = stmt
                 .query_map(params![limit], row_to_comment)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let mut comments = Vec::new();
             for row in rows {
-                comments.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                comments.push(row.map_err(RepoError::from)?);
             }
             Ok(comments)
         })
@@ -173,7 +167,7 @@ impl Repo {
                      GROUP BY target_path
                      ORDER BY MAX(created_at) DESC",
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let rows = stmt
                 .query_map([], |row| {
                     Ok((
@@ -185,10 +179,10 @@ impl Repo {
                         row.get::<_, i64>(5)?,
                     ))
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let mut result = Vec::new();
             for row in rows {
-                result.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                result.push(row.map_err(RepoError::from)?);
             }
             Ok(result)
         })
@@ -203,7 +197,7 @@ impl Repo {
                 params![path],
                 |row| row.get(0),
             )
-            .map_err(|e| RepoError::Internal(e.to_string()))
+            .map_err(RepoError::from)
         })
         .await
     }
@@ -225,11 +219,11 @@ impl Repo {
             );
             let mut stmt = conn
                 .prepare(&sql)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
 
             let rows: Vec<Comment> = stmt
                 .query_map(params![path, before, limit], row_to_comment)
-                .map_err(|e| RepoError::Internal(e.to_string()))?
+                .map_err(RepoError::from)?
                 .filter_map(|r| r.ok())
                 .collect();
             Ok(rows)
@@ -273,20 +267,18 @@ impl Repo {
                     "id DESC",
                 )
             );
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
 
             let rows = stmt
                 .query_map(
                     params![status_val, path_val, before_val, ip_val, ch_val, limit],
                     row_to_comment,
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
 
             let mut comments = Vec::new();
             for row in rows {
-                comments.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                comments.push(row.map_err(RepoError::from)?);
             }
             Ok(comments)
         })
@@ -307,35 +299,35 @@ impl Repo {
                     rusqlite::params![ip],
                     |row| row.get(0),
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let approved: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM comments WHERE submitter_ip = ?1 AND status = 'approved'",
                     rusqlite::params![ip],
                     |row| row.get(0),
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let spam: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM comments WHERE submitter_ip = ?1 AND status = 'spam'",
                     rusqlite::params![ip],
                     |row| row.get(0),
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let pending: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM comments WHERE submitter_ip = ?1 AND status = 'pending'",
                     rusqlite::params![ip],
                     |row| row.get(0),
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let deleted: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM comments WHERE submitter_ip = ?1 AND status = 'deleted'",
                     rusqlite::params![ip],
                     |row| row.get(0),
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let first_seen: Option<String> = conn
                 .query_row(
                     "SELECT MIN(created_at) FROM comments WHERE submitter_ip = ?1",
@@ -356,7 +348,7 @@ impl Repo {
                     "UPDATE comments SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
                     params![status, id],
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             if affected == 0 {
                 return Err(RepoError::NotFound(format!("comment id {} not found", id)));
             }
@@ -370,7 +362,7 @@ impl Repo {
             let sql = select_comments("id = ?1", "id ASC");
             conn.query_row(&sql, params![id], row_to_comment)
                 .optional()
-                .map_err(|e| RepoError::Internal(e.to_string()))
+                .map_err(RepoError::from)
         })
         .await
     }
@@ -389,7 +381,7 @@ impl Repo {
         let mut pid = target.parent_id;
         while let Some(current_pid) = pid {
             let parent = self.get_comment(current_pid).await?.ok_or_else(|| {
-                RepoError::Internal(format!(
+                RepoError::Constraint(format!(
                     "orphan comment: parent {current_pid} not found for comment {id}"
                 ))
             })?;
@@ -412,7 +404,7 @@ impl Repo {
                      WHERE id = ?1 AND delete_token = ?2 AND status != 'deleted'",
                     params![id, token],
                 )
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             Ok(affected > 0)
         })
         .await
@@ -462,7 +454,7 @@ impl Repo {
                         row.get(5)?, row.get(6)?,
                     ))
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
 
             if total == 0 {
                 return Ok(serde_json::json!({"total_comments": 0}));
@@ -473,7 +465,7 @@ impl Repo {
                 "SELECT id, target_path, status, created_at, parent_id FROM comments WHERE {} ORDER BY created_at DESC LIMIT 10", where_clause
             );
             let mut stmt = conn.prepare(&recent_sql)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let recent: Vec<serde_json::Value> = stmt
                 .query_map([], |row| {
                     Ok(serde_json::json!({
@@ -484,7 +476,7 @@ impl Repo {
                         "parent_id": row.get::<_, Option<i64>>(4)?,
                     }))
                 })
-                .map_err(|e| RepoError::Internal(e.to_string()))?
+                .map_err(RepoError::from)?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -508,7 +500,7 @@ impl Repo {
             let sql = select_comments("source_url = ?1", "id ASC");
             conn.query_row(&sql, params![source_url], row_to_comment)
                 .optional()
-                .map_err(|e| RepoError::Internal(e.to_string()))
+                .map_err(RepoError::from)
         })
         .await
     }
@@ -518,15 +510,13 @@ impl Repo {
     pub async fn list_all_comments(&self) -> RepoResult<Vec<Comment>> {
         self.spawn(move |conn| {
             let sql = format!("SELECT {COMMENT_COLUMNS} FROM comments ORDER BY id ASC");
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+            let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
             let rows = stmt
                 .query_map([], row_to_comment)
-                .map_err(|e| RepoError::Internal(e.to_string()))?;
+                .map_err(RepoError::from)?;
             let mut comments = Vec::new();
             for row in rows {
-                comments.push(row.map_err(|e| RepoError::Internal(e.to_string()))?);
+                comments.push(row.map_err(RepoError::from)?);
             }
             Ok(comments)
         })
@@ -581,7 +571,7 @@ impl Repo {
                     input.submitter_ip_hash,
                 ],
             )
-            .map_err(|e| RepoError::Internal(e.to_string()))?;
+            .map_err(RepoError::from)?;
             Ok(())
         })
         .await
