@@ -49,7 +49,7 @@ control. A leaked admin token gives access to protected data and actions.
 | Variable | Default | Description |
 |---|---|---|
 | `ADMIN_TOKEN` | None | Token for protected admin routes. |
-| `PUBLIC_TARGET_ORIGIN` | `https://nithitsuki.com` | Parsed origin for accepted webmention targets. |
+| `PUBLIC_TARGET_ORIGIN` | `https://nithitsuki.com` | Parsed origin for accepted webmention targets. Must be an absolute `http(s)` URL with a host; anything else fails startup. |
 | `ALLOWED_CORS_ORIGIN` | `https://nithitsuki.com` | One origin, a comma-separated list, or `*`. |
 | `DATABASE_PATH` | `./comments.db` | SQLite file path. |
 | `BIND_ADDR` | `127.0.0.1:3000` | Listen address. |
@@ -87,7 +87,7 @@ The limits use the TCP peer IP. The server does not trust forwarded IP headers.
 | `DEFAULT_COMMENT_STATUS` | `pending` | Initial status for native comments. |
 | `MODERATION_WEBHOOK_URL` | Unset | External moderation webhook URL. |
 | `MODERATION_WEBHOOK_MODE` | `async` | `async` or `sync`. |
-| `STORE_IP_ADDRESS` | `false` | Store raw and hashed peer IP values. |
+| `STORE_IP_ADDRESS` | `false` | Store raw and hashed peer IP values. Accepts `true` (any case) or `1`. |
 | `IP_HASH_SECRET` | Unset | Salt for the stored IP hash. |
 | `MAX_COMMENTS_PER_IP_PER_DAY` | `50` | Native comment daily cap. Zero disables the cap. |
 | `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` | `10` | Webmention domain cap. Zero disables the cap. |
@@ -108,6 +108,8 @@ The limits use the TCP peer IP. The server does not trust forwarded IP headers.
 
 Telegram needs both Telegram values. Slack and Discord need their webhook URL.
 Notification delivery is asynchronous. It does not change the comment result.
+Setting only one of the two Telegram values logs a startup warning and
+disables Telegram delivery.
 
 ### Reaction values
 
@@ -316,8 +318,10 @@ examples.
 ## Logging
 
 Logs use JSON output from `tracing`. Set `RUST_LOG=debug` for more detail.
-The server redacts the admin, GitHub, Telegram, and Turnstile secret values.
-Review log access because request spans can include the peer IP.
+The server redacts the admin, GitHub, Telegram, and Turnstile secret values,
+and shows only the host plus a truncated path for Slack, Discord, and
+moderation webhook URLs. Review log access because request spans can include
+the peer IP.
 
 ## Updates
 

@@ -32,6 +32,12 @@ async fn main() {
     let config = Config::from_env().expect("failed to load configuration");
     info!(config = %config.redacted_display(), "server starting");
 
+    if config.telegram_bot_token.is_some() != config.telegram_chat_id.is_some() {
+        tracing::warn!(
+            "Telegram notifications are half-configured (need both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID); Telegram delivery is disabled"
+        );
+    }
+
     // Build an HTTP client. With webmentions enabled, it uses the SSRF-safe
     // builder; without, a plain client suffices for GitHub lookup.
     #[cfg(feature = "webmentions")]

@@ -44,6 +44,17 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Fixed
 
+- `PUBLIC_TARGET_ORIGIN` is validated at startup (absolute `http(s)` URL with
+  a host). A typo'd origin now fails boot with a `ConfigError` instead of
+  panicking per webmention request and per queued worker job.
+- `STORE_IP_ADDRESS` accepts `true` (any case) and `1`, like
+  `TURNSTILE_ENABLED`. `STORE_IP_ADDRESS=TRUE` no longer silently disables IP
+  storage.
+- Startup configuration output redacts Slack, Discord, and moderation webhook
+  URLs (host plus a truncated path prefix). These URLs embody bearer posting
+  tokens and were previously printed verbatim.
+- Setting only one of `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` logs a
+  startup warning instead of silently disabling Telegram delivery.
 - Discord notifications escape author names and comment text: `@everyone` and
   `@here` are broken with a zero-width space and Discord markdown
   (`**`, `||`, `` ` ``, `<>`, and others) is backslash-escaped, so a comment
@@ -63,6 +74,12 @@ All notable changes to zapiska are documented here. The format follows
   databases still missing their columns.
 - Migration DDL errors propagate instead of being swallowed by `let _ =`.
   Only the already-exists case is skipped, via existence checks.
+- `Config` now has a `Default` implementation mirroring the documented
+  environment defaults; `from_env` overlays environment variables on top of
+  it. Test setups build on `..Config::default()` with per-test overrides.
+- `NOTIFY_BATCH_SECS` and `NOTIFY_BATCH_THRESHOLD` parse failures now report
+  `InvalidNotifyBatchSecs` / `InvalidNotifyBatchThreshold` (naming the right
+  variable) instead of reusing the `RATE_LIMIT_*` error variants.
 
 ## [0.2.0] - 2026-08-07
 
