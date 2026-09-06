@@ -176,6 +176,17 @@ Do not put credentials in webhook URL query values.
 
 Review log access when IP storage or external notifications are enabled.
 
+## Notifications
+
+Comment author names and content are attacker-controlled. The Telegram and
+Slack formatters escape `&`, `<`, and `>`. The Discord formatter also breaks
+`@everyone` and `@here` with a zero-width space and backslash-escapes Discord
+markdown, so a comment cannot ping the admin channel or reformat the alert.
+Each Discord payload stays within the 2000-character channel limit. Previews
+and name lists shrink first, and the moderation footer is kept through every
+shrink stage. Only the last-resort cut, reached when the unshrunk fields
+alone exceed the limit, can remove it.
+
 ## Security testing
 
 The pentest suite checks XSS, unsafe URL schemes, XML injection, SQL injection

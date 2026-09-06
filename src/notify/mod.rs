@@ -346,7 +346,11 @@ mod tests {
     fn discord_payload_structure() {
         let text = discord::build_single_payload(&sample_info());
         assert!(text.contains("New comment on /blog/hello"));
-        assert!(text.contains("Alice & Bob <co>"));
+        assert!(
+            text.contains("Alice & Bob \\<co\\>"),
+            "author escaped: {text}"
+        );
+        assert!(!text.contains("<co>"), "raw angle brackets leak: {text}");
         assert!(text.contains("https://alice.blog"));
         assert!(text.contains("Great post!"));
         assert!(text.contains("/api/admin/comments/42"));

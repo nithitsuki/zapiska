@@ -44,6 +44,14 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Fixed
 
+- Discord notifications escape author names and comment text: `@everyone` and
+  `@here` are broken with a zero-width space and Discord markdown
+  (`**`, `||`, `` ` ``, `<>`, and others) is backslash-escaped, so a comment
+  cannot ping or reformat the admin channel.
+- Discord payloads are capped at the 2000-character channel limit. Previews
+  and name lists shrink first and the moderation footer is kept through every
+  shrink stage; only the last-resort cut, reached when the unshrunk fields
+  alone exceed the limit, can remove it.
 - Legacy upgrade ordering: column additions now run before the canonical
   schema snapshot, whose indexes (for example `idx_comments_parent`) fail on
   databases still missing their columns.
