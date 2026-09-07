@@ -1419,7 +1419,7 @@ mod tests {
         let app = build_app(state);
         assert_eq!(
             super::routes::ADMIN_ROUTE_PATHS.len(),
-            16,
+            17,
             "test and route list must agree on the protected surface"
         );
         for path in super::routes::ADMIN_ROUTE_PATHS {

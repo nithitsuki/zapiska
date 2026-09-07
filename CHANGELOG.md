@@ -20,6 +20,10 @@ All notable changes to zapiska are documented here. The format follows
   results, true undo, ancestor chains, extracted URLs, duplicate lookup),
   reactions moderation with reviewed-emoji pinning, author/URL lookup,
   export download and import restore with force, and an OPS tab.
+- Verified owner identity: owner profile (`GET`/`PUT /api/admin/profile`),
+  `POST /api/admin/comments` authoring approved+verified comments with a
+  public ✓ checkmark, migration v9 (`verified` column, `admin_profile`
+  table), and dashboard PROFILE tab with impostor flagging.
 - Versioned SQLite migrations via `PRAGMA user_version`
   (`LATEST_SCHEMA_VERSION = 8` in `src/db/pool.rs`). Fresh databases get the
   canonical snapshot and a stamp. Legacy `user_version = 0` databases run an

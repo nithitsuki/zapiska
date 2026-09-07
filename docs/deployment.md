@@ -397,7 +397,9 @@ WARNING: The export file contains raw submitter IPs and `delete_token`
 values alongside content. Anyone holding `backup.json` can delete any
 imported native comment that still carries its token, and can read every
 stored peer address. Treat the export as a secret document: restrict file
-permissions, encrypt off-site copies, and never publish it.
+permissions, encrypt off-site copies, and never publish it. Only restore
+files you trust: imports preserve the `verified` owner flag, so a foreign
+file with forged verified rows would render checkmarks.
 
 Salt rotation: keep `IP_HASH_SECRET` stable and back it up with `.env`.
 Comment hashes are re-derived on import where a raw IP exists, but

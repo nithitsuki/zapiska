@@ -710,6 +710,7 @@ mod t17_restore_tests {
             submitter_ip: None,
             submitter_ip_hash: None,
             content_hash: None,
+            verified: false,
         }
     }
 

@@ -38,6 +38,14 @@ The default reaction set is `👍,❤️,😄,😮,😢,😡`. Reactions use the
 approved, spam, and deleted states as comments. Only approved counts appear in
 the public read API.
 
+## Verified owner
+
+Set a public owner profile (name, GitHub, website, avatar) in the dashboard
+PROFILE tab or `PUT /api/admin/profile`, then post as yourself: the comment
+appears immediately, approved, with a ✓ checkmark visitors can trust. The
+checkmark — never the bare name — is the trust signal: anyone can submit any
+author name, but no public path can set the flag.
+
 ## RSS feeds
 
 Use `/feed.xml` for approved comments across the site. Add `path` to select one

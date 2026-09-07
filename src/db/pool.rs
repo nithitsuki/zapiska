@@ -114,6 +114,15 @@ pub const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_comment_reactions_read
         ON comment_reactions(comment_id, status);",
+    // 9: verified owner comments + admin_profile singleton.
+    "ALTER TABLE comments ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE IF NOT EXISTS admin_profile (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        display_name TEXT NOT NULL DEFAULT '',
+        github_username TEXT NOT NULL DEFAULT '',
+        website_url TEXT NOT NULL DEFAULT '',
+        avatar_url TEXT NOT NULL DEFAULT ''
+    );",
 ];
 
 /// Latest schema version. Derived from [`MIGRATIONS`] — the stamp IS the
@@ -542,6 +551,7 @@ mod tests {
         "comment_urls",
         "webmention_seen",
         "github_profiles",
+        "admin_profile",
     ];
 
     /// Map `CREATE TABLE` name → whitespace-normalized statement, for one SQL
@@ -710,7 +720,7 @@ mod tests {
         // Pin the splitter's input shape: exact per-step statement counts
         // plus no `;` inside any string literal across all MIGRATIONS
         // entries. Extend the counts deliberately when appending a version.
-        const EXPECTED_STATEMENT_COUNTS: [usize; 9] = [0, 5, 3, 2, 1, 1, 4, 1, 2];
+        const EXPECTED_STATEMENT_COUNTS: [usize; 10] = [0, 5, 3, 2, 1, 1, 4, 1, 2, 2];
         assert_eq!(
             MIGRATIONS.len(),
             EXPECTED_STATEMENT_COUNTS.len(),

@@ -323,7 +323,7 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
               <a @click="detailComment = null" style="font-weight:700">X</a>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <div><span class="lbl">AUTHOR</span><div class="val"><template x-if="detailComment.author_url"><a :href="detailComment.author_url" target="_blank" x-text="detailComment.author_name"></a></template><template x-if="!detailComment.author_url"><span x-text="detailComment.author_name"></span></template></div></div>
+              <div><span class="lbl">AUTHOR</span><div class="val"><template x-if="detailComment.author_url"><a :href="detailComment.author_url" target="_blank" x-text="detailComment.author_name"></a></template><template x-if="!detailComment.author_url"><span x-text="detailComment.author_name"></span></template><span x-show="detailComment.verified" title="Verified site owner" style="color:#1a7f37;font-weight:700"> ✓</span><span x-show="looksLikeOwner(detailComment)" title="Unverified comment using your owner name" style="color:#fff;background:#c00000;font-weight:700;font-size:9px;padding:0 3px"> IMPOSTOR?</span></div></div>
               <div><span class="lbl">PATH</span><div class="val" x-text="detailComment.target_path"></div></div>
               <div><span class="lbl">TYPE</span><div class="val" x-text="detailComment.comment_type"></div></div>
               <div><span class="lbl">DEPTH</span><div class="val" x-text="detailComment.depth"></div></div>
@@ -358,7 +358,7 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
                    @touchstart="swipeStart($event, c.id)"
                    @touchmove="swipeMove($event, c.id)"
                    @touchend="swipeEnd($event, c.id)"
-                   :style="'transform:translateX(' + (swipeX[c.id] || 0) + 'px)'">
+                   :style="'transform:translateX(' + (swipeX[c.id] || 0) + 'px)' + ((moreOpen.has(c.id) || reactOpen.has(c.id)) ? ';z-index:60' : '')">
                 <!-- Swipe hint overlays (mobile only) -->
                 <template x-if="isMobile">
                 <div class="swipe-hint swipe-left-hint" :style="'opacity:' + Math.min(1, Math.max(0, (swipeX[c.id] || 0) / 120))">SPAM</div>
@@ -379,6 +379,8 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
                     <template x-if="c.author_url"><a :href="c.author_url" target="_blank" x-text="c.author_name"></a></template>
                     <template x-if="!c.author_url"><span x-text="c.author_name"></span></template>
                   </span>
+                  <span x-show="c.verified" title="Verified site owner" style="color:#1a7f37;font-weight:700;font-size:11px">✓</span>
+                  <span x-show="looksLikeOwner(c)" title="Unverified comment using your owner name — possible impersonation" style="color:#fff;background:#c00000;font-weight:700;font-size:9px;padding:0 3px">IMPOSTOR?</span>
                   <span class="cc-badges">
                     <span class="badge" :class="'badge-' + c.status[0]" x-text="c.status.toUpperCase().slice(0,4)"></span>
                     <span x-show="c.comment_type === 'webmention'" class="badge badge-w">WM</span>
@@ -462,9 +464,9 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
                   </div>
                 </div>
 
-                <!-- Inline reply form (moderator posts a native reply) -->
+                <!-- Inline reply form (posts verified, as the owner profile) -->
                 <div x-show="replyingTo === c.id" style="margin-top:5px;padding:5px;background:#c0c0c0;border:2px inset #fff">
-                  <input type="text" x-model="replyName" placeholder="REPLY AS" style="width:140px;font-size:10px;margin-bottom:3px">
+                  <div style="font-size:9px;color:#444;margin-bottom:3px">POSTS AS <span x-text="profile.display_name || 'OWNER'"></span> ✓ — VERIFIED, NO QUEUE</div>
                   <textarea x-model="replyText" rows="2" placeholder="Write a reply…" style="width:100%;font-size:11px;margin-bottom:3px;color:#000"></textarea>
                   <div style="display:flex;gap:4px">
                     <button class="btn" @click="sendReply(c)" :disabled="replying" style="font-size:10px;padding:1px 8px" x-text="replying ? 'SENDING…' : 'SEND'"></button>
@@ -596,6 +598,40 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
     </div>
   </div><!-- /DATA VIEW -->
 
+  <!-- ============ PROFILE VIEW ============ -->
+  <div x-show="view === 'profile'">
+    <div class="win" style="margin-bottom:3px">
+      <div class="win-title"><span>VERIFIED OWNER PROFILE</span><span x-show="profile.set" class="badge badge-ok">✓ SET</span></div>
+      <div class="win-body">
+        <div style="font-size:10px;color:#000;margin-bottom:4px">PUBLIC IDENTITY SHOWN WITH A <span style="color:#1a7f37;font-weight:700">✓</span> CHECKMARK ON YOUR COMMENTS. ONLY NAME/URL FIELDS — NO SECRETS.</div>
+        <div class="frm">
+          <input type="text" x-model="profile.display_name" placeholder="DISPLAY NAME" style="width:140px">
+          <input type="text" x-model="profile.github_username" placeholder="GITHUB USERNAME" style="width:140px">
+        </div>
+        <div class="frm">
+          <input type="text" x-model="profile.website_url" placeholder="WEBSITE URL" style="width:220px">
+          <input type="text" x-model="profile.avatar_url" placeholder="AVATAR URL" style="width:220px">
+        </div>
+        <div class="frm">
+          <button class="btn btn-primary" @click="saveProfile" :disabled="profileBusy" style="font-size:10px">SAVE PROFILE</button>
+          <span x-show="profileMsg" style="font-size:10px;color:#000" x-text="profileMsg"></span>
+        </div>
+      </div>
+    </div>
+    <div class="win" style="margin-bottom:3px">
+      <div class="win-title"><span>WRITE AS OWNER ✓</span></div>
+      <div class="win-body">
+        <div style="font-size:10px;color:#000;margin-bottom:4px">POSTS IMMEDIATELY AS APPROVED + VERIFIED (NO QUEUE). USES YOUR PROFILE NAME/URL/AVATAR.</div>
+        <div class="frm">
+          <input type="text" x-model="ownerPath" placeholder="TARGET PATH e.g. /blog/hello" style="width:220px">
+          <input type="text" x-model="ownerParent" placeholder="REPLY TO ID (OPTIONAL)" style="width:170px">
+        </div>
+        <textarea x-model="ownerText" rows="3" placeholder="Write as the site owner…" style="width:100%;font-size:11px;margin-bottom:3px;color:#000"></textarea>
+        <button class="btn btn-primary" @click="sendOwnerComment" :disabled="ownerBusy" style="font-size:10px" x-text="ownerBusy ? 'POSTING…' : 'POST VERIFIED COMMENT'"></button>
+      </div>
+    </div>
+  </div><!-- /PROFILE VIEW -->
+
   <!-- ============ OPS VIEW ============ -->
   <div x-show="view === 'ops'">
     <div class="win" style="margin-bottom:3px">
@@ -643,7 +679,7 @@ function app() {
     moderating: new Set(), detailComment: null, chain: [], curls: [],
     bulkMode: false, selected: [],
     threads: {},
-    replyingTo: null, replyText: '', replyName: 'Moderator', replying: false,
+    replyingTo: null, replyText: '', replying: false,
     reactOpen: new Set(), _bearer: '',
     reactionSet: ['👍', '❤️', '😄', '😮', '😢', '😡'],
     showPaths: true, showColMenu: false, toasts: [],
@@ -657,6 +693,10 @@ function app() {
     ldId: '', ldResult: '',
     // Data view.
     dataBusy: false, impForce: false, impResult: '', impError: '',
+    // Profile view.
+    profile: { display_name: '', github_username: '', website_url: '', avatar_url: '', set: false },
+    profileBusy: false, profileMsg: '',
+    ownerPath: '', ownerParent: '', ownerText: '', ownerBusy: false,
     // Ops view.
     ops: {}, serverVersion: '',
     get statusBar() {
@@ -672,7 +712,8 @@ function app() {
 
     views: [
       { key: 'comments', label: 'COMMENTS' }, { key: 'reactions', label: 'REACTS' },
-      { key: 'lookup', label: 'LOOKUP' }, { key: 'data', label: 'DATA' }, { key: 'ops', label: 'OPS' },
+      { key: 'lookup', label: 'LOOKUP' }, { key: 'data', label: 'DATA' },
+      { key: 'profile', label: 'PROFILE' }, { key: 'ops', label: 'OPS' },
     ],
     get statItems() { return [
       { key: 'pending', label: 'PENDING' }, { key: 'approved', label: 'APPROVED' },
@@ -713,6 +754,7 @@ function app() {
     async boot() {
       this.refreshAll();
       this.fetchOps();
+      this.fetchProfile();
     },
 
     // JSON API with the documented {error, code} shape surfaced to callers.
@@ -797,6 +839,14 @@ function app() {
     selectPath(path) { this.selectedPath = this.selectedPath === path ? '' : path; this.pathFilter = ''; this.before = null; this.comments = []; this.fetchComments(); },
     selectPathMobile(path) { this.selectedPath = path; this.pathFilter = ''; this.before = null; this.comments = []; this.fetchComments(); },
     toggleCol(k) { this.col[k] = !this.col[k]; },
+    // True when an UNVERIFIED comment wears the owner's display name.
+    // The checkmark is the trust signal (server-derived); the name is not.
+    looksLikeOwner(c) {
+      if (!c || c.verified) return false;
+      const mine = (this.profile.display_name || '').trim().toLowerCase();
+      if (!mine) return false;
+      return (c.author_name || '').trim().toLowerCase() === mine;
+    },
     toggleMore(id) { if (this.moreOpen.has(id)) this.moreOpen.delete(id); else this.moreOpen.add(id); },
     toggleReact(id) { if (this.reactOpen.has(id)) this.reactOpen.delete(id); else this.reactOpen.add(id); },
     async react(c, emoji) {
@@ -857,18 +907,16 @@ function app() {
     selectVisible() { for (const c of this.sortedComments) { if (!this.selected.includes(c.id)) this.selected.push(c.id); } },
 
     toggleReply(c) { this.replyingTo = this.replyingTo === c.id ? null : c.id; this.replyText = ''; },
+    // Moderator replies go through the owner endpoint, so they post
+    // verified + approved immediately — never as an anonymous stranger.
     async sendReply(c) {
       if (!this.replyText.trim()) { this.toast('WRITE A REPLY FIRST', true); return; }
       this.replying = true;
-      const params = new URLSearchParams({
-        target_path: c.target_path, author_name: this.replyName, parent_id: String(c.id), content: this.replyText,
-      });
-      // The public form expects form encoding; honeypot field must be empty.
-      params.set('website', '');
-      const d = await this.api('/api/comment', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.toString() });
+      const body = { target_path: c.target_path, content: this.replyText, parent_id: c.id };
+      const d = await this.api('/api/admin/comments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       this.replying = false;
       if (!d.ok) { this.toast('REPLY FAILED: ' + (d.error || ''), true); return; }
-      this.toast('REPLY POSTED (status ' + ((d.data && d.data.status) || '?') + ')');
+      this.toast('REPLY POSTED VERIFIED #' + d.data.id);
       this.replyingTo = null; this.replyText = '';
       this.before = null; this.comments = []; this.fetchComments(); this.fetchStats(); this.fetchPaths();
     },
@@ -1014,6 +1062,41 @@ function app() {
       const w = d.data && d.data.warning;
       this.toast(w ? 'IMPORTED — WARNING: ' + w : 'IMPORTED');
       this.fetchStats(); this.fetchPaths(); this.fetchComments();
+    },
+
+    // ---- Profile: verified owner identity + write-as-owner ----
+    async fetchProfile() {
+      const d = await this.api('/api/admin/profile');
+      if (d.ok && d.data) this.profile = { ...this.profile, ...d.data };
+    },
+
+    async saveProfile() {
+      this.profileBusy = true; this.profileMsg = '';
+      const d = await this.api('/api/admin/profile', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          display_name: this.profile.display_name || '',
+          github_username: this.profile.github_username || '',
+          website_url: this.profile.website_url || '',
+          avatar_url: this.profile.avatar_url || '',
+        }) });
+      this.profileBusy = false;
+      if (!d.ok) { this.profileMsg = 'SAVE FAILED: ' + (d.error || ''); return; }
+      this.profile = { ...this.profile, ...d.data };
+      this.profileMsg = 'SAVED — FUTURE OWNER COMMENTS CARRY ✓';
+    },
+
+    async sendOwnerComment() {
+      if (!this.ownerPath.trim() || !this.ownerText.trim()) { this.toast('PATH AND TEXT REQUIRED', true); return; }
+      const body = { target_path: this.ownerPath.trim(), content: this.ownerText };
+      const pid = parseInt(this.ownerParent, 10);
+      if (!isNaN(pid)) body.parent_id = pid;
+      this.ownerBusy = true;
+      const d = await this.api('/api/admin/comments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      this.ownerBusy = false;
+      if (!d.ok) { this.toast('OWNER POST FAILED: ' + (d.error || ''), true); return; }
+      this.toast('POSTED VERIFIED #' + d.data.id);
+      this.ownerText = ''; this.ownerParent = '';
+      this.fetchComments(); this.fetchStats(); this.fetchPaths();
     },
 
     // ---- Ops ----

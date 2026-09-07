@@ -266,6 +266,14 @@ fetch('https://comments.your-site.example/api/comment/42/reaction', {
 Only approved reactions appear in `reactions` counts.
 The public CORS preflight does not advertise `DELETE`.
 
+## Verified owner checkmark
+
+Comments with `verified: true` are authored through the admin owner
+endpoint — render a green ✓ badge after the author name with the title
+"Verified site owner". Tell visitors to trust the badge, never the bare
+name: anyone can submit any author name, but no public path can set the
+flag.
+
 ## Security rules
 
 - Render `content` as sanitized HTML only.

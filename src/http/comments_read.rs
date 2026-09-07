@@ -55,6 +55,9 @@ pub struct CommentJson {
     /// Approved reaction counts, e.g. `{"👍": 5, "❤️": 2}`. Empty object
     /// when there are no approved reactions.
     pub reactions: std::collections::HashMap<String, i64>,
+    /// True when this comment is authored by the verified site owner.
+    /// Widgets render a checkmark badge for these.
+    pub verified: bool,
 }
 
 #[utoipa::path(
@@ -120,6 +123,7 @@ pub async fn list_comments(
             created_at: c.created_at,
             parent_id: c.parent_id,
             depth: c.depth,
+            verified: c.verified,
         })
         .collect();
 

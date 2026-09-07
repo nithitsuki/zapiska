@@ -142,6 +142,7 @@ pub const ADMIN_ROUTE_PATHS: &[&str] = &[
     "/api/admin/reactions/moderate/batch",
     "/api/admin/import",
     "/api/admin/status",
+    "/api/admin/profile",
 ];
 
 /// Protected admin group: every route below requires the admin token (Bearer
@@ -153,7 +154,7 @@ pub fn protected_admin_routes(state: &AppState, governors: AdminGovernors) -> Ro
     // silently miss the new path.
     debug_assert_eq!(
         ADMIN_ROUTE_PATHS.len(),
-        16,
+        17,
         "list every protected_admin_routes path in ADMIN_ROUTE_PATHS"
     );
     Router::new()
@@ -164,7 +165,7 @@ pub fn protected_admin_routes(state: &AppState, governors: AdminGovernors) -> Ro
         .route("/api/admin/paths", axum::routing::get(admin::list_paths))
         .route(
             "/api/admin/comments",
-            axum::routing::get(admin::list_comments),
+            axum::routing::get(admin::list_comments).post(admin::create_owner_comment),
         )
         .route(
             "/api/admin/comments/{id}",
@@ -222,6 +223,10 @@ pub fn protected_admin_routes(state: &AppState, governors: AdminGovernors) -> Ro
             )),
         )
         .route("/api/admin/status", axum::routing::get(admin::status))
+        .route(
+            "/api/admin/profile",
+            axum::routing::get(admin::get_profile).put(admin::set_profile),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin::admin_auth,
@@ -253,7 +258,7 @@ mod tests {
         // Fails closed when a protected route is added without listing it.
         assert_eq!(
             ADMIN_ROUTE_PATHS.len(),
-            16,
+            17,
             "keep ADMIN_ROUTE_PATHS in sync with protected_admin_routes"
         );
     }

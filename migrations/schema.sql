@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS comments (
     delete_token    TEXT,
     submitter_ip        TEXT,
     submitter_ip_hash   TEXT,
-    content_hash    TEXT
+    content_hash    TEXT,
+    verified        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_comments_read
@@ -93,3 +94,11 @@ CREATE TABLE IF NOT EXISTS comment_reactions (
 );
 CREATE INDEX IF NOT EXISTS idx_comment_reactions_read
     ON comment_reactions(comment_id, status);
+
+CREATE TABLE IF NOT EXISTS admin_profile (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    display_name    TEXT    NOT NULL DEFAULT '',
+    github_username TEXT    NOT NULL DEFAULT '',
+    website_url     TEXT    NOT NULL DEFAULT '',
+    avatar_url      TEXT    NOT NULL DEFAULT ''
+);

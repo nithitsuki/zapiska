@@ -13,6 +13,7 @@ pub(crate) mod comments;
 pub(crate) mod data;
 pub(crate) mod lookup;
 pub(crate) mod moderate;
+pub(crate) mod profile;
 pub(crate) mod reactions;
 pub(crate) mod status;
 
@@ -21,6 +22,7 @@ pub(crate) use comments::{get_comment, list_comments, list_pending};
 pub(crate) use data::{MAX_IMPORT_BODY_BYTES, export, import};
 pub(crate) use lookup::{author_lookup, bulk_context, comment_urls, list_paths, url_lookup};
 pub(crate) use moderate::{moderate, moderate_batch};
+pub(crate) use profile::{create_owner_comment, get_profile, set_profile};
 pub(crate) use reactions::{list_reactions, moderate_reaction, moderate_reactions_batch};
 pub(crate) use status::status;
 

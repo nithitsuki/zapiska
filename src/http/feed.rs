@@ -129,10 +129,11 @@ fn build_feed(
     ));
     for c in comments {
         out.push_str("    <item>\n");
+        let verified_suffix = if c.verified { " ✓" } else { "" };
         let item_title = if include_path_in_titles {
-            format!("{} on {}", c.author_name, c.target_path)
+            format!("{}{} on {}", c.author_name, verified_suffix, c.target_path)
         } else {
-            c.author_name.clone()
+            format!("{}{}", c.author_name, verified_suffix)
         };
         out.push_str(&format!(
             "      <title>{}</title>\n",
@@ -255,6 +256,7 @@ mod tests {
             submitter_ip: None,
             submitter_ip_hash: None,
             content_hash: None,
+            verified: false,
         }
     }
 

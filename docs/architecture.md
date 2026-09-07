@@ -125,6 +125,18 @@ Follow-ups (not fixed here): language-gate quarantine tier (B6 — the gate
 stays a hard block) and Unicode body-limit parity (B7 — non-ASCII authors
 hit `MAX_BODY_SIZE` before `MAX_CONTENT_LEN`; ~680 emoji chars effective).
 
+## Verified owner flow
+
+The owner profile (`admin_profile` singleton row) holds the operator's
+public identity; `GET`/`PUT /api/admin/profile` view and edit it with the
+same identity rules as native submissions. `POST /api/admin/comments`
+(also admin-gated) authors a comment as the profile: created `approved`
+and `verified` in one write, so it renders publicly with the ✓ checkmark
+immediately. No public submission path (native form, webmention, reactions)
+can set the flag — imports preserve it from files the operator trusts, so
+only restore backups you trust. Replies follow the same parent
+rules as native comments.
+
 ## Threaded replies
 
 Top-level comments use `parent_id = null` and `depth = 0`.

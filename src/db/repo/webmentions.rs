@@ -121,7 +121,7 @@ impl Repo {
         seen: NewWebmentionSeen,
     ) -> RepoResult<i64> {
         self.with_tx(move |tx| {
-            let id = super::comments::upsert_by_source_on_conn(tx, &comment)?;
+            let id = super::comments::upsert_by_source_on_conn(tx, &comment, false)?;
             upsert_seen_on_conn(tx, &seen)?;
             Ok(id)
         })

@@ -35,6 +35,12 @@ pub struct Comment {
     pub submitter_ip_hash: Option<String>,
     /// SHA-256 hash of normalized content (for duplicate/spam detection).
     pub content_hash: Option<String>,
+    /// True when this comment is authored by the verified site owner
+    /// (created through the admin-authenticated writer). Public widgets show
+    /// a checkmark badge for these. Defaults to false so pre-flag exports
+    /// (written before the column existed) still deserialize.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +284,7 @@ pub(crate) fn url_error_policy(err: &RepoError) -> UrlErrorAction {
 
 // ── Sub-modules ─────────────────────────────────────────────
 
+mod admin_profile;
 mod comments;
 mod github_profiles;
 mod reactions;
@@ -285,6 +292,7 @@ mod restore;
 mod urls;
 mod webmentions;
 
+pub use admin_profile::AdminProfile;
 pub use reactions::{CommentReaction, ReactionWithComment};
 pub use restore::{RestoreInput, RestoreReport};
 pub use urls::{CommentUrl, UrlCommentRef, UrlStats};
@@ -299,7 +307,7 @@ pub use urls::{CommentUrl, UrlCommentRef, UrlStats};
 /// `COMMENT_COLUMNS` is the single source of truth for that list: every
 /// comment read builds its SELECT from it, so adding a column is a one-line
 /// change here plus the mapper below instead of ~12 SQL string edits.
-const COMMENT_COLUMNS: &str = "id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash";
+const COMMENT_COLUMNS: &str = "id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash, verified";
 
 /// Build a comment read query from one predicate template. Optional filters
 /// use `(?N IS NULL OR ...)` so one prepared statement covers both the
@@ -328,6 +336,7 @@ fn row_to_comment(row: &rusqlite::Row) -> rusqlite::Result<Comment> {
         submitter_ip: row.get(15)?,
         content_hash: row.get(16)?,
         submitter_ip_hash: row.get(17)?,
+        verified: row.get::<_, i64>(18)? != 0,
     })
 }
 

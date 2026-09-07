@@ -57,6 +57,8 @@ pub struct PendingComment {
     /// Empty when none approved, or when the caller did not request them.
     #[serde(default)]
     pub reaction_counts: std::collections::HashMap<String, i64>,
+    /// True when authored by the verified site owner (admin writer).
+    pub verified: bool,
 }
 
 impl From<Comment> for PendingComment {
@@ -80,6 +82,7 @@ impl From<Comment> for PendingComment {
             content_hash: c.content_hash,
             created_at: c.created_at,
             reaction_counts: std::collections::HashMap::new(),
+            verified: c.verified,
         }
     }
 }

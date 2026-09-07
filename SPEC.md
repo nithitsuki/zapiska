@@ -157,6 +157,24 @@ The `comments` table has these fields:
 | `submitter_ip` | Raw peer IP when IP storage is enabled. |
 | `submitter_ip_hash` | Salted or unsalted SHA-256 IP hash. |
 | `content_hash` | Hash of normalized input content. |
+| `verified` | True only for comments authored through the admin owner endpoint. |
+
+### Verified owner identity
+
+The operator sets a public owner profile (display name, GitHub username,
+website and avatar URLs) through the admin API or dashboard. Name/URL
+fields are validated like native submissions; no secrets are involved.
+
+`POST /api/admin/comments` authors a comment as the profile: it is created
+`approved` and `verified`, so it appears publicly with a ✓ checkmark
+immediately. Replies follow the same parent rules as native comments.
+Visitors see the checkmark on the public read API (`verified: true`), the
+RSS feed (✓ suffix), and the widget (✓ badge).
+
+The checkmark — not the name — is the trust signal: anyone can submit any
+author name, but no public path (native form, webmention, reactions) can
+set `verified`. Imports preserve the flag from the operator's own backups,
+so only import files you trust.
 
 ### webmention_seen
 

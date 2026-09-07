@@ -14,10 +14,11 @@ use super::{
 pub(crate) fn insert_comment_on_conn(
     conn: &rusqlite::Connection,
     input: &NewComment,
+    verified: bool,
 ) -> RepoResult<i64> {
     conn.execute(
-        "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash, verified)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             input.target_path,
             input.comment_type,
@@ -33,6 +34,7 @@ pub(crate) fn insert_comment_on_conn(
             input.submitter_ip,
             input.content_hash,
             input.submitter_ip_hash,
+            verified as i64,
         ],
     )
     .map_err(RepoError::from)?;
@@ -42,10 +44,11 @@ pub(crate) fn insert_comment_on_conn(
 pub(crate) fn upsert_by_source_on_conn(
     conn: &rusqlite::Connection,
     input: &NewComment,
+    verified: bool,
 ) -> RepoResult<i64> {
     conn.execute(
-        "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        "INSERT INTO comments (target_path, comment_type, source_url, author_name, author_url, author_avatar, content, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash, verified)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(source_url, target_path)
          WHERE source_url IS NOT NULL
          DO UPDATE SET
@@ -70,6 +73,7 @@ pub(crate) fn upsert_by_source_on_conn(
             input.submitter_ip,
             input.content_hash,
             input.submitter_ip_hash,
+            verified as i64,
         ],
     )
     .map_err(RepoError::from)?;
@@ -209,12 +213,19 @@ pub(crate) fn list_all_comments_on_conn(conn: &rusqlite::Connection) -> RepoResu
 
 impl Repo {
     pub async fn insert_comment(&self, input: NewComment) -> RepoResult<i64> {
-        self.spawn(move |conn| insert_comment_on_conn(conn, &input))
+        self.spawn(move |conn| insert_comment_on_conn(conn, &input, false))
+            .await
+    }
+
+    /// Store a comment authored by the verified site owner (admin writer).
+    /// `verified = true`, so public widgets render the checkmark badge.
+    pub async fn insert_owner_comment(&self, input: NewComment) -> RepoResult<i64> {
+        self.spawn(move |conn| insert_comment_on_conn(conn, &input, true))
             .await
     }
 
     pub async fn upsert_by_source(&self, input: NewComment) -> RepoResult<i64> {
-        self.spawn(move |conn| upsert_by_source_on_conn(conn, &input))
+        self.spawn(move |conn| upsert_by_source_on_conn(conn, &input, false))
             .await
     }
 
@@ -234,7 +245,7 @@ impl Repo {
         urls: Vec<(String, String, String)>,
     ) -> RepoResult<i64> {
         self.with_tx(move |tx| {
-            let id = insert_comment_on_conn(tx, &input)?;
+            let id = insert_comment_on_conn(tx, &input, false)?;
             if auto_approve {
                 update_status_on_conn(tx, id, "approved")?;
             }
@@ -745,8 +756,8 @@ impl Repo {
     pub async fn import_comment(&self, input: Comment) -> RepoResult<()> {
         self.spawn(move |conn| {
             conn.execute(
-                "INSERT INTO comments (id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                "INSERT INTO comments (id, target_path, comment_type, source_url, author_name, author_url, author_avatar, content, status, created_at, updated_at, parent_id, depth, honeypot, delete_token, submitter_ip, content_hash, submitter_ip_hash, verified)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                  ON CONFLICT(id) DO UPDATE SET
                      target_path = excluded.target_path,
                      comment_type = excluded.comment_type,
@@ -764,7 +775,8 @@ impl Repo {
                      delete_token = excluded.delete_token,
                      submitter_ip = excluded.submitter_ip,
                      content_hash = excluded.content_hash,
-                     submitter_ip_hash = excluded.submitter_ip_hash",
+                     submitter_ip_hash = excluded.submitter_ip_hash,
+                     verified = excluded.verified",
                 params![
                     input.id,
                     input.target_path,
@@ -784,6 +796,7 @@ impl Repo {
                     input.submitter_ip,
                     input.content_hash,
                     input.submitter_ip_hash,
+                    input.verified as i64,
                 ],
             )
             .map_err(RepoError::from)?;
@@ -1037,8 +1050,8 @@ mod tests {
     async fn comment_columns_lists_all_18_fields() {
         assert_eq!(
             COMMENT_COLUMNS.split(',').count(),
-            18,
-            "COMMENT_COLUMNS must list all 18 comment columns: {COMMENT_COLUMNS}"
+            19,
+            "COMMENT_COLUMNS must list all 19 comment columns: {COMMENT_COLUMNS}"
         );
     }
 

@@ -118,6 +118,7 @@
         '.nc-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 13px; }' +
         '.nc-avatar { border-radius: 50%; object-fit: cover; flex-shrink: 0; }' +
         '.nc-author { font-weight: 600; text-decoration: none; color: #333; }' +
+        '.nc-verified { font-weight: 700; color: #1a7f37; }' +
         '.nc-author:hover { text-decoration: underline; }' +
         '.nc-date { font-size: 12px; color: #888; }' +
         '.nc-body { font-size: 14px; line-height: 1.5; margin-bottom: 6px; }' +
@@ -234,6 +235,16 @@
       span.className = 'nc-author';
       span.textContent = name;
       meta.appendChild(span);
+    }
+
+    // Verified site-owner badge: the name/avatar/URL were set by the server
+    // operator through the admin API, so visitors can trust the checkmark.
+    if (c.verified) {
+      var badge = document.createElement('span');
+      badge.className = 'nc-verified';
+      badge.title = 'Verified site owner';
+      badge.textContent = ' ✓';
+      meta.appendChild(badge);
     }
 
     var time = document.createElement('time');

@@ -298,11 +298,14 @@ Admin comment objects include:
 ```text
 id, target_path, comment_type, source_url, author_name, author_url,
 author_avatar, content, status, created_at, parent_id, depth, honeypot,
-delete_token, submitter_ip, submitter_ip_hash, content_hash
+delete_token, submitter_ip, submitter_ip_hash, content_hash, verified
 ```
 
 The IP fields are present only when IP storage is enabled. `submitter_ip` is the
 raw stored peer IP. `submitter_ip_hash` is its salted or unsalted SHA-256 hash.
+`verified` is true only for comments authored through the admin owner
+endpoint — public widgets render a ✓ checkmark badge for these. No public
+submission path can set it.
 
 ### GET /api/admin/pending
 
@@ -353,6 +356,43 @@ Return one comment and its ancestor chain.
 ```
 
 The `parents` list starts with the direct parent and ends at the root.
+
+### POST /api/admin/comments
+
+Author a comment as the verified site owner. The comment is created
+`approved` and `verified`, so it appears publicly with the ✓ checkmark
+immediately — no queue. `parent_id` optionally makes it a reply (the parent
+must be approved and on the same path, honoring `MAX_THREAD_DEPTH`).
+Author name, URL, and avatar default to the owner profile (`Owner` when the
+profile name is empty).
+
+```json
+{
+  "target_path": "/blog/hello",
+  "content": "Official reply",
+  "parent_id": 42
+}
+```
+
+```json
+{
+  "id": 43,
+  "status": "approved",
+  "verified": true
+}
+```
+
+### GET /api/admin/profile
+
+Return the verified owner profile (`display_name`, `github_username`,
+`website_url`, `avatar_url`, plus derived `set`).
+
+### PUT /api/admin/profile
+
+Validate and save the owner profile. Names are control-stripped and
+clamped to `MAX_AUTHOR_LEN`; a non-empty GitHub username must match the
+GitHub username shape; non-empty website/avatar values must be absolute
+HTTP(S) URLs with a host. Only name/URL fields — no secrets.
 
 ### POST /api/admin/moderate
 
