@@ -8,6 +8,18 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Added
 
+- `GET /api/admin/status`: versions, database health, and non-secret
+  configuration (honeypot field, webhook/notify/proxy/reactions/limits) in
+  one body for the dashboard OPS tab. Secret values never leave the server.
+- `CF-Connecting-IP` is preferred first under `TRUST_PROXY=true`: the
+  Cloudflare edge sets it to the single visitor IP, unlike the append-only
+  `X-Forwarded-For` whose leftmost entry a client can spoof. Only safe when
+  every byte arrives via the trusted edge (direct origin access must be
+  impossible).
+- Admin dashboard rebuild: comments (exact path totals, per-item batch
+  results, true undo, ancestor chains, extracted URLs, duplicate lookup),
+  reactions moderation with reviewed-emoji pinning, author/URL lookup,
+  export download and import restore with force, and an OPS tab.
 - Versioned SQLite migrations via `PRAGMA user_version`
   (`LATEST_SCHEMA_VERSION = 8` in `src/db/pool.rs`). Fresh databases get the
   canonical snapshot and a stamp. Legacy `user_version = 0` databases run an

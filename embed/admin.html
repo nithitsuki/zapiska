@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zapiska control v1.0</title>
+<title>zapiska control</title>
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 <style>
 /* ===== Base ===== */
@@ -22,7 +22,7 @@ a:hover { color: #800000; }
 .win-body { padding: 4px; }
 
 /* ===== Buttons ===== */
-.btn { background: #c0c0c0; color: #000; border: 2px outset #fff; padding: 2px 12px; cursor: pointer; border-radius: 0; font-family: 'MS Sans Serif', 'Segoe UI', Tahoma, sans-serif; font-size: 11px; }
+.btn { background: #c0c0c0; color: #000; border: 2px outset #fff; padding: 2px 12px; cursor: pointer; border-radius: 0; font-family: 'MS Sans Serif', Tahoma, sans-serif; font-size: 11px; }
 .btn:active { border: 2px inset #fff; }
 .btn:disabled { opacity: .4; }
 .btn-primary { background: #000080; color: #fff; border: 2px outset #fff; }
@@ -35,11 +35,14 @@ a:hover { color: #800000; }
 .badge-d { background: #808080; color: #fff; }
 .badge-w { background: #000080; color: #fff; }
 .badge-h { background: #ff8000; color: #fff; }
+.badge-ok { background: #00aa00; color: #fff; }
+.badge-bad { background: #ff0000; color: #fff; }
 
 /* ===== Tabs ===== */
 .tab { background: #c0c0c0; color: #000; border: 2px outset #fff; padding: 2px 10px; cursor: pointer; font-family: 'MS Sans Serif', Tahoma, sans-serif; font-size: 10px; text-transform: uppercase; }
 .tab:hover { background: #d4d0c8; }
 .tab.sel { background: #000080; color: #fff; border: 2px outset #fff; }
+.vtab { font-size: 11px; padding: 3px 14px; }
 
 /* ===== Stats ===== */
 .stat { background: #d4d0c8; color: #000; padding: 2px 8px; text-align: center; box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #808080; }
@@ -58,7 +61,7 @@ a:hover { color: #800000; }
 /* ===== Toasts ===== */
 .toast-c { position: fixed; bottom: 4px; left: 50%; transform: translateX(-50%); z-index: 999; display: flex; flex-direction: column; gap: 2px; }
 .toast { background: #000080; color: #fff; padding: 3px 12px; font-family: 'Courier New', 'Consolas', monospace; font-size: 11px; display: flex; align-items: center; gap: 8px; }
-.toast a { color: #ffff00; font-weight: 700; cursor: pointer; }
+.toast.err { background: #800000; }
 
 /* ===== Spinner / empty ===== */
 .spin { width: 12px; height: 12px; border: 2px solid #808080; border-top-color: #000080; border-radius: 50%; animation: s .5s linear infinite; margin: 12px auto; }
@@ -105,6 +108,13 @@ a:hover { color: #800000; }
 .swipe-left-hint { right: 0; background: #ff0000; color: #fff; }
 .swipe-right-hint { left: 0; background: #00aa00; color: #fff; }
 
+/* ===== Ops tables / forms ===== */
+.kv { display: flex; gap: 6px; padding: 1px 4px; font-size: 11px; color: #000; border-bottom: 1px solid #a0a0a0; }
+.kv .k { font-size: 9px; color: #444; text-transform: uppercase; letter-spacing: .5px; min-width: 150px; }
+.kv .v { font-family: 'Courier New', 'Consolas', monospace; word-break: break-all; }
+.frm { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-bottom: 4px; }
+pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10px; overflow-x: auto; max-height: 220px; overflow-y: auto; color: #000; }
+
 /* ===== Responsive overrides ===== */
 
 /* Tablet / phone ≤768px */
@@ -130,6 +140,7 @@ a:hover { color: #800000; }
   .cc-body { font-size: 14px; line-height: 1.45; }
   .cc-actions { gap: 6px; margin-top: 6px; }
   .cc-actions .btn { font-size: 12px; padding: 4px 14px; }
+  .kv .k { min-width: 110px; }
 }
 
 /* Desktop ≥769px — hide mobile-only controls */
@@ -163,7 +174,7 @@ a:hover { color: #800000; }
 
 <!-- Title bar -->
 <div class="win" style="margin:4px">
-  <div class="win-title"><span>zapiska control v1.0</span></div>
+  <div class="win-title"><span x-text="'zapiska control ' + (serverVersion || '…')"></span><span style="font-weight:400;font-size:10px" x-show="health === 'unavailable'" class="badge badge-bad">DB DOWN</span></div>
 </div>
 
 <!-- Login -->
@@ -172,7 +183,7 @@ a:hover { color: #800000; }
   <div class="win-body">
     <div style="margin-bottom:4px;font-size:10px">admin token required</div>
     <input type="password" x-model="token" @keydown.enter="login" style="width:100%;margin-bottom:4px" autofocus>
-    <div x-show="loginError" style="color:#ff0000;font-weight:700;margin-bottom:4px">ACCESS DENIED</div>
+    <div x-show="loginError" style="color:#ff0000;font-weight:700;margin-bottom:4px" x-text="loginError"></div>
     <button class="btn btn-primary" @click="login" :disabled="!token" style="width:100%">SIGN IN</button>
   </div>
 </div>
@@ -180,6 +191,23 @@ a:hover { color: #800000; }
 <!-- Dashboard -->
 <div x-show="authenticated" style="margin:4px">
 
+  <!-- View tabs -->
+  <div class="hdr" style="margin-bottom:2px">
+    <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+      <template x-for="v in views" :key="v.key">
+        <button class="tab vtab" :class="{ sel: view === v.key }" @click="switchView(v.key)" x-text="v.label"></button>
+      </template>
+    </div>
+    <div style="display:flex;align-items:center;gap:4px">
+      <button class="btn" @click="undoLast" x-show="lastAction" style="font-size:10px" x-text="'UNDO ' + lastAction.label"></button>
+      <span style="font-size:9px;color:#808080" class="hide-p">R:REF B:BULK</span>
+      <button class="btn" @click="refreshAll" style="font-size:10px">REFR</button>
+      <button class="btn" @click="logout" style="font-size:10px">EXIT</button>
+    </div>
+  </div>
+
+  <!-- ============ COMMENTS VIEW ============ -->
+  <div x-show="view === 'comments'">
   <!-- Toolbar -->
   <div class="hdr">
     <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
@@ -202,8 +230,6 @@ a:hover { color: #800000; }
       </button>
     </div>
     <div style="display:flex;align-items:center;gap:4px">
-      <span style="font-size:9px;color:#808080" class="hide-p">R:REF B:BULK</span>
-      <button class="btn" @click="refreshAll" style="font-size:10px">REFR</button>
       <button class="btn show-m" @click="showColMenu = !showColMenu" style="font-size:10px;position:relative">
         COLS
         <div x-show="showColMenu" class="win col-menu" @click.outside="showColMenu = false" style="right:auto;left:0">
@@ -215,11 +241,10 @@ a:hover { color: #800000; }
           </template>
         </div>
       </button>
-      <button class="btn" @click="logout" style="font-size:10px">EXIT</button>
     </div>
   </div>
 
-  <!-- Stats row -->
+  <!-- Stats row (exact totals summed from /api/admin/paths) -->
   <div style="display:flex;gap:2px;margin:3px 0">
     <template x-for="s in statItems" :key="s.key">
       <div class="stat" style="flex:1">
@@ -263,6 +288,7 @@ a:hover { color: #800000; }
             </select>
             <input type="text" x-model="pathFilter" placeholder="PATH" style="width:100px;font-size:11px;padding:2px 4px">
             <input type="text" x-model="ipFilter" placeholder="IP" style="width:80px;font-size:11px;padding:2px 4px" class="hide-p">
+            <input type="text" x-model="hashFilter" placeholder="CONTENT-HASH" style="width:110px;font-size:11px;padding:2px 4px" class="hide-p">
             <select x-model="sortBy" style="font-size:11px;padding:2px 4px">
               <option value="desc">NEW</option>
               <option value="asc">OLD</option>
@@ -297,14 +323,25 @@ a:hover { color: #800000; }
               <div><span class="lbl">PATH</span><div class="val" x-text="detailComment.target_path"></div></div>
               <div><span class="lbl">TYPE</span><div class="val" x-text="detailComment.comment_type"></div></div>
               <div><span class="lbl">DEPTH</span><div class="val" x-text="detailComment.depth"></div></div>
-              <div x-show="detailComment.parent_id"><span class="lbl">PARENT</span><div class="val" x-text="detailComment.parent_id"></div></div>
+              <div x-show="detailComment.parent_id"><span class="lbl">PARENT</span><div class="val"><a @click="loadChain(detailComment.id)" x-text="detailComment.parent_id"></a></div></div>
               <div x-show="detailComment.submitter_ip"><span class="lbl">IP</span><div class="val" x-text="detailComment.submitter_ip"></div></div>
+              <div x-show="detailComment.submitter_ip_hash"><span class="lbl">IP-HASH</span><div class="val" style="font-size:9px" x-text="detailComment.submitter_ip_hash"></div></div>
+              <div x-show="detailComment.content_hash"><span class="lbl">CONTENT-HASH</span><div class="val" style="font-size:9px"><a @click="findDuplicates(detailComment.content_hash)" x-text="detailComment.content_hash"></a></div></div>
               <div><span class="lbl">HONEY</span><div class="val" x-text="detailComment.honeypot ? 'YES' : 'NO'"></div></div>
               <div x-show="detailComment.source_url"><span class="lbl">SOURCE</span><div class="val" style="font-size:10px;word-break:break-all" x-text="detailComment.source_url"></div></div>
               <div><span class="lbl">CREATED</span><div class="val" x-text="detailComment.created_at"></div></div>
-              <div x-show="detailComment.updated_at && detailComment.updated_at !== detailComment.created_at"><span class="lbl">UPDATED</span><div class="val" x-text="detailComment.updated_at"></div></div>
             </div>
             <div style="margin-top:4px"><span class="lbl">CONTENT</span><div class="val win-sun" style="padding:4px;margin-top:2px;background:#fff" x-html="detailComment.content || '(empty)'"></div></div>
+            <div x-show="chain.length > 0" style="margin-top:4px"><span class="lbl">ANCESTORS (ROOT LAST)</span>
+              <template x-for="p in chain" :key="p.id">
+                <div class="val" style="font-size:10px"><span x-text="'#' + p.id + ' ' + p.author_name + ' [' + p.status + ']'"></span></div>
+              </template>
+            </div>
+            <div x-show="curls.length > 0" style="margin-top:4px"><span class="lbl">EXTRACTED URLS</span>
+              <template x-for="u in curls" :key="u.id">
+                <div class="val" style="font-size:10px;word-break:break-all"><a @click="lookupUrl(u.url_hash)" x-text="u.domain + ' — ' + u.url"></a></div>
+              </template>
+            </div>
           </div>
           </template>
 
@@ -332,7 +369,7 @@ a:hover { color: #800000; }
                 </div>
 
                 <!-- Meta row -->
-                  <div class="cc-meta">
+                <div class="cc-meta">
                   <img x-show="c.author_avatar" :src="c.author_avatar" class="cc-avatar" alt="" width="20" height="20">
                   <span class="cc-name">
                     <template x-if="c.author_url"><a :href="c.author_url" target="_blank" x-text="c.author_name"></a></template>
@@ -382,19 +419,148 @@ a:hover { color: #800000; }
       </div>
     </div>
   </div>
-</div>
+  </div><!-- /COMMENTS VIEW -->
+
+  <!-- ============ REACTIONS VIEW ============ -->
+  <div x-show="view === 'reactions'">
+    <div class="win">
+      <div class="win-title">
+        <span>REACTIONS</span>
+        <div style="display:flex;align-items:center;gap:4px">
+          <template x-for="s in ['pending','approved','spam','deleted','all']" :key="s">
+            <button class="tab" :class="{ sel: rstatus === s }" @click="rstatus = s; rbefore = null; fetchReactions()" x-text="s.toUpperCase().slice(0,4)" style="font-size:10px"></button>
+          </template>
+        </div>
+      </div>
+      <div class="win-body" style="padding:2px">
+        <div x-show="rloading && reactions.length === 0"><div class="spin"></div></div>
+        <div x-show="!rloading && reactions.length === 0"><div class="empty">NO REACTIONS</div></div>
+        <template x-for="r in reactions" :key="r.id">
+          <div class="cc">
+            <div class="cc-meta">
+              <span class="cc-name" x-text="r.reaction + ' by ' + r.comment_author"></span>
+              <span class="cc-badges">
+                <span class="badge" :class="'badge-' + r.status[0]" x-text="r.status.toUpperCase().slice(0,4)"></span>
+              </span>
+              <span class="cc-date" x-text="r.created_at ? r.created_at.slice(0,10) : ''"></span>
+            </div>
+            <div style="font-size:10px;color:#000;margin-bottom:3px">
+              ON <a @click="jumpToComment(r.comment_id)" x-text="'#' + r.comment_id + ' ' + r.target_path"></a>
+              <span x-text="' (comment ' + r.comment_status + ')'"></span>
+            </div>
+            <div class="frm">
+              <input type="text" x-model="r._emoji" placeholder="reviewed emoji" style="width:70px" :title="'Emoji you reviewed (stale value 400s)'">
+              <button class="btn" @click="moderateReaction(r, 'approved')" style="background:#00aa00;color:#fff;border-color:#008800;font-size:10px">APPR</button>
+              <button class="btn" @click="moderateReaction(r, 'spam')" style="font-size:10px">SPAM</button>
+              <button class="btn" @click="moderateReaction(r, 'deleted')" style="font-size:10px">DEL</button>
+              <button class="btn" @click="moderateReaction(r, 'pending')" style="font-size:10px">PEND</button>
+            </div>
+            <div x-show="r._err" style="color:#c00;font-size:10px" x-text="r._err"></div>
+          </div>
+        </template>
+        <div x-show="rhasMore" style="margin-top:3px">
+          <button class="btn" @click="fetchReactions(true)" :disabled="rloading" style="width:100%;padding:4px;text-align:center;font-size:10px">LOAD MORE</button>
+        </div>
+      </div>
+    </div>
+  </div><!-- /REACTIONS VIEW -->
+
+  <!-- ============ LOOKUP VIEW ============ -->
+  <div x-show="view === 'lookup'">
+    <div class="win" style="margin-bottom:3px">
+      <div class="win-title"><span>AUTHOR LOOKUP</span></div>
+      <div class="win-body">
+        <div class="frm">
+          <input type="text" x-model="laIp" placeholder="IP" style="width:110px">
+          <input type="text" x-model="laName" placeholder="AUTHOR NAME" style="width:130px">
+          <input type="text" x-model="laUrl" placeholder="AUTHOR URL" style="width:150px">
+          <label style="font-size:10px;color:#000;display:flex;align-items:center;gap:2px"><input type="checkbox" x-model="laCombine"> OR</label>
+          <button class="btn" @click="lookupAuthor">GO</button>
+        </div>
+        <pre class="raw" x-show="laResult" x-text="laResult"></pre>
+      </div>
+    </div>
+    <div class="win" style="margin-bottom:3px">
+      <div class="win-title"><span>URL LOOKUP</span></div>
+      <div class="win-body">
+        <div class="frm">
+          <input type="text" x-model="luHash" placeholder="URL HASH" style="width:200px">
+          <input type="text" x-model="luDomain" placeholder="DOMAIN" style="width:150px">
+          <button class="btn" @click="lookupUrl()">GO</button>
+        </div>
+        <div style="font-size:9px;color:#444;margin-bottom:2px">HASH OR DOMAIN — DOMAIN LISTS EVERY URL SEEN ON IT</div>
+        <pre class="raw" x-show="luResult" x-text="luResult"></pre>
+      </div>
+    </div>
+    <div class="win" style="margin-bottom:3px">
+      <div class="win-title"><span>COMMENT DETAIL</span></div>
+      <div class="win-body">
+        <div class="frm">
+          <input type="text" x-model="ldId" placeholder="COMMENT ID" style="width:100px">
+          <button class="btn" @click="loadChain(ldId)">CHAIN</button>
+          <button class="btn" @click="loadUrls(ldId)">URLS</button>
+          <button class="btn" @click="loadContext(ldId)">CONTEXT</button>
+        </div>
+        <pre class="raw" x-show="ldResult" x-text="ldResult"></pre>
+      </div>
+    </div>
+  </div><!-- /LOOKUP VIEW -->
+
+  <!-- ============ DATA VIEW ============ -->
+  <div x-show="view === 'data'">
+    <div class="win" style="margin-bottom:3px">
+      <div class="win-title"><span>BACKUP — EXPORT</span></div>
+      <div class="win-body">
+        <div style="font-size:10px;color:#000;margin-bottom:4px">FULL JSON DUMP OF ALL FIVE TABLES (ONE WAL SNAPSHOT). BACK UP <span style="font-family:monospace">.env</span> ALONGSIDE IT WHEN IP HASHES ARE SALTED.</div>
+        <button class="btn btn-primary" @click="doExport" :disabled="dataBusy">DOWNLOAD EXPORT</button>
+      </div>
+    </div>
+    <div class="win" style="margin-bottom:3px">
+      <div class="win-title"><span>RESTORE — IMPORT</span></div>
+      <div class="win-body">
+        <div class="frm">
+          <input type="file" id="importFile" accept="application/json,.json" style="font-size:10px">
+          <label style="font-size:10px;color:#000;display:flex;align-items:center;gap:2px"><input type="checkbox" x-model="impForce"> FORCE OVERWRITE LIVE ROWS</label>
+          <button class="btn" @click="doImport" :disabled="dataBusy" style="background:#800000;color:#fff;border-color:#500000">RESTORE</button>
+        </div>
+        <div style="font-size:9px;color:#444;margin-bottom:2px">TARGETS AN EMPTY DATABASE. WITHOUT FORCE, COLLIDING LIVE ROWS REFUSE WITH 400 — NOTHING IS CLOBBERED.</div>
+        <div x-show="impResult" style="margin-top:4px">
+          <div x-show="impError" class="toast err" style="position:static;transform:none;margin-bottom:4px"><span x-text="impError"></span></div>
+          <pre class="raw" x-text="impResult"></pre>
+        </div>
+      </div>
+    </div>
+  </div><!-- /DATA VIEW -->
+
+  <!-- ============ OPS VIEW ============ -->
+  <div x-show="view === 'ops'">
+    <div class="win" style="margin-bottom:3px">
+      <div class="win-title"><span>SERVER</span><span x-show="ops.health"><span class="badge" :class="ops.health === 'ok' ? 'badge-ok' : 'badge-bad'" x-text="ops.health.toUpperCase()"></span></span></div>
+      <div class="win-body" style="padding:2px" id="ops-server"></div>
+    </div>
+    <div class="win" style="margin-bottom:3px">
+      <div class="win-title"><span>MODERATION + DELIVERY</span></div>
+      <div class="win-body" style="padding:2px" id="ops-mod"></div>
+    </div>
+    <div class="win" style="margin-bottom:3px">
+      <div class="win-title"><span>LIMITS + PRIVACY</span></div>
+      <div class="win-body" style="padding:2px" id="ops-limits"></div>
+    </div>
+  </div><!-- /OPS VIEW -->
+
+</div><!-- /Dashboard -->
 
 <!-- Toasts -->
 <div class="toast-c">
   <template x-for="(t, i) in toasts" :key="i">
-    <div class="toast" x-html="t.html"></div>
+    <div class="toast" :class="{ err: t.err }" x-text="t.text"></div>
   </template>
 </div>
 
 <!-- Status bar -->
 <div class="win" style="margin:4px;margin-top:8px">
   <div class="raised-bar">
-    <span x-text="'ZAPISKA v1.0  |  ' + comments.length + ' LOADED  |  ' + paths.length + ' PATHS'"></span>
+    <span x-text="statusBar"></span>
     <span x-text="new Date().toISOString().slice(0,16).replace('T',' ')" x-init="setInterval(() => $el.textContent = new Date().toISOString().slice(0,16).replace('T',' '), 10000)"></span>
   </div>
 </div>
@@ -402,16 +568,33 @@ a:hover { color: #800000; }
 </div>
 
 <script>
+const PAGE = 50;
 function app() {
   return {
-    authenticated: false, token: '', loginError: false,
-    status: 'all', pathFilter: '', ipFilter: '', sortBy: 'desc', selectedPath: '',
+    authenticated: false, token: '', loginError: '',
+    view: 'comments',
+    status: 'all', pathFilter: '', ipFilter: '', hashFilter: '', sortBy: 'desc', selectedPath: '',
     stats: { all: 0, pending: 0, approved: 0, spam: 0, deleted: 0 },
     paths: [], comments: [], before: null, loading: false, hasMore: false,
-    moderating: new Set(), detailComment: null,
+    moderating: new Set(), detailComment: null, chain: [], curls: [],
     bulkMode: false, selected: [],
     showPaths: true, showColMenu: false, toasts: [],
     expanded: new Set(), swipeX: {}, moreOpen: new Set(),
+    lastAction: null,
+    // Reactions view.
+    rstatus: 'pending', reactions: [], rbefore: null, rloading: false, rhasMore: false,
+    // Lookup view.
+    laIp: '', laName: '', laUrl: '', laCombine: false, laResult: '',
+    luHash: '', luDomain: '', luResult: '',
+    ldId: '', ldResult: '',
+    // Data view.
+    dataBusy: false, impForce: false, impResult: '', impError: '',
+    // Ops view.
+    ops: {}, serverVersion: '',
+    get statusBar() {
+      return 'ZAPISKA ' + (this.serverVersion || '?') + '  |  ' + this.comments.length + ' LOADED  |  ' + this.paths.length + ' PATHS';
+    },
+    get health() { return this.ops && this.ops.health; },
     isMobile: window.innerWidth < 769,
     _refreshTimer: null, _debounceTimer: null,
     apiOrigin: new URLSearchParams(window.location.search).get('api') || window.location.origin,
@@ -419,6 +602,10 @@ function app() {
     colDefs: { path: 1 },
     col: { path: true },
 
+    views: [
+      { key: 'comments', label: 'COMMENTS' }, { key: 'reactions', label: 'REACTS' },
+      { key: 'lookup', label: 'LOOKUP' }, { key: 'data', label: 'DATA' }, { key: 'ops', label: 'OPS' },
+    ],
     get statItems() { return [
       { key: 'pending', label: 'PENDING' }, { key: 'approved', label: 'APPROVED' },
       { key: 'spam', label: 'SPAM' }, { key: 'deleted', label: 'DELETED' }, { key: 'all', label: 'TOTAL' },
@@ -439,50 +626,81 @@ function app() {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
         if (e.key === 'r' || e.key === 'R') { this.refreshAll(); this.toast('REFRESHED'); }
         if (e.key === 'b' || e.key === 'B') { this.bulkMode = !this.bulkMode; }
-        if (e.key >= '1' && e.key <= '5') this.switchTab(this.tabItems[parseInt(e.key)-1].key);
+        if (this.view === 'comments' && e.key >= '1' && e.key <= '5') this.switchTab(this.tabItems[parseInt(e.key)-1].key);
       });
       this.api('/api/admin/comments?status=all&limit=1').then(d => {
-        if (d) { this.authenticated = true; this.refreshAll(); this.startAutoRefresh(); }
+        if (d.ok) { this.authenticated = true; this.boot(); }
       });
-      this.$watch('pathFilter', () => { this.selectedPath = ''; clearTimeout(this._debounceTimer); this._debounceTimer = setTimeout(() => { this.before = null; this.fetchComments(); }, 300); });
-      this.$watch('ipFilter', () => { clearTimeout(this._debounceTimer); this._debounceTimer = setTimeout(() => { this.before = null; this.fetchComments(); }, 300); });
-      this.$watch('sortBy', () => { this.before = null; this.fetchComments(); });
+      const debounced = () => { clearTimeout(this._debounceTimer); this._debounceTimer = setTimeout(() => { this.before = null; this.comments = []; this.fetchComments(); }, 300); };
+      this.$watch('pathFilter', () => { this.selectedPath = ''; debounced(); });
+      this.$watch('ipFilter', debounced);
+      this.$watch('hashFilter', debounced);
+      this.$watch('sortBy', () => { this.before = null; this.comments = []; this.fetchComments(); });
       this.$watch('bulkMode', v => { if (!v) this.selected = []; });
+      this.$watch('view', v => { if (v === 'reactions' && this.reactions.length === 0) this.fetchReactions(); if (v === 'ops' && !this.ops.version) this.fetchOps(); });
     },
 
+    async boot() {
+      this.refreshAll();
+      this.fetchOps();
+      this.startAutoRefresh();
+    },
+
+    // JSON API with the documented {error, code} shape surfaced to callers.
+    // Returns { ok, status, data }. 401 logs out everywhere, once.
     async api(url, opts) {
-      try { const r = await fetch(this.apiOrigin + url, { credentials: 'include', ...opts });
-        if (r.status === 401) { this.authenticated = false; return null; } return r.json().catch(() => null);
-      } catch { return null; }
+      let r;
+      try { r = await fetch(this.apiOrigin + url, { credentials: 'include', ...opts }); }
+      catch { return { ok: false, status: 0, data: null, error: 'network unreachable' }; }
+      if (r.status === 401) { this.authenticated = false; return { ok: false, status: 401, data: null }; }
+      let data = null;
+      try { data = await r.json(); } catch { data = null; }
+      if (!r.ok) {
+        const msg = (data && data.error) ? data.error + (data.code ? ' [' + data.code + ']' : '') : ('HTTP ' + r.status);
+        return { ok: false, status: r.status, data, error: msg };
+      }
+      return { ok: true, status: r.status, data };
     },
 
     async login() {
-      if (!this.token) return; this.loginError = false;
-      const r = await fetch(this.apiOrigin + '/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: this.token }) });
-      if (r.status === 401) { this.loginError = true; return; } if (!r.ok) return;
-      this.authenticated = true; this.token = ''; this.refreshAll(); this.startAutoRefresh();
+      if (!this.token) return; this.loginError = '';
+      let r;
+      try {
+        r = await fetch(this.apiOrigin + '/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: this.token }) });
+      } catch { this.loginError = 'NETWORK UNREACHABLE'; return; }
+      if (r.status === 401) { this.loginError = 'ACCESS DENIED'; return; }
+      if (!r.ok) { this.loginError = 'LOGIN FAILED (HTTP ' + r.status + ')'; return; }
+      this.authenticated = true; this.token = ''; this.boot();
     },
 
     logout() {
-      this.api('/api/admin/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      this.stopAutoRefresh(); this.authenticated = false; this.comments = []; this.paths = []; this.detailComment = null; this.selected = [];
+      this.api('/api/admin/logout', { method: 'POST' });
+      this.stopAutoRefresh(); this.authenticated = false; this.comments = []; this.paths = [];
+      this.detailComment = null; this.selected = []; this.reactions = []; this.ops = {};
     },
 
+    // Exact totals summed from /api/admin/paths (no totals endpoint exists).
     async fetchStats() {
-      const results = await Promise.all(['pending','approved','spam','deleted'].map(st =>
-        this.api('/api/admin/comments?status=' + st + '&limit=1').then(d => ({ status: st, count: d && d.comments ? d.comments.length : 0 }))
-      ));
-      const stats = { all: 0 }; results.forEach(x => { stats[x.status] = x.count; stats.all += x.count; }); this.stats = stats;
+      const d = await this.api('/api/admin/paths');
+      if (!d.ok) return;
+      const stats = { all: 0, pending: 0, approved: 0, spam: 0, deleted: 0 };
+      for (const p of (d.data && d.data.paths) || []) {
+        stats.pending += p.pending || 0; stats.approved += p.approved || 0;
+        stats.spam += p.spam || 0; stats.deleted += p.deleted || 0;
+        stats.all += p.total || 0;
+      }
+      this.stats = stats;
     },
 
-    async fetchPaths() { const d = await this.api('/api/admin/paths'); if (d) this.paths = d.paths || []; },
+    async fetchPaths() { const d = await this.api('/api/admin/paths'); if (d.ok && d.data) this.paths = d.data.paths || []; },
 
     buildUrl(append) {
-      let url = '/api/admin/comments?status=' + this.status + '&limit=50';
+      let url = '/api/admin/comments?status=' + this.status + '&limit=' + PAGE;
       if (this.selectedPath) url += '&path=' + encodeURIComponent(this.selectedPath);
       const p = this.pathFilter;
       if (p && !this.selectedPath) url += '&path=' + encodeURIComponent(p.endsWith('/*') ? p.slice(0,-1) + '%' : p);
       if (this.ipFilter) url += '&ip=' + encodeURIComponent(this.ipFilter);
+      if (this.hashFilter) url += '&content_hash=' + encodeURIComponent(this.hashFilter);
       if (this.before && append) url += '&before=' + this.before;
       return url;
     },
@@ -490,57 +708,266 @@ function app() {
     async fetchComments(append) {
       if (this.loading) return; this.loading = true;
       const d = await this.api(this.buildUrl(append)); this.loading = false;
-      if (!d) return; const raw = d.comments || [];
+      if (!d.ok) { if (d.error) this.toast('LIST FAILED: ' + d.error, true); return; }
+      const raw = (d.data && d.data.comments) || [];
       if (append) { this.comments.push(...raw); } else { this.comments = raw; }
-      this.before = raw.length > 0 ? raw[raw.length - 1].id : null; this.hasMore = raw.length > 0;
+      // A full page means more may exist; a short page (or empty) ends the list.
+      this.hasMore = raw.length === PAGE;
+      this.before = raw.length > 0 ? raw[raw.length - 1].id : null;
     },
 
     loadMore() { this.fetchComments(true); },
-    async refreshAll() { await Promise.all([this.fetchStats(), this.fetchPaths(), this.fetchComments()]); },
+    async refreshAll() {
+      this.before = null; this.comments = [];
+      await Promise.all([this.fetchStats(), this.fetchPaths(), this.fetchComments()]);
+    },
 
     startAutoRefresh() {
       this.stopAutoRefresh();
       this._refreshTimer = setInterval(() => {
-        if (this.status === 'pending' || this.status === 'all') { this.fetchStats(); this.fetchPaths(); this.fetchComments(); }
+        if (this.loading || this.detailComment) return;
+        if (this.view !== 'comments') return;
+        if (this.status === 'pending' || this.status === 'all') { this.before = null; this.comments = []; this.fetchStats(); this.fetchPaths(); this.fetchComments(); }
       }, 10000);
     },
     stopAutoRefresh() { if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; } },
 
-    switchTab(status) { this.status = status; this.before = null; this.fetchComments(); this.fetchStats(); },
-    selectPath(path) { this.selectedPath = this.selectedPath === path ? '' : path; this.pathFilter = ''; this.before = null; this.fetchComments(); },
-    selectPathMobile(path) { this.selectedPath = path; this.pathFilter = ''; this.before = null; this.fetchComments(); },
+    switchView(v) { this.view = v; },
+    switchTab(status) { this.status = status; this.before = null; this.comments = []; this.fetchComments(); this.fetchStats(); },
+    selectPath(path) { this.selectedPath = this.selectedPath === path ? '' : path; this.pathFilter = ''; this.before = null; this.comments = []; this.fetchComments(); },
+    selectPathMobile(path) { this.selectedPath = path; this.pathFilter = ''; this.before = null; this.comments = []; this.fetchComments(); },
     toggleCol(k) { this.col[k] = !this.col[k]; },
     toggleMore(id) { if (this.moreOpen.has(id)) this.moreOpen.delete(id); else this.moreOpen.add(id); },
-    showDetail(c) { this.detailComment = c; this.moreOpen.delete(c.id); },
+    async showDetail(c) { this.detailComment = c; this.moreOpen.delete(c.id); this.chain = []; this.curls = []; await this.loadChain(c.id, true); await this.loadUrls(c.id, true); },
+    jumpToComment(id) { this.view = 'comments'; this.status = 'all'; this.selectedPath = ''; this.pathFilter = ''; this.hashFilter = ''; this.ipFilter = ''; this.before = null; this.comments = []; this.loadChain(id); },
+    findDuplicates(hash) { this.view = 'comments'; this.status = 'all'; this.selectedPath = ''; this.pathFilter = ''; this.ipFilter = ''; this.hashFilter = hash; this.before = null; this.comments = []; this.fetchComments(); },
 
     async moderate(id, action) {
+      const prev = (this.comments.find(c => c.id === id) || {}).status || null;
       this.moderating.add(id);
       const d = await this.api('/api/admin/moderate', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ id, action }) });
       this.moderating.delete(id);
-      if (!d) return;
-      this.toast(action + ' <a @click="undo(' + id + ')">UNDO</a>');
+      if (!d.ok) { this.toast('FAILED: ' + (d.error || action), true); this.$nextTick(() => { this.swipeX[id] = 0; }); return; }
+      const status = (d.data && d.data.status) || action;
+      this.lastAction = { id, prev, label: action.toUpperCase() };
+      this.toast(status.toUpperCase());
       this.fetchStats(); this.fetchPaths();
-      if (this.status !== 'all' && this.status !== action) { this.comments = this.comments.filter(c => c.id !== id); }
-      else { const c = this.comments.find(c => c.id === id); if (c) c.status = action; }
+      if (this.status !== 'all' && this.status !== status) { this.comments = this.comments.filter(c => c.id !== id); }
+      else { const c = this.comments.find(c => c.id === id); if (c) c.status = status; }
       this.$nextTick(() => { this.swipeX[id] = 0; });
     },
 
-    async undo(id) {
-      const d = await this.api('/api/admin/moderate', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ id, action:'pending' }) });
-      if (!d) return; this.toast('UNDONE'); this.fetchComments(); this.fetchStats(); this.fetchPaths();
+    async undoLast() {
+      if (!this.lastAction) return;
+      const { id, prev } = this.lastAction; this.lastAction = null;
+      if (!prev) { this.toast('NOTHING TO RESTORE', true); return; }
+      this.moderating.add(id);
+      const d = await this.api('/api/admin/moderate', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ id, action: prev }) });
+      this.moderating.delete(id);
+      if (!d.ok) { this.toast('UNDO FAILED: ' + (d.error || ''), true); return; }
+      this.toast('UNDONE → ' + String((d.data && d.data.status) || prev).toUpperCase());
+      this.fetchComments(); this.fetchStats(); this.fetchPaths();
     },
 
     toggleSelect(id) { const i = this.selected.indexOf(id); if (i >= 0) this.selected.splice(i, 1); else this.selected.push(id); },
 
     async bulkAction(action) {
       if (this.selected.length === 0) return;
+      const ids = [...this.selected];
       const d = await this.api('/api/admin/moderate/batch', { method: 'POST', headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify({ actions: this.selected.map(id => ({ id, action })) }) });
-      if (!d) return; this.toast('BATCH ' + action + ': ' + this.selected.length);
-      this.selected = []; this.fetchComments(); this.fetchStats(); this.fetchPaths();
+        body: JSON.stringify({ actions: ids.map(id => ({ id, action })) }) });
+      if (!d.ok) { this.toast('BATCH FAILED: ' + (d.error || ''), true); return; }
+      const results = (d.data && d.data.results) || [];
+      const failed = results.filter(r => r.error);
+      const okIds = new Set(results.filter(r => !r.error).map(r => r.id));
+      // Failed ids stay selected so the operator can retry; refresh the rest.
+      this.selected = ids.filter(id => !okIds.has(id));
+      this.toast(failed.length === 0 ? 'BATCH ' + action + ': ' + okIds.size : 'BATCH PARTIAL: ' + okIds.size + ' OK, ' + failed.length + ' FAILED (' + failed.map(r => '#' + r.id + ' ' + r.error).join('; ') + ')', failed.length !== 0);
+      this.fetchComments(); this.fetchStats(); this.fetchPaths();
     },
 
-    toast(html) { this.toasts.push({ html }); setTimeout(() => { this.toasts.shift(); }, 4000); },
+    toast(text, err) { this.toasts.push({ text, err: !!err }); setTimeout(() => { this.toasts.shift(); }, 5000); },
+
+    // ---- Reactions ----
+    async fetchReactions(append) {
+      if (this.rloading) return; this.rloading = true;
+      let url = '/api/admin/reactions?status=' + this.rstatus + '&limit=' + PAGE;
+      if (this.rbefore && append) url += '&before=' + this.rbefore;
+      const d = await this.api(url); this.rloading = false;
+      if (!d.ok) { if (d.error) this.toast('REACTIONS FAILED: ' + d.error, true); return; }
+      const raw = (d.data && d.data.reactions) || [];
+      for (const r of raw) { if (r._emoji === undefined) r._emoji = r.reaction; }
+      if (append) { this.reactions.push(...raw); } else { this.reactions = raw; }
+      this.rhasMore = raw.length === PAGE;
+      this.rbefore = raw.length > 0 ? raw[raw.length - 1].id : null;
+    },
+
+    async moderateReaction(r, action) {
+      const body = { id: r.id, action };
+      // Pin the reviewed emoji so a concurrent change 400s instead of
+      // approving sight-unseen (absent = approve whatever is stored).
+      if (r._emoji) body.expected_emoji = r._emoji;
+      const d = await this.api('/api/admin/reactions/moderate', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+      if (!d.ok) { r._err = d.error || action; return; }
+      r._err = ''; r.status = (d.data && d.data.status) || action;
+      this.toast('REACTION ' + r.status.toUpperCase());
+      this.fetchReactions();
+    },
+
+    // ---- Lookup ----
+    fmt(obj) { try { return JSON.stringify(obj, null, 1); } catch { return String(obj); } },
+
+    async lookupAuthor() {
+      const q = [];
+      if (this.laIp) q.push('ip=' + encodeURIComponent(this.laIp));
+      if (this.laName) q.push('author_name=' + encodeURIComponent(this.laName));
+      if (this.laUrl) q.push('author_url=' + encodeURIComponent(this.laUrl));
+      if (this.laCombine) q.push('combine=true');
+      if (q.length === 0) { this.laResult = 'FILL AT LEAST ONE FIELD'; return; }
+      const d = await this.api('/api/admin/authors/lookup?' + q.join('&'));
+      this.laResult = d.ok ? this.fmt(d.data) : 'FAILED: ' + (d.error || '');
+    },
+
+    async lookupUrl(hash) {
+      const h = hash !== undefined ? hash : this.luHash;
+      const q = [];
+      if (h) q.push('url_hash=' + encodeURIComponent(h));
+      else if (this.luDomain) q.push('domain=' + encodeURIComponent(this.luDomain));
+      else { this.luResult = 'FILL HASH OR DOMAIN'; return; }
+      const d = await this.api('/api/admin/urls/lookup?' + q.join('&'));
+      this.luResult = d.ok ? this.fmt(d.data) : 'FAILED: ' + (d.error || '');
+    },
+
+    async loadChain(id, quiet) {
+      if (!id && id !== 0) return;
+      const d = await this.api('/api/admin/comments/' + id);
+      if (!d.ok) { if (!quiet) this.ldResult = 'FAILED: ' + (d.error || ''); return; }
+      const chain = ((d.data && d.data.parents) || []).slice().reverse();
+      this.chain = chain;
+      if (this.detailComment && (this.detailComment.id === id || quiet)) { /* detail panel shows chain */ }
+      if (!quiet) this.ldResult = this.fmt(d.data);
+    },
+
+    async loadUrls(id, quiet) {
+      if (!id && id !== 0) return;
+      const d = await this.api('/api/admin/comments/' + id + '/urls');
+      if (!d.ok) { if (!quiet) this.ldResult = 'FAILED: ' + (d.error || ''); return; }
+      if (quiet) { this.curls = ((d.data && d.data.urls) || []); return; }
+      this.ldResult = this.fmt(d.data);
+    },
+
+    async loadContext(id) {
+      if (!id && id !== 0) return;
+      const d = await this.api('/api/admin/comments/context', { method: 'POST', headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ comment_ids: String(id).split(/[,\s]+/).map(x => parseInt(x, 10)).filter(x => !isNaN(x)), include_parents: true, include_author_stats: true, include_urls: true }) });
+      this.ldResult = d.ok ? this.fmt(d.data) : 'FAILED: ' + (d.error || '');
+    },
+
+    // ---- Data: export / import ----
+    async doExport() {
+      this.dataBusy = true;
+      const d = await this.api('/api/admin/export');
+      this.dataBusy = false;
+      if (!d.ok) { this.toast('EXPORT FAILED: ' + (d.error || ''), true); return; }
+      const blob = new Blob([JSON.stringify(d.data)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'zapiska-export.json';
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      this.toast('EXPORT DOWNLOADED');
+    },
+
+    async doImport() {
+      const input = document.getElementById('importFile');
+      const file = input && input.files && input.files[0];
+      if (!file) { this.toast('PICK AN EXPORT FILE FIRST', true); return; }
+      if (file.size > 16 * 1024 * 1024) { this.toast('FILE EXCEEDS 16 MIB IMPORT LIMIT', true); return; }
+      let doc;
+      try { doc = JSON.parse(await file.text()); }
+      catch { this.toast('FILE IS NOT VALID JSON', true); return; }
+      if (this.impForce && !confirm('FORCE OVERWRITES COLLIDING LIVE ROWS. Continue?')) return;
+      this.dataBusy = true; this.impResult = ''; this.impError = '';
+      const d = await this.api('/api/admin/import', { method: 'POST', headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ ...doc, force: this.impForce }) });
+      this.dataBusy = false;
+      if (!d.ok) {
+        // 400 refusal and 500 partial-abort both carry JSON: show message + counts.
+        this.impError = d.error || ('HTTP ' + d.status);
+        this.impResult = this.fmt(d.data);
+        return;
+      }
+      this.impResult = this.fmt(d.data);
+      const w = d.data && d.data.warning;
+      this.toast(w ? 'IMPORTED — WARNING: ' + w : 'IMPORTED');
+      this.fetchStats(); this.fetchPaths(); this.fetchComments();
+    },
+
+    // ---- Ops ----
+    async fetchOps() {
+      const [s, v] = await Promise.all([
+        this.api('/api/admin/status'),
+        this.api('/api/version'),
+      ]);
+      if (s.ok && s.data) {
+        this.ops = s.data;
+        this.serverVersion = s.data.version || '';
+        this.renderOps();
+      }
+      if (v.ok && v.data && v.data.version) this.serverVersion = v.data.version;
+    },
+
+    kv(k, v) {
+      const row = document.createElement('div');
+      row.className = 'kv';
+      const kk = document.createElement('span'); kk.className = 'k'; kk.textContent = k;
+      const vv = document.createElement('span'); vv.className = 'v'; vv.textContent = v;
+      row.appendChild(kk); row.appendChild(vv);
+      return row;
+    },
+
+    renderOps() {
+      const o = this.ops;
+      if (!o || !o.version) return;
+      const mount = (id, rows) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.replaceChildren();
+        for (const [k, v] of rows) el.appendChild(this.kv(k, v));
+      };
+      mount('ops-server', [
+        ['VERSION', (o.version || '?') + ' / schema ' + o.schema_version + ' / export v' + o.export_version],
+        ['HEALTH', String(o.health || '?').toUpperCase()],
+        ['HONEYPOT FIELD', o.honeypot_field || '?'],
+        ['TRUST PROXY', String(o.trust_proxy)],
+        ['DB QUICK CHECK', String(o.db_quick_check)],
+        ['WORKER BACKLOG', String(o.worker_backlog)],
+        ['THREAD DEPTH', String(o.max_thread_depth)],
+        ['TURNSTILE', String(o.turnstile_enabled)],
+      ]);
+      const w = o.webhook || {}, n = o.notify || {}, r = o.reactions || {}, l = o.language || {}, p = o.privacy || {}, lim = o.limits || {};
+      mount('ops-mod', [
+        ['WEBHOOK', w.configured ? ('ON / ' + w.mode + (w.signed ? ' / signed' : ' / UNSIGNED')) : 'OFF'],
+        ['TELEGRAM', String(!!n.telegram)],
+        ['SLACK', String(!!n.slack)],
+        ['DISCORD', String(!!n.discord)],
+        ['BATCH', (n.batch_secs ?? '?') + 's / ' + (n.batch_threshold ?? '?') + ' / ' + (n.batch_granularity || '?')],
+        ['REACTIONS', (r.allowed || '?') + ' [' + ((r.set || []).join(' ')) + ']'],
+        ['DEFAULT STATUS', o.default_comment_status || '?'],
+        ['LANG ALLOW', (l.allowed || []).join(' ') || '—'],
+        ['LANG BLOCK', (l.blocked || []).join(' ') || '—'],
+        ['LANG EMOJI', l.emoji || '?'],
+      ]);
+      mount('ops-limits', [
+        ['STORE IP', String(p.store_ip_address) + ' / salted: ' + String(p.ip_hash_salted)],
+        ['NATIVE CAP/DAY', String(lim.native_comment_daily_cap)],
+        ['MENTION CAP/HR', String(lim.webmention_domain_hourly_cap)],
+        ['NATIVE', (lim.native_burst ?? '?') + ' / ' + (lim.native_window_secs ?? '?') + 's'],
+        ['MENTION', (lim.webmention_burst ?? '?') + ' / ' + (lim.webmention_window_secs ?? '?') + 's'],
+        ['READ', (lim.read_burst ?? '?') + ' / ' + (lim.read_window_secs ?? '?') + 's'],
+        ['ADMIN', (lim.admin_moderate_burst ?? '?') + ' / ' + (lim.admin_moderate_window_secs ?? '?') + 's'],
+      ]);
+    },
 
     // Swipe gestures
     swipeStart(e, id) {

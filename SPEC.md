@@ -78,7 +78,7 @@ The server reads environment variables at startup.
 | `ALLOWED_CORS_ORIGIN` | `https://nithitsuki.com` | One origin, a list, or `*`. |
 | `DATABASE_PATH` | `./comments.db` | SQLite file path. |
 | `DB_QUICK_CHECK` | `true` | Run `PRAGMA quick_check` at startup and refuse to start on corruption. |
-| `TRUST_PROXY` | `false` | Honor `X-Forwarded-For` / `X-Real-IP` / `Forwarded` for client identity. |
+| `TRUST_PROXY` | `false` | Honor `CF-Connecting-IP` / `X-Forwarded-For` / `X-Real-IP` / `Forwarded` for client identity, in that precedence. Only safe when every byte arrives via the trusted edge. |
 | `GITHUB_TOKEN` | Unset | Optional GitHub API token. |
 | `MAX_CONTENT_LEN` | `2000` | Stored content limit in characters. |
 | `MAX_AUTHOR_LEN` | `100` | Author name limit in characters. |

@@ -172,6 +172,9 @@ location / {
 ```
 
 See [Deployment](deployment.md) for a complete proxy and service example.
+Per-client rate limits behind a proxy need `TRUST_PROXY=true` plus an edge
+that sets `CF-Connecting-IP` (Cloudflare) or overwrites `X-Forwarded-For`;
+see [Deployment](deployment.md#reverse-proxy) before enabling it.
 
 ## Add the widget
 
@@ -255,7 +258,14 @@ Cloudflare cannot be reached. It does not store the comment in either case.
 
 New native comments use `pending` status by default.
 
-Authenticate:
+The fastest path is the dashboard: open `/admin` on the server host and
+sign in with `ADMIN_TOKEN`. It covers comment and reaction moderation
+(including batch actions with per-item results), ancestor chains,
+author/URL lookup, JSON export download and import restore, and an OPS tab
+with versions, database health, and non-secret configuration. The session
+cookie is `__Host-admin_token` (`Secure`), so use HTTPS.
+
+Authenticate with curl:
 
 ```sh
 curl -c cookies.txt -X POST \

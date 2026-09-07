@@ -11,10 +11,16 @@
 //! - `TRUST_PROXY` unset (default): `X-Forwarded-For`, `X-Real-IP`, and
 //!   `Forwarded` are ignored entirely; identity is the normalized TCP peer
 //!   (spoof-proof).
-//! - `TRUST_PROXY` set: the leftmost valid `X-Forwarded-For` entry is the
-//!   client; else `X-Real-IP`; else the first `Forwarded for=`; else the
-//!   peer. The proxy in front must overwrite (not merely append to) these
-//!   headers, or clients can spoof each other's identity and quota.
+//! - `TRUST_PROXY` set: `CF-Connecting-IP` (set by the Cloudflare edge,
+//!   single IP) wins when present and valid; else the leftmost valid
+//!   `X-Forwarded-For` entry; else `X-Real-IP`; else the first `Forwarded
+//!   for=`; else the peer. `TRUST_PROXY=true` is only safe when every byte
+//!   arrives via the trusted edge (Cloudflare proxy or Tunnel, or a firewall
+//!   allow-listing Cloudflare IPs): any client that can reach the origin
+//!   directly can set these headers itself, including `CF-Connecting-IP`.
+//!   The proxy in front must overwrite (not merely append to) the
+//!   spoofable headers, or clients can spoof each other's identity and
+//!   quota.
 //!
 //! IPv4-mapped IPv6 addresses (`::ffff:1.2.3.4`) canonicalize to IPv4, so one
 //! client never gets two buckets, two quota keys, or two hashes.
@@ -62,7 +68,8 @@ impl ClientIdentity {
         trust_proxy: bool,
     ) -> Option<Self> {
         if trust_proxy {
-            if let Some(ip) = maybe_x_forwarded_for(headers)
+            if let Some(ip) = maybe_cf_connecting_ip(headers)
+                .or_else(|| maybe_x_forwarded_for(headers))
                 .or_else(|| maybe_x_real_ip(headers))
                 .or_else(|| maybe_forwarded(headers))
             {
@@ -127,6 +134,17 @@ impl KeyExtractor for ClientIdentityExtractor {
             .map(|id| id.ip())
             .ok_or(GovernorError::UnableToExtractKey)
     }
+}
+
+/// `CF-Connecting-IP`: set by the Cloudflare edge to the single client IP.
+/// Preferred first under `TRUST_PROXY` because, unlike the append-only
+/// `X-Forwarded-For`, no downstream party can prepend a spoofed entry to it.
+/// Invalid values fall through to the spoofable headers below.
+fn maybe_cf_connecting_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    headers
+        .get("cf-connecting-ip")
+        .and_then(|hv| hv.to_str().ok())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
 }
 
 /// Leftmost valid entry wins: proxies append downstream, so the first entry
@@ -263,7 +281,57 @@ mod tests {
     }
 
     #[test]
-    fn header_precedence_is_xff_then_real_ip_then_forwarded_then_peer() {
+    fn cf_connecting_ip_wins_over_spoofable_headers_when_trust_proxy_set() {
+        let id = resolve(
+            "127.0.0.1:1",
+            &[
+                ("cf-connecting-ip", "203.0.113.7"),
+                ("x-forwarded-for", "9.9.9.9, 10.0.0.1"),
+                ("x-real-ip", "8.8.8.8"),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(id.ip(), "203.0.113.7".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn cf_connecting_ip_ignored_when_trust_proxy_unset() {
+        let id = resolve("127.0.0.1:1", &[("cf-connecting-ip", "203.0.113.7")], false).unwrap();
+        assert_eq!(id.ip(), "127.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn invalid_cf_connecting_ip_falls_back_to_xff() {
+        let id = resolve(
+            "127.0.0.1:1",
+            &[
+                ("cf-connecting-ip", "not-an-ip"),
+                ("x-forwarded-for", "9.9.9.9"),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(id.ip(), "9.9.9.9".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn extractor_prefers_cf_connecting_ip_when_set() {
+        let req = Request::builder()
+            .header("cf-connecting-ip", "203.0.113.7")
+            .header("x-forwarded-for", "9.9.9.9")
+            .extension(ConnectInfo(socket("127.0.0.1:1")))
+            .body(())
+            .unwrap();
+        let key = ClientIdentityExtractor::new(true).extract(&req).unwrap();
+        assert_eq!(key, "203.0.113.7".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn header_precedence_is_cf_then_xff_then_real_ip_then_forwarded_then_peer() {
+        // CF-Connecting-IP alone.
+        let id = resolve("127.0.0.1:1", &[("cf-connecting-ip", "203.0.113.7")], true).unwrap();
+        assert_eq!(id.ip(), "203.0.113.7".parse::<IpAddr>().unwrap());
         // X-Real-IP alone.
         let id = resolve("127.0.0.1:1", &[("x-real-ip", "8.8.8.8")], true).unwrap();
         assert_eq!(id.ip(), "8.8.8.8".parse::<IpAddr>().unwrap());

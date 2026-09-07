@@ -5,6 +5,18 @@ custom frontend.
 
 Replace `comments.your-site.example` with the zapiska host.
 
+## Admin dashboard
+
+Open `https://comments.your-site.example/admin` and sign in with
+`ADMIN_TOKEN`. The dashboard covers comments (filter, moderate single and
+batch with per-item results, ancestor chains, extracted URLs, duplicate
+lookup by content hash), reactions (moderate with the reviewed emoji
+pinned), author/URL lookup, JSON export download and import restore (with
+`force` for live databases), and an OPS tab (versions, database health,
+honeypot field, webhook/notify/proxy/reactions/limits status from
+`GET /api/admin/status`). The session cookie is `__Host-admin_token`
+(`Secure`, so the dashboard needs HTTPS).
+
 ## Widget
 
 Add a container and the script:

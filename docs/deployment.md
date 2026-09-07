@@ -268,13 +268,28 @@ comments.your-site.example {
 The rate limiter keys on one normalized client identity per request
 (`src/http/peer.rs`): the TCP peer address, with IPv4-mapped IPv6
 canonicalized to IPv4. A reverse proxy makes many visitors share one peer
-address and one quota. Set `TRUST_PROXY=true` only when the proxy
-overwrites the client-IP headers — the server then reads the leftmost
+address and one quota. Set `TRUST_PROXY=true` only when every byte arrives
+via a proxy you control — the server then reads the edge-set
+`CF-Connecting-IP` when present and valid, else the leftmost
 `X-Forwarded-For` entry, else `X-Real-IP`, else the first `Forwarded for=`,
-else the peer. The edge must overwrite, not append: with append-only
-forwarding any client can send its own `X-Forwarded-For` and pick another
-client's identity and quota. (`proxy_set_header` in the nginx snippet above
-overwrites; confirm the same for any other edge before enabling the flag.)
+else the peer. A client that can reach the origin directly can set any of
+these headers itself, so direct origin access must be impossible. The edge
+must overwrite, not append: with append-only forwarding any client can send
+its own `X-Forwarded-For` and pick another client's identity and quota.
+(`proxy_set_header` in the nginx snippet above overwrites; confirm the same
+for any other edge before enabling the flag.)
+
+### Cloudflare
+
+Behind Cloudflare proxying, no extra configuration is needed for correct
+client IPs beyond `TRUST_PROXY=true`: the Cloudflare edge sets
+`CF-Connecting-IP` to the single visitor IP itself, which zapiska prefers
+over the append-only `X-Forwarded-For` (whose leftmost entry a client can
+spoof). Lock the origin down so traffic can only arrive via Cloudflare —
+Cloudflare Tunnel, or a firewall allow-listing Cloudflare's IP ranges —
+otherwise a client bypassing Cloudflare can set `CF-Connecting-IP` directly
+and spoof any identity. (`True-Client-IP` is Enterprise-only and equivalent;
+zapiska does not need it.)
 
 ## systemd
 

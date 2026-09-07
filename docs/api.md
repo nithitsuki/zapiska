@@ -252,8 +252,10 @@ Protected admin routes accept either a bearer header or a session cookie.
 Authorization: Bearer ADMIN_TOKEN
 ```
 
-The login route sets the cookie. The cookie is HttpOnly, uses SameSite=Lax, and
-lasts 30 days.
+The login route sets the cookie. The cookie is `__Host-admin_token` with
+`Path=/`, HttpOnly, `Secure`, and SameSite=Lax, and lasts 30 days. The
+`__Host-` prefix plus `Secure` means browsers only send it over HTTPS —
+serve the dashboard over TLS.
 
 ### POST /api/admin/login
 
@@ -573,6 +575,36 @@ Response:
 salted identities are present. Back up `.env` (`IP_HASH_SECRET`) alongside
 every export. See [Deployment](deployment.md).
 
+### GET /api/admin/status
+
+Versions, database health, and non-secret configuration in one body for
+the dashboard OPS tab:
+
+```json
+{
+  "version": "0.2.0",
+  "schema_version": 8,
+  "export_version": 1,
+  "health": "ok",
+  "honeypot_field": "website",
+  "webhook": { "configured": true, "mode": "async", "signed": true },
+  "notify": { "telegram": true, "slack": false, "discord": false, "batch_secs": 60, "batch_threshold": 20, "batch_granularity": "page" },
+  "trust_proxy": false,
+  "reactions": { "allowed": "admin", "set": ["👍", "❤️", "😄", "😮", "😢", "😡"] },
+  "default_comment_status": "pending",
+  "max_thread_depth": 0,
+  "turnstile_enabled": false,
+  "language": { "allowed": [], "blocked": [], "emoji": "always" },
+  "privacy": { "store_ip_address": false, "ip_hash_salted": true },
+  "limits": { "native_comment_daily_cap": 50, "webmention_domain_hourly_cap": 10, "native_burst": 100, "native_window_secs": 60, "webmention_burst": 60, "webmention_window_secs": 60, "read_burst": 300, "read_window_secs": 60, "admin_moderate_burst": 30, "admin_moderate_window_secs": 60 },
+  "db_quick_check": true,
+  "worker_backlog": 64
+}
+```
+
+Secret values (tokens, webhook URLs, salts) never appear — presence is
+reported as booleans only.
+
 ## Health
 
 ### GET /healthz
@@ -596,6 +628,19 @@ Return the binary and data-format versions:
 
 `zapiska --version` prints the same crate version without needing any
 configuration.
+
+## Client identity (proxies)
+
+With the default `TRUST_PROXY=false` the server ignores forwarded IP
+headers and keys rate limits, quotas, and IP hashes on the TCP peer
+address. Set `TRUST_PROXY=true` only when every byte arrives via a proxy
+you control: the server then prefers the edge-set `CF-Connecting-IP` when
+present and valid (Cloudflare sets it to the single visitor IP itself,
+unlike the append-only `X-Forwarded-For` whose leftmost entry a client can
+spoof), falling back to leftmost `X-Forwarded-For`, `X-Real-IP`, the first
+`Forwarded for=`, then the peer. A client that can reach the origin
+directly can set any of these headers itself — lock the origin down
+(Cloudflare proxy/Tunnel, or a firewall allow-listing Cloudflare IPs).
 
 ## CORS
 

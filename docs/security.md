@@ -99,9 +99,13 @@ identity, so one client never gets two buckets.
 
 By default the server does not trust `X-Forwarded-For`, `X-Real-IP`, or
 `Forwarded` — spoofed headers are ignored. Set `TRUST_PROXY=true` only when
-a reverse proxy you control overwrites those headers; the server then reads
-the leftmost `X-Forwarded-For` entry, else `X-Real-IP`, else the first
-`Forwarded for=`, else the peer. Behind a proxy without `TRUST_PROXY`,
+every byte arrives via a proxy you control (Cloudflare proxy/Tunnel, or a
+firewall allow-listing Cloudflare IPs); the server then reads
+`CF-Connecting-IP` when present and valid, else the leftmost
+`X-Forwarded-For` entry, else `X-Real-IP`, else the first `Forwarded for=`,
+else the peer. A client that can reach the origin directly can set any of
+these headers itself — including `CF-Connecting-IP` — so direct origin
+access must be impossible. Behind a proxy without `TRUST_PROXY`,
 every visitor shares the proxy's address and one quota.
 
 Upgrade note: IPv4-mapped peers (`::ffff:a.b.c.d`, seen on non-default

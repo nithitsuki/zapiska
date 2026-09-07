@@ -56,6 +56,8 @@ Add the widget container to the form:
   <input type="text" name="author_name" required>
   <textarea name="content" required></textarea>
   <div class="cf-turnstile" data-sitekey="public-sitekey"></div>
+  <!-- Honeypot: use the server's HONEYPOT_FIELD name (default `website`).
+       Any other trap-looking field is inert. -->
   <input type="text" name="website" style="display:none">
   <button type="submit">Send</button>
 </form>

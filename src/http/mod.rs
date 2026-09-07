@@ -144,9 +144,18 @@ async fn comments_js(
 async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     // Readiness, not just liveness: the orchestrator must see failures when
     // the database stops answering (full disk, corruption, lost volume).
-    // The probe is bounded so a wedged pool fails fast instead of hanging
-    // the healthcheck past its timeout.
-    let pool = state.pool.clone();
+    if db_is_healthy(&state.pool).await {
+        (StatusCode::OK, "ok")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+    }
+}
+
+/// Bounded `SELECT 1` probe shared by `healthz` and the admin status
+/// endpoint. The bound exists so a wedged pool fails fast instead of
+/// hanging the caller past its timeout.
+pub(crate) async fn db_is_healthy(pool: &crate::db::pool::SqlitePool) -> bool {
+    let pool = pool.clone();
     let probed = tokio::time::timeout(std::time::Duration::from_secs(2), async move {
         tokio::task::spawn_blocking(move || {
             pool.get()
@@ -163,11 +172,7 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     })
     .await
     .unwrap_or(false);
-    if probed {
-        (StatusCode::OK, "ok")
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
-    }
+    probed
 }
 
 /// Reported binary and data-format versions. All values are compile-time
@@ -1415,7 +1420,7 @@ mod tests {
         let app = build_app(state);
         assert_eq!(
             super::routes::ADMIN_ROUTE_PATHS.len(),
-            15,
+            16,
             "test and route list must agree on the protected surface"
         );
         for path in super::routes::ADMIN_ROUTE_PATHS {

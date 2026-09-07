@@ -318,7 +318,12 @@ Client identity (`src/http/peer.rs`) resolves the caller to one normalized
 peer address per request (IPv4-mapped addresses canonicalize to IPv4).
 Governors (via `ClientIdentityExtractor`), the in-memory `Limiter`, and IP
 hashing all consume that identity, so proxy handling (`TRUST_PROXY`) flips
-in one place without touching handlers.
+in one place without touching handlers. With `TRUST_PROXY=true` the edge-set
+`CF-Connecting-IP` wins when present and valid, falling back to leftmost
+`X-Forwarded-For`, `X-Real-IP`, `Forwarded for=`, then the peer — see the
+reverse-proxy section in `docs/deployment.md` for the trust requirements. With `TRUST_PROXY=true` the edge-set
+`CF-Connecting-IP` wins when present and valid, falling back to leftmost
+`X-Forwarded-For`, `X-Real-IP`, `Forwarded for=`, then the peer.
 
 The public router also contains health, embed, Swagger, and session routes.
 The protected admin route group is merged after the CORS layer. Admin routes

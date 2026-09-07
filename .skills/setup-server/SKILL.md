@@ -91,8 +91,13 @@ location / {
 }
 ```
 
-The rate limiter uses the TCP peer address. A proxy can make many visitors
-share one address.
+The rate limiter keys on one normalized client identity per request. By
+default it uses the TCP peer address, so a proxy makes many visitors share
+one quota. Set `TRUST_PROXY=true` only when every byte arrives via a proxy
+you control (Cloudflare proxy/Tunnel, or a firewall allow-listing
+Cloudflare IPs): the server then prefers the edge-set `CF-Connecting-IP`,
+falling back to leftmost `X-Forwarded-For`, `X-Real-IP`, `Forwarded for=`,
+then the peer. See the reverse-proxy section in `docs/deployment.md`.
 
 ## systemd
 

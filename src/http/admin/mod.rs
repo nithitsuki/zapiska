@@ -14,6 +14,7 @@ pub(crate) mod data;
 pub(crate) mod lookup;
 pub(crate) mod moderate;
 pub(crate) mod reactions;
+pub(crate) mod status;
 
 pub(crate) use auth::{admin_auth, login, logout, request_has_admin_token};
 pub(crate) use comments::{get_comment, list_comments, list_pending};
@@ -21,6 +22,7 @@ pub(crate) use data::{MAX_IMPORT_BODY_BYTES, export, import};
 pub(crate) use lookup::{author_lookup, bulk_context, comment_urls, list_paths, url_lookup};
 pub(crate) use moderate::{moderate, moderate_batch};
 pub(crate) use reactions::{list_reactions, moderate_reaction, moderate_reactions_batch};
+pub(crate) use status::status;
 
 /// Constant-time token comparison, length-independent (both sides padded).
 fn validate_token(actual: &[u8], expected: &[u8]) -> bool {

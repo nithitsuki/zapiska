@@ -69,6 +69,8 @@ The widget supplies reply forms. Create the top-level form:
   <input type="text" name="author_name" required>
   <input type="url" name="author_url">
   <textarea name="content" required></textarea>
+  <!-- Honeypot: use the server's HONEYPOT_FIELD name (default `website`).
+       Any other trap-looking field is inert. -->
   <input type="text" name="website" style="display:none">
   <button type="submit">Send</button>
 </form>
