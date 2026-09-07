@@ -53,6 +53,10 @@ pub struct PendingComment {
     pub submitter_ip_hash: Option<String>,
     /// Content hash for duplicate detection.
     pub content_hash: Option<String>,
+    /// Approved reaction counts for this comment: `{emoji: count}`.
+    /// Empty when none approved, or when the caller did not request them.
+    #[serde(default)]
+    pub reaction_counts: std::collections::HashMap<String, i64>,
 }
 
 impl From<Comment> for PendingComment {
@@ -75,8 +79,21 @@ impl From<Comment> for PendingComment {
             submitter_ip_hash: c.submitter_ip_hash,
             content_hash: c.content_hash,
             created_at: c.created_at,
+            reaction_counts: std::collections::HashMap::new(),
         }
     }
+}
+
+/// Attach approved reaction counts to a list of comments (one batched query).
+async fn attach_counts(state: &AppState, comments: &mut [PendingComment]) -> Result<(), AppError> {
+    let ids: Vec<i64> = comments.iter().map(|c| c.id).collect();
+    let counts = state.repo.reaction_counts(&ids).await?;
+    for c in comments.iter_mut() {
+        if let Some(m) = counts.get(&c.id) {
+            c.reaction_counts = m.clone();
+        }
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -98,10 +115,11 @@ pub async fn list_pending(
     let path = query.path.as_deref();
 
     let comments = state.repo.list_pending(limit, before, path).await?;
+    let mut comments: Vec<PendingComment> =
+        comments.into_iter().map(PendingComment::from).collect();
+    attach_counts(&state, &mut comments).await?;
 
-    Ok(Json(PendingResponse {
-        comments: comments.into_iter().map(PendingComment::from).collect(),
-    }))
+    Ok(Json(PendingResponse { comments }))
 }
 
 // ── GET /api/admin/comments ─────────────────────────────────
@@ -143,10 +161,11 @@ pub async fn list_comments(
         .repo
         .list_comments(status, limit, before, path, ip, content_hash)
         .await?;
+    let mut comments: Vec<PendingComment> =
+        comments.into_iter().map(PendingComment::from).collect();
+    attach_counts(&state, &mut comments).await?;
 
-    Ok(Json(PendingResponse {
-        comments: comments.into_iter().map(PendingComment::from).collect(),
-    }))
+    Ok(Json(PendingResponse { comments }))
 }
 
 // ── GET /api/admin/comments/:id ─────────────────────────────

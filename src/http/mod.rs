@@ -156,7 +156,7 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
 /// hanging the caller past its timeout.
 pub(crate) async fn db_is_healthy(pool: &crate::db::pool::SqlitePool) -> bool {
     let pool = pool.clone();
-    let probed = tokio::time::timeout(std::time::Duration::from_secs(2), async move {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async move {
         tokio::task::spawn_blocking(move || {
             pool.get()
                 .ok()
@@ -171,8 +171,7 @@ pub(crate) async fn db_is_healthy(pool: &crate::db::pool::SqlitePool) -> bool {
         .unwrap_or(false)
     })
     .await
-    .unwrap_or(false);
-    probed
+    .unwrap_or(false)
 }
 
 /// Reported binary and data-format versions. All values are compile-time
