@@ -429,7 +429,7 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
                   </div>
                 </template>
 
-                <!-- Actions row: YouTube-style reply + reactions + thumbs, plus ⋯ menu -->
+                <!-- Actions row: YouTube-style reply + reaction counts + react picker + moderation -->
                 <div class="cc-actions" style="align-items:center;margin-top:2px">
                   <a @click="toggleReply(c)" style="font-size:10px;color:#000" x-text="(replyingTo === c.id ? 'CANCEL' : 'REPLY')"></a>
                   <span style="font-size:11px;font-weight:700;color:#000;margin-left:2px" x-text="'·'"></span>
@@ -437,11 +437,21 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
                     <span x-show="(c.reaction_counts || {})[emoji] > 0" style="font-size:10px;color:#000" x-text="emoji + ' ' + ((c.reaction_counts || {})[emoji] || 0)"></span>
                   </template>
                   <span style="flex:1"></span>
-                  <button class="btn" @click="moderate(c.id, 'approved')" :disabled="moderating.has(c.id)" title="Approve" style="font-size:10px;padding:1px 6px;background:#00aa00;color:#fff;border-color:#008800" x-show="c.status !== 'approved'">👍</button>
-                  <button class="btn" @click="moderate(c.id, 'spam')" :disabled="moderating.has(c.id)" title="Spam" style="font-size:10px;padding:1px 6px" x-show="c.status !== 'spam'">👎</button>
-                  <button class="btn" @click="moderate(c.id, 'pending')" :disabled="moderating.has(c.id)" title="Set pending" style="font-size:10px;padding:1px 6px" x-show="c.status === 'approved' || c.status === 'spam'">UN</button>
+                  <button class="btn" @click="moderate(c.id, 'approved')" :disabled="moderating.has(c.id)" title="Approve" style="font-size:11px;padding:1px 5px;line-height:1;background:#00aa00;color:#fff;border-color:#008800" x-show="c.status !== 'approved'">✔</button>
+                  <button class="btn" @click="moderate(c.id, 'spam')" :disabled="moderating.has(c.id)" title="Spam" style="font-size:11px;padding:1px 5px;line-height:1;background:#c00000;color:#fff;border-color:#800000" x-show="c.status !== 'spam'">✘</button>
+                  <button class="btn" @click="moderate(c.id, 'pending')" :disabled="moderating.has(c.id)" title="Set pending" style="font-size:10px;padding:1px 5px" x-show="c.status === 'approved' || c.status === 'spam'">UN</button>
                   <div style="position:relative;display:inline-block">
-                    <button class="btn" @click="toggleMore(c.id)" style="font-size:10px;padding:1px 6px">⋯</button>
+                    <button class="btn" @click="toggleReact(c.id)" title="React with an emoji" style="font-size:10px;padding:1px 5px" x-text="(reactOpen.has(c.id) ? 'CLOSE' : 'REACT') + ' ▾'"></button>
+                    <div x-show="reactOpen.has(c.id)" class="win col-menu" @click.outside="reactOpen.delete(c.id)" style="right:auto;left:0;top:100%;min-width:130px">
+                      <template x-for="emoji in reactionSet" :key="emoji">
+                        <div class="cm-item" style="font-size:13px" @click="react(c, emoji)">
+                          <span x-text="emoji"></span><span x-text="' ' + ((c.reaction_counts || {})[emoji] || 0)"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                  <div style="position:relative;display:inline-block">
+                    <button class="btn" @click="toggleMore(c.id)" style="font-size:10px;padding:1px 5px">⋯</button>
                     <div x-show="moreOpen.has(c.id)" class="win col-menu" @click.outside="moreOpen.delete(c.id)" style="right:auto;left:0;top:100%;min-width:110px">
                       <div class="cm-item" @click="showDetail(c)">DETAIL</div>
                       <div class="cm-item" @click="jumpToComment(c.id)">FOCUS</div>
@@ -634,6 +644,7 @@ function app() {
     bulkMode: false, selected: [],
     threads: {},
     replyingTo: null, replyText: '', replyName: 'Moderator', replying: false,
+    reactOpen: new Set(), _bearer: '',
     reactionSet: ['👍', '❤️', '😄', '😮', '😢', '😡'],
     showPaths: true, showColMenu: false, toasts: [],
     expanded: new Set(), swipeX: {}, moreOpen: new Set(),
@@ -653,7 +664,7 @@ function app() {
     },
     get health() { return this.ops && this.ops.health; },
     isMobile: window.innerWidth < 769,
-    _refreshTimer: null, _debounceTimer: null,
+    _debounceTimer: null,
     apiOrigin: new URLSearchParams(window.location.search).get('api') || window.location.origin,
 
     colDefs: { path: 1 },
@@ -702,7 +713,6 @@ function app() {
     async boot() {
       this.refreshAll();
       this.fetchOps();
-      this.startAutoRefresh();
     },
 
     // JSON API with the documented {error, code} shape surfaced to callers.
@@ -729,12 +739,13 @@ function app() {
       } catch { this.loginError = 'NETWORK UNREACHABLE'; return; }
       if (r.status === 401) { this.loginError = 'ACCESS DENIED'; return; }
       if (!r.ok) { this.loginError = 'LOGIN FAILED (HTTP ' + r.status + ')'; return; }
-      this.authenticated = true; this.token = ''; this.boot();
+      this.authenticated = true; this._bearer = this.token; this.token = '';
+      this.boot();
     },
 
     logout() {
       this.api('/api/admin/logout', { method: 'POST' });
-      this.stopAutoRefresh(); this.authenticated = false; this.comments = []; this.paths = [];
+      this.authenticated = false; this.comments = []; this.paths = [];
       this.detailComment = null; this.selected = []; this.reactions = []; this.ops = {};
     },
 
@@ -781,22 +792,36 @@ function app() {
       await Promise.all([this.fetchStats(), this.fetchPaths(), this.fetchComments()]);
     },
 
-    startAutoRefresh() {
-      this.stopAutoRefresh();
-      this._refreshTimer = setInterval(() => {
-        if (this.loading || this.detailComment) return;
-        if (this.view !== 'comments') return;
-        if (this.status === 'pending' || this.status === 'all') { this.before = null; this.comments = []; this.fetchStats(); this.fetchPaths(); this.fetchComments(); }
-      }, 10000);
-    },
-    stopAutoRefresh() { if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; } },
-
     switchView(v) { this.view = v; },
     switchTab(status) { this.status = status; this.before = null; this.comments = []; this.fetchComments(); this.fetchStats(); },
     selectPath(path) { this.selectedPath = this.selectedPath === path ? '' : path; this.pathFilter = ''; this.before = null; this.comments = []; this.fetchComments(); },
     selectPathMobile(path) { this.selectedPath = path; this.pathFilter = ''; this.before = null; this.comments = []; this.fetchComments(); },
     toggleCol(k) { this.col[k] = !this.col[k]; },
     toggleMore(id) { if (this.moreOpen.has(id)) this.moreOpen.delete(id); else this.moreOpen.add(id); },
+    toggleReact(id) { if (this.reactOpen.has(id)) this.reactOpen.delete(id); else this.reactOpen.add(id); },
+    async react(c, emoji) {
+      this.reactOpen.delete(c.id);
+      const d = await this.api('/api/comment/' + c.id + '/reaction', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._bearer },
+        body: JSON.stringify({ reaction: emoji }),
+      });
+      if (!d.ok) { this.toast('REACT FAILED: ' + (d.error || ''), true); return; }
+      const status = d.data && d.data.status ? d.data.status : 'pending';
+      this.toast('REACTED ' + emoji + (status === 'pending' ? ' (pending — approve in REACTS)' : ''));
+      // Refresh counts so an approved/updated reaction shows immediately.
+      this.refreshCommentCounts(c.id);
+    },
+    async refreshCommentCounts(id) {
+      const d = await this.api('/api/admin/comments?status=all&limit=1');
+      if (!d.ok) return;
+      const one = await this.api('/api/admin/comments/' + id);
+      if (one.ok && one.data && one.data.comment && one.data.comment.reaction_counts) {
+        const c = this.comments.find(x => x.id === id);
+        if (c) { c.reaction_counts = one.data.comment.reaction_counts; }
+      }
+      // Also refresh reactions list if open.
+      if (this.view === 'reactions') this.fetchReactions();
+    },
     async showDetail(c) { this.detailComment = c; this.moreOpen.delete(c.id); this.chain = []; this.curls = []; await this.loadChain(c.id, true); await this.loadUrls(c.id, true); },
     jumpToComment(id) { this.view = 'comments'; this.status = 'all'; this.selectedPath = ''; this.pathFilter = ''; this.hashFilter = ''; this.ipFilter = ''; this.before = null; this.comments = []; this.loadChain(id); },
     findDuplicates(hash) { this.view = 'comments'; this.status = 'all'; this.selectedPath = ''; this.pathFilter = ''; this.ipFilter = ''; this.hashFilter = hash; this.before = null; this.comments = []; this.fetchComments(); },
