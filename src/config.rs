@@ -23,9 +23,10 @@ pub struct Config {
     /// client-IP headers. When `false` (default), `X-Forwarded-For`,
     /// `X-Real-IP`, and `Forwarded` are ignored and rate limits, quotas, and
     /// IP hashes key on the TCP peer address (spoof-proof). Set to `true`
-    /// only when a proxy you control overwrites those headers — then the
-    /// leftmost `X-Forwarded-For` entry (else `X-Real-IP`, else `Forwarded
-    /// for=`) identifies the client. See `src/http/peer.rs`.
+    /// only when every byte arrives via a proxy you control — then
+    /// `CF-Connecting-IP` (when present and valid) identifies the client,
+    /// else the leftmost `X-Forwarded-For` entry (else `X-Real-IP`, else
+    /// `Forwarded for=`). See `src/http/peer.rs`.
     pub trust_proxy: bool,
     // ── Fetch ──
     pub github_token: Option<String>,
