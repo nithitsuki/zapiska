@@ -289,6 +289,7 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
             <input type="text" x-model="pathFilter" placeholder="PATH" style="width:100px;font-size:11px;padding:2px 4px">
             <input type="text" x-model="ipFilter" placeholder="IP" style="width:80px;font-size:11px;padding:2px 4px" class="hide-p">
             <input type="text" x-model="hashFilter" placeholder="CONTENT-HASH" style="width:110px;font-size:11px;padding:2px 4px" class="hide-p">
+            <input type="text" x-model="authorFilter" placeholder="AUTHOR" style="width:90px;font-size:11px;padding:2px 4px" class="hide-p">
             <select x-model="sortBy" style="font-size:11px;padding:2px 4px">
               <option value="desc">NEW</option>
               <option value="asc">OLD</option>
@@ -309,6 +310,9 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
             <button class="btn" @click="bulkAction('deleted')" style="font-size:9px">DEL</button>
             <button class="btn" @click="bulkAction('pending')" style="font-size:9px">PEND</button>
             <a @click="selected = []" style="color:#ffff00;margin-left:auto;font-size:9px">CLR</a>
+          </div>
+          <div x-show="bulkMode && selected.length === 0" style="margin-bottom:2px">
+            <button class="btn" @click="selectVisible" style="font-size:9px">SELECT VISIBLE</button>
           </div>
 
           <!-- Detail -->
@@ -347,7 +351,7 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
 
           <!-- Comment cards -->
           <div x-show="loading && comments.length === 0"><div class="spin"></div></div>
-          <div x-show="!loading && comments.length === 0"><div class="empty">NO COMMENTS</div></div>
+          <div x-show="!loading && comments.length === 0"><div class="empty" x-text="status === 'pending' ? 'QUEUE CLEAR — NICE' : 'NO COMMENTS'"></div></div>
           <div x-show="comments.length > 0">
             <template x-for="c in sortedComments" :key="c.id">
               <div class="cc"
@@ -390,7 +394,40 @@ pre.raw { background: #fff; border: 2px inset #fff; padding: 4px; font-size: 10p
                 <div x-show="col.path" style="font-size:9px;color:#808080;margin-bottom:2px">
                   <span x-text="c.target_path"></span>
                   <span x-show="c.depth > 0" x-text="' · depth ' + c.depth"></span>
+                  <span x-show="c.depth === 0"> · <a @click="toggleThread(c)" x-text="(threads[c.id] ? 'HIDE' : 'SHOW') + ' REPLIES (' + kidsOf(c.id).length + ')'"></a></span>
                 </div>
+
+                <!-- Inline replies (YouTube-style thread expansion) -->
+                <template x-if="threads[c.id]">
+                  <div style="margin:2px 0 2px 14px;border-left:2px solid #000080;padding-left:4px">
+                    <template x-for="k in kidsOf(c.id)" :key="k.id">
+                      <div style="margin-bottom:3px">
+                        <span class="cc-name" style="font-size:10px" x-text="k.author_name + ' '"></span>
+                        <span class="badge" :class="'badge-' + k.status[0]" x-text="k.status.toUpperCase().slice(0,4)"></span>
+                        <div class="cc-body" style="font-size:10px" x-html="k.content || ''"></div>
+                        <span style="font-size:9px">
+                          <a @click="moderate(k.id, 'approved')" x-show="k.status !== 'approved'">APPR</a>
+                          <span> · </span>
+                          <a @click="moderate(k.id, 'spam')" x-show="k.status !== 'spam'">SPAM</a>
+                          <span> · </span>
+                          <a @click="showDetail(k)">OPEN</a>
+                        </span>
+                        <template x-if="kidsOf(k.id).length > 0">
+                          <div style="margin:2px 0 0 10px;border-left:2px solid #808080;padding-left:4px">
+                            <template x-for="g in kidsOf(k.id)" :key="g.id">
+                              <div style="margin-bottom:2px">
+                                <span class="cc-name" style="font-size:10px" x-text="g.author_name + ' '"></span>
+                                <span class="badge" :class="'badge-' + g.status[0]" x-text="g.status.toUpperCase().slice(0,4)"></span>
+                                <div class="cc-body" style="font-size:10px" x-html="g.content || ''"></div>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                    <div x-show="kidsOf(c.id).length === 0" style="font-size:10px;color:#808080;font-style:italic">no replies loaded — switch tab to ALL to pull the thread</div>
+                  </div>
+                </template>
 
                 <!-- Actions: desktop only -->
                 <div class="cc-actions hide-m">
@@ -573,11 +610,12 @@ function app() {
   return {
     authenticated: false, token: '', loginError: '',
     view: 'comments',
-    status: 'all', pathFilter: '', ipFilter: '', hashFilter: '', sortBy: 'desc', selectedPath: '',
+    status: 'pending', pathFilter: '', ipFilter: '', hashFilter: '', authorFilter: '', sortBy: 'desc', selectedPath: '',
     stats: { all: 0, pending: 0, approved: 0, spam: 0, deleted: 0 },
     paths: [], comments: [], before: null, loading: false, hasMore: false,
     moderating: new Set(), detailComment: null, chain: [], curls: [],
     bulkMode: false, selected: [],
+    threads: {},
     showPaths: true, showColMenu: false, toasts: [],
     expanded: new Set(), swipeX: {}, moreOpen: new Set(),
     lastAction: null,
@@ -615,11 +653,13 @@ function app() {
       { key: 'spam', label: 'SPAM' }, { key: 'deleted', label: 'DEL' },
     ];},
     get sortedComments() {
-      const c = [...this.comments];
+      const q = this.authorFilter.trim().toLowerCase();
+      const c = [...this.comments].filter(c => !q || (c.author_name || '').toLowerCase().includes(q));
       if (this.sortBy === 'asc') return c.sort((a, b) => a.id - b.id);
       if (this.sortBy === 'path') return c.sort((a, b) => a.target_path.localeCompare(b.target_path) || b.id - a.id);
       return c;
     },
+    kidsOf(id) { return this.comments.filter(c => c.parent_id === id).sort((a, b) => a.id - b.id); },
 
     init() {
       document.addEventListener('keydown', e => {
@@ -770,6 +810,18 @@ function app() {
     },
 
     toggleSelect(id) { const i = this.selected.indexOf(id); if (i >= 0) this.selected.splice(i, 1); else this.selected.push(id); },
+    selectVisible() { for (const c of this.sortedComments) { if (!this.selected.includes(c.id)) this.selected.push(c.id); } },
+
+    async toggleThread(c) {
+      if (this.threads[c.id]) { delete this.threads[c.id]; return; }
+      // Pull the whole path once so replies (any status) join the list.
+      const d = await this.api('/api/admin/comments?status=all&path=' + encodeURIComponent(c.target_path) + '&limit=100');
+      if (d.ok && d.data) {
+        const seen = new Set(this.comments.map(x => x.id));
+        for (const x of (d.data.comments || [])) { if (!seen.has(x.id)) { this.comments.push(x); seen.add(x.id); } }
+      }
+      this.threads[c.id] = true;
+    },
 
     async bulkAction(action) {
       if (this.selected.length === 0) return;
