@@ -8,6 +8,10 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Added
 
+- `GET /.well-known/webmention`: the W3C webmention discovery document,
+  served only with the `webmentions` feature. The body is the relative
+  receipt path `/api/webmention` (`text/plain`), so the consuming site's
+  static file carries the absolute URL and no new configuration is needed.
 - `GET /api/comments` now returns `source_url` (null for a native comment,
   the full source page URL for a webmention) and accepts a `type` filter
   (`native`, `webmention`, or `all`, default `all`). `total` counts the

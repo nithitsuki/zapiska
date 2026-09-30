@@ -315,6 +315,10 @@ Unknown content uses the emoji policy:
 
 `POST /api/webmention` exists only with `webmentions`.
 
+`GET /.well-known/webmention` also exists only with `webmentions`. It serves
+the relative receipt path `/api/webmention` as `text/plain`. The path is
+relative because the consuming site's static file carries the absolute URL.
+
 The handler:
 
 1. Parses absolute source and target URLs.

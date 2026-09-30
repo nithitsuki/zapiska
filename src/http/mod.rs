@@ -907,6 +907,112 @@ mod tests {
         assert!(methods.contains("POST"));
     }
 
+    // ── well-known webmention discovery tests ───────────────
+
+    #[cfg(feature = "webmentions")]
+    #[tokio::test]
+    async fn well_known_webmention_serves_relative_receipt_path() {
+        // The W3C standard discovery path served on the webmention origin.
+        // The body is deliberately relative: the consuming site's static file
+        // carries the absolute URL.
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/.well-known/webmention"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain"),
+            "discovery document must be plain text"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            body.as_ref(),
+            b"/api/webmention",
+            "body is the relative receipt path"
+        );
+    }
+
+    #[cfg(feature = "webmentions")]
+    #[tokio::test]
+    async fn well_known_webmention_is_not_auth_gated() {
+        // The test state carries ADMIN_TOKEN=test. The protected admin group
+        // still rejects a token-less request; the discovery route must answer
+        // without one.
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let admin_resp = app
+            .clone()
+            .oneshot(request(axum::http::Method::GET, "/api/admin/pending"))
+            .await
+            .unwrap();
+        assert_eq!(
+            admin_resp.status(),
+            401,
+            "admin routes stay auth-gated for contrast"
+        );
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/.well-known/webmention"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "discovery route must not require the admin token"
+        );
+    }
+
+    #[tokio::test]
+    async fn well_known_webmention_is_not_a_protected_admin_route() {
+        // The route lives on the public router and must never join the
+        // protected admin surface (that list is what the no-CORS contract
+        // test iterates).
+        assert!(
+            !super::routes::ADMIN_ROUTE_PATHS.contains(&"/.well-known/webmention"),
+            "discovery route must not be listed as an admin route"
+        );
+        assert_eq!(
+            super::routes::ADMIN_ROUTE_PATHS.len(),
+            17,
+            "the pinned admin surface length must not change"
+        );
+    }
+
+    // The discovery route is gated behind `webmentions`, matching the receipt
+    // route (`POST /api/webmention`). With the feature it is served; without
+    // it the path falls through to 404.
+    #[cfg(feature = "webmentions")]
+    #[tokio::test]
+    async fn well_known_webmention_present_with_webmentions_feature() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/.well-known/webmention"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "route exists with `webmentions`");
+    }
+
+    #[cfg(not(feature = "webmentions"))]
+    #[tokio::test]
+    async fn well_known_webmention_absent_without_webmentions_feature() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/.well-known/webmention"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            404,
+            "route is absent without the `webmentions` feature"
+        );
+    }
+
     // ── GET /api/comments tests ─────────────────────────────
 
     async fn seed_comment(state: &AppState, path: &str, author: &str, status: &str) -> i64 {

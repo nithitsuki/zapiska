@@ -20,6 +20,7 @@ pub struct ApiError {
         crate::http::version,
         crate::http::comment_post::create_comment,
         crate::http::webmention_post::receive_webmention,
+        crate::http::webmention_post::well_known_webmention,
         crate::http::comments_read::list_comments,
         crate::http::feed::feed,
         crate::http::admin::comments::list_pending,

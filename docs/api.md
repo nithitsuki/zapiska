@@ -250,6 +250,27 @@ The worker fetches the source, checks the backlink, parses h-entry data, and
 upserts the comment by source and target path. The first sighting can trigger
 notifications. Update pings do not trigger a new notification.
 
+### GET /.well-known/webmention
+
+Serve the W3C webmention discovery document. This route exists only with the
+`webmentions` feature.
+
+Content type:
+
+```text
+text/plain
+```
+
+The body is the relative receipt path:
+
+```text
+/api/webmention
+```
+
+The path is relative on purpose. The consuming site's own static file carries
+the absolute URL, so this origin needs no extra configuration. The route needs
+no admin token and reads no data.
+
 ## Authentication
 
 Protected admin routes accept either a bearer header or a session cookie.

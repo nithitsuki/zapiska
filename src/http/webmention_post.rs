@@ -100,6 +100,28 @@ pub async fn receive_webmention(
     }
 }
 
+/// W3C webmention discovery document. The body is the relative receipt path
+/// (`/api/webmention`): the consuming site's own static file carries the
+/// absolute URL, so this origin never needs to know its public hostname and
+/// no configuration is added.
+#[utoipa::path(
+    get,
+    path = "/.well-known/webmention",
+    responses(
+        (status = 200, description = "Relative webmention receipt path", content_type = "text/plain", body = String),
+    ),
+    tag = "webmention",
+)]
+pub async fn well_known_webmention() -> (axum::http::StatusCode, axum::http::HeaderMap, &'static str)
+{
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "text/plain".parse().expect("static header valid"),
+    );
+    (axum::http::StatusCode::OK, headers, "/api/webmention")
+}
+
 #[cfg(test)]
 mod tests {
 

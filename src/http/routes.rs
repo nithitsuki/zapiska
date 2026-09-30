@@ -81,19 +81,25 @@ pub fn session_routes(login_governor: Arc<RateLimitConfig>) -> Router<AppState> 
         .route("/api/admin/logout", axum::routing::post(admin::logout))
 }
 
-/// Webmention ingress: one route with the form body limit and its own
-/// governor bucket.
+/// Webmention ingress: the receipt route (form body limit and its own
+/// governor bucket) and the W3C discovery document (a static relative path —
+/// no body, no throttle).
 #[cfg(feature = "webmentions")]
 pub fn webmention_routes(
     governor: Arc<RateLimitConfig>,
     body_limit: RequestBodyLimitLayer,
 ) -> Router<AppState> {
-    Router::new().route(
-        "/api/webmention",
-        axum::routing::post(webmention_post::receive_webmention)
-            .layer::<_, Infallible>(body_limit)
-            .layer(layers::governor_layer(governor)),
-    )
+    Router::new()
+        .route(
+            "/api/webmention",
+            axum::routing::post(webmention_post::receive_webmention)
+                .layer::<_, Infallible>(body_limit)
+                .layer(layers::governor_layer(governor)),
+        )
+        .route(
+            "/.well-known/webmention",
+            axum::routing::get(webmention_post::well_known_webmention),
+        )
 }
 
 /// Per-route governor budgets for the protected admin group. Login, batch
