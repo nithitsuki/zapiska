@@ -8,6 +8,10 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Added
 
+- `GET /api/comments` now returns `source_url` (null for a native comment,
+  the full source page URL for a webmention) and accepts a `type` filter
+  (`native`, `webmention`, or `all`, default `all`). `total` counts the
+  filtered set, so pagination stays consistent for each filter value.
 - `GET /api/admin/status`: versions, database health, and non-secret
   configuration (honeypot field, webhook/notify/proxy/reactions/limits) in
   one body for the dashboard OPS tab. Secret values never leave the server.

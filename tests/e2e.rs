@@ -139,8 +139,9 @@ async fn e2e_native_post_then_moderate_then_read() {
     assert!(c.get("author_name").is_some());
     assert!(c.get("content").is_some());
     assert!(c.get("created_at").is_some());
-    // Internal fields MUST NOT be exposed.
-    assert!(c.get("source_url").is_none(), "source_url must not leak");
+    // `source_url` is public (null for native comments); the rest are internal.
+    assert!(c.get("source_url").is_some(), "source_url must be exposed");
+    assert!(c["source_url"].is_null(), "native source_url must be null");
     assert!(c.get("status").is_none(), "status must not leak");
     assert!(c.get("updated_at").is_none(), "updated_at must not leak");
     assert!(c.get("target_path").is_none(), "target_path must not leak");

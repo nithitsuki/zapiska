@@ -142,7 +142,7 @@ The `comments` table has these fields:
 | `id` | Autoincrement row ID. |
 | `target_path` | Local path on the target site. |
 | `comment_type` | `native` or `webmention`. |
-| `source_url` | Webmention source URL or null. |
+| `source_url` | Webmention source page URL or null for a native comment. The public read API returns it. |
 | `author_name` | Cleaned author name. |
 | `author_url` | Absolute HTTP or HTTPS URL or null. |
 | `author_avatar` | Avatar URL or null. |
@@ -369,7 +369,12 @@ exactly once.
 The default order is newest first. `before` returns IDs below the cursor.
 `sort=oldest` returns oldest first. `after` returns IDs above the cursor.
 
+`type` filters by origin. The values are `native`, `webmention`, and `all`
+(default). The `total` value applies the same filter.
+
 The response contains only approved comments and approved reaction counts.
+Each comment includes `source_url`. It is null for a native comment and the
+full source page URL for a webmention.
 
 ## RSS
 

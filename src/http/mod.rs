@@ -752,6 +752,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openapi_comments_documents_type_filter_under_public_name() {
+        // The query field is `comment_type` in Rust but `type` on the wire
+        // (serde rename). The OpenAPI document must show the wire name.
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/api-docs/openapi.json"))
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let names: Vec<&str> = body["paths"]["/api/comments"]["get"]["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"type"),
+            "OpenAPI must document the 'type' parameter: {names:?}"
+        );
+        assert!(
+            !names.contains(&"comment_type"),
+            "OpenAPI must use the public 'type' name, not 'comment_type': {names:?}"
+        );
+        // `source_url` must appear in the public response schema.
+        let props = &body["components"]["schemas"]["CommentJson"]["properties"];
+        assert!(
+            props.get("source_url").is_some(),
+            "CommentJson schema must include source_url"
+        );
+    }
+
+    #[tokio::test]
     async fn body_limit_rejects_oversized_payload() {
         let valid_body = "target_path=/x&author_name=Alice&content=hello";
         let over_body = "target_path=/x&author_name=Alice&content=".to_string() + &"x".repeat(2000);
@@ -871,7 +909,7 @@ mod tests {
 
     // ── GET /api/comments tests ─────────────────────────────
 
-    async fn seed_comment(state: &AppState, path: &str, author: &str, status: &str) {
+    async fn seed_comment(state: &AppState, path: &str, author: &str, status: &str) -> i64 {
         let repo = &state.repo;
         let id = repo
             .insert_comment(crate::db::repo::NewComment {
@@ -895,10 +933,58 @@ mod tests {
         if status != "pending" {
             repo.update_status(id, status).await.unwrap();
         }
+        id
+    }
+
+    /// Seed a webmention row (its source URL is the public `source_url`) and
+    /// apply `status` when it is not `pending`. Returns the new row id.
+    async fn seed_webmention(
+        state: &AppState,
+        path: &str,
+        source_url: &str,
+        author: &str,
+        status: &str,
+    ) -> i64 {
+        let repo = &state.repo;
+        let id = repo
+            .upsert_by_source(crate::db::repo::NewComment {
+                target_path: path.to_string(),
+                comment_type: "webmention".to_string(),
+                source_url: Some(source_url.to_string()),
+                author_name: author.to_string(),
+                author_url: None,
+                author_avatar: None,
+                content: format!("mention by {author}"),
+                parent_id: None,
+                depth: 0,
+                honeypot: false,
+                delete_token: None,
+                submitter_ip: None,
+                submitter_ip_hash: None,
+                content_hash: None,
+            })
+            .await
+            .unwrap();
+        if status != "pending" {
+            repo.update_status(id, status).await.unwrap();
+        }
+        id
     }
 
     fn request_uri(uri: &str) -> Request<Body> {
         request(axum::http::Method::GET, uri)
+    }
+
+    /// GET `uri` and decode the JSON body.
+    async fn get_json(app: axum::Router, uri: &str) -> serde_json::Value {
+        let resp = app.oneshot(request_uri(uri)).await.unwrap();
+        assert_eq!(resp.status(), 200, "GET {uri} should be 200");
+        serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -1219,11 +1305,17 @@ mod tests {
         assert!(c.get("content").is_some(), "comment has 'content'");
         assert!(c.get("created_at").is_some(), "comment has 'created_at'");
 
-        // Internal fields should NOT leak.
+        // `source_url` is part of the public contract (null for native
+        // comments); it lets a reader link back to a webmention source.
         assert!(
-            c.get("source_url").is_none(),
-            "source_url must NOT be in response"
+            c.get("source_url").is_some(),
+            "source_url must be in response"
         );
+        assert!(
+            c["source_url"].is_null(),
+            "native comments have a null source_url"
+        );
+        // Internal fields should NOT leak.
         assert!(c.get("status").is_none(), "status must NOT be in response");
         assert!(
             c.get("updated_at").is_none(),
@@ -1263,6 +1355,271 @@ mod tests {
             .map(|c| c["author_name"].as_str().unwrap())
             .collect();
         assert_eq!(authors, vec!["Approved"]);
+    }
+
+    // ── ?type= origin filter tests ───────────────────────────
+
+    #[tokio::test]
+    async fn read_source_url_is_null_on_native_comment() {
+        let (state, _dir) = test_state();
+        seed_comment(&state, "/src-native", "Alice", "approved").await;
+        let body = get_json(build_app(state), "/api/comments?path=/src-native").await;
+        let c = &body["comments"][0];
+        assert!(c.get("source_url").is_some(), "source_url key must exist");
+        assert!(c["source_url"].is_null(), "native source_url must be null");
+    }
+
+    #[tokio::test]
+    async fn read_source_url_is_full_url_on_webmention() {
+        let (state, _dir) = test_state();
+        seed_webmention(
+            &state,
+            "/src-wm",
+            "https://remote.example/post/hello",
+            "Bob",
+            "approved",
+        )
+        .await;
+        let body = get_json(build_app(state), "/api/comments?path=/src-wm").await;
+        let c = &body["comments"][0];
+        assert_eq!(c["comment_type"], "webmention");
+        assert_eq!(c["source_url"], "https://remote.example/post/hello");
+    }
+
+    #[tokio::test]
+    async fn read_type_webmention_returns_only_webmentions() {
+        let (state, _dir) = test_state();
+        seed_comment(&state, "/type-wm", "Native", "approved").await;
+        seed_webmention(
+            &state,
+            "/type-wm",
+            "https://remote.example/a",
+            "Mention",
+            "approved",
+        )
+        .await;
+        let body = get_json(
+            build_app(state),
+            "/api/comments?path=/type-wm&type=webmention",
+        )
+        .await;
+        let comments = body["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert!(
+            comments.iter().all(|c| c["comment_type"] == "webmention"),
+            "only webmention rows expected: {comments:?}"
+        );
+        assert_eq!(body["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn read_type_native_returns_only_natives() {
+        let (state, _dir) = test_state();
+        seed_comment(&state, "/type-native", "Native", "approved").await;
+        seed_webmention(
+            &state,
+            "/type-native",
+            "https://remote.example/b",
+            "Mention",
+            "approved",
+        )
+        .await;
+        let body = get_json(
+            build_app(state),
+            "/api/comments?path=/type-native&type=native",
+        )
+        .await;
+        let comments = body["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert!(
+            comments.iter().all(|c| c["comment_type"] == "native"),
+            "only native rows expected: {comments:?}"
+        );
+        assert_eq!(body["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn read_type_all_matches_absent_type() {
+        let (state, _dir) = test_state();
+        seed_comment(&state, "/type-all", "Native", "approved").await;
+        seed_webmention(
+            &state,
+            "/type-all",
+            "https://remote.example/c",
+            "Mention",
+            "approved",
+        )
+        .await;
+        let app = build_app(state);
+        let absent = get_json(app.clone(), "/api/comments?path=/type-all").await;
+        let all = get_json(app, "/api/comments?path=/type-all&type=all").await;
+        assert_eq!(absent, all, "type=all must equal an absent type parameter");
+        assert_eq!(all["comments"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn read_type_bogus_returns_400() {
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request_uri("/api/comments?path=/x&type=bogus"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "unknown type must be rejected");
+    }
+
+    #[tokio::test]
+    async fn read_total_matches_returned_count_for_each_type() {
+        let (state, _dir) = test_state();
+        seed_comment(&state, "/type-total", "Native1", "approved").await;
+        seed_comment(&state, "/type-total", "Native2", "approved").await;
+        seed_webmention(
+            &state,
+            "/type-total",
+            "https://remote.example/d",
+            "Mention1",
+            "approved",
+        )
+        .await;
+        seed_webmention(
+            &state,
+            "/type-total",
+            "https://remote.example/e",
+            "Mention2",
+            "approved",
+        )
+        .await;
+        let app = build_app(state);
+        for (label, query) in [
+            ("absent", ""),
+            ("all", "&type=all"),
+            ("native", "&type=native"),
+            ("webmention", "&type=webmention"),
+        ] {
+            let body = get_json(
+                app.clone(),
+                &format!("/api/comments?path=/type-total{query}"),
+            )
+            .await;
+            let returned = body["comments"].as_array().unwrap().len();
+            let total = body["total"].as_i64().unwrap() as usize;
+            assert_eq!(
+                total, returned,
+                "total must match returned count for {label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_type_composes_with_oldest_sort_and_cursors() {
+        let (state, _dir) = test_state();
+        let n1 = seed_comment(&state, "/type-cur", "N1", "approved").await;
+        let w1 = seed_webmention(
+            &state,
+            "/type-cur",
+            "https://remote.example/w1",
+            "W1",
+            "approved",
+        )
+        .await;
+        let n2 = seed_comment(&state, "/type-cur", "N2", "approved").await;
+        let w2 = seed_webmention(
+            &state,
+            "/type-cur",
+            "https://remote.example/w2",
+            "W2",
+            "approved",
+        )
+        .await;
+        let app = build_app(state);
+
+        // Oldest + native: only the two natives, oldest first.
+        let body = get_json(
+            app.clone(),
+            "/api/comments?path=/type-cur&type=native&sort=oldest",
+        )
+        .await;
+        let ids: Vec<i64> = body["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![n1, n2], "type=native&sort=oldest");
+        assert_eq!(body["total"], 2);
+
+        // The `after` cursor composes with the type filter: W1 sits between
+        // the natives by id and must still be skipped.
+        let body = get_json(
+            app.clone(),
+            &format!("/api/comments?path=/type-cur&type=native&sort=oldest&after={n1}"),
+        )
+        .await;
+        let ids: Vec<i64> = body["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![n2],
+            "native after-cursor must skip the webmention"
+        );
+        assert_eq!(body["total"], 2, "total ignores the cursor");
+
+        // Newest + webmention, then the `before` cursor.
+        let body = get_json(
+            app.clone(),
+            "/api/comments?path=/type-cur&type=webmention&sort=newest",
+        )
+        .await;
+        let ids: Vec<i64> = body["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![w2, w1], "type=webmention&sort=newest");
+
+        let body = get_json(
+            app,
+            &format!("/api/comments?path=/type-cur&type=webmention&before={w2}"),
+        )
+        .await;
+        let ids: Vec<i64> = body["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![w1], "webmention before-cursor");
+    }
+
+    #[tokio::test]
+    async fn read_type_sql_injection_is_rejected_not_executed() {
+        let (state, _dir) = test_state();
+        seed_comment(&state, "/type-sqli", "Survivor", "approved").await;
+        let app = build_app(state);
+
+        // The payload is percent-encoded so the query parser sees it whole.
+        let resp = app
+            .clone()
+            .oneshot(request_uri(
+                "/api/comments?path=/type-sqli&type=%27%3B%20DROP%20TABLE%20comments%3B--",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "injection attempt must be a bad request"
+        );
+
+        // The table still exists and the seeded row is still readable.
+        let body = get_json(app, "/api/comments?path=/type-sqli").await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["comments"][0]["author_name"], "Survivor");
     }
 
     // ── RSS feed tests ───────────────────────────────────────

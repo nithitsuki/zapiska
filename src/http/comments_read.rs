@@ -15,6 +15,42 @@ pub enum SortOrder {
     Oldest,
 }
 
+/// Comment-origin filter for `GET /api/comments`. `All` maps to no SQL
+/// predicate, matching the behaviour before the `type` parameter existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentTypeFilter {
+    All,
+    Native,
+    Webmention,
+}
+
+impl CommentTypeFilter {
+    /// Parse the `type` query parameter. An absent parameter means `All`.
+    /// Unknown values are rejected before any SQL runs, so a user-supplied
+    /// value can never reach the query text.
+    fn parse(raw: Option<&str>) -> Result<Self, AppError> {
+        match raw {
+            None | Some("all") => Ok(Self::All),
+            Some("native") => Ok(Self::Native),
+            Some("webmention") => Ok(Self::Webmention),
+            Some(other) => Err(AppError::BadRequest(format!(
+                "invalid type '{other}', must be 'native', 'webmention' or 'all'"
+            ))),
+        }
+    }
+
+    /// Value bound to the `comment_type` SQL parameter, or `None` for `All`
+    /// (the predicate reads `?N IS NULL OR comment_type = ?N`). A fixed
+    /// literal, never a user string, so the query stays parameterized.
+    fn sql_value(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Native => Some("native"),
+            Self::Webmention => Some("webmention"),
+        }
+    }
+}
+
 #[derive(Deserialize, utoipa::IntoParams)]
 pub struct CommentsQuery {
     /// Path on the main site (e.g. /blog/hello)
@@ -30,6 +66,10 @@ pub struct CommentsQuery {
     /// Ordering: `newest` (default) or `oldest`
     #[param(example = "newest")]
     pub sort: Option<String>,
+    /// Filter by comment origin: `native`, `webmention`, or `all` (default)
+    #[serde(rename = "type")]
+    #[param(example = "all")]
+    pub comment_type: Option<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -43,6 +83,8 @@ pub struct CommentJson {
     pub id: i64,
     #[schema(example = "native")]
     pub comment_type: String,
+    /// Source page URL for webmention comments. Null for native comments.
+    pub source_url: Option<String>,
     pub author_name: String,
     pub author_url: Option<String>,
     pub author_avatar: Option<String>,
@@ -66,7 +108,7 @@ pub struct CommentJson {
     params(CommentsQuery),
     responses(
         (status = 200, description = "List of approved comments", body = CommentsResponse),
-        (status = 400, description = "Invalid path parameter"),
+        (status = 400, description = "Invalid path or type parameter"),
     ),
     tag = "comments",
 )]
@@ -82,6 +124,8 @@ pub async fn list_comments(
         .map_err(|e| AppError::BadRequest(format!("invalid path: {e}")))?;
 
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
+
+    let comment_type = CommentTypeFilter::parse(query.comment_type.as_deref())?;
 
     let order = match query.sort.as_deref() {
         None | Some("newest") => SortOrder::Newest,
@@ -99,13 +143,18 @@ pub async fn list_comments(
         SortOrder::Newest => {
             state
                 .repo
-                .list_approved_page(&target_path, limit, query.before)
+                .list_approved_page(&target_path, limit, query.before, comment_type.sql_value())
                 .await?
         }
         SortOrder::Oldest => {
             state
                 .repo
-                .list_approved_oldest_page(&target_path, limit, query.after)
+                .list_approved_oldest_page(
+                    &target_path,
+                    limit,
+                    query.after,
+                    comment_type.sql_value(),
+                )
                 .await?
         }
     };
@@ -116,6 +165,7 @@ pub async fn list_comments(
             reactions: reaction_counts.get(&c.id).cloned().unwrap_or_default(),
             id: c.id,
             comment_type: c.comment_type,
+            source_url: c.source_url,
             author_name: c.author_name,
             author_url: c.author_url,
             author_avatar: c.author_avatar,
@@ -128,4 +178,53 @@ pub async fn list_comments(
         .collect();
 
     Ok(Json(CommentsResponse { total, comments }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_filter_absent_or_all_is_unfiltered() {
+        assert_eq!(
+            CommentTypeFilter::parse(None).unwrap(),
+            CommentTypeFilter::All
+        );
+        assert_eq!(
+            CommentTypeFilter::parse(Some("all")).unwrap(),
+            CommentTypeFilter::All
+        );
+        assert_eq!(CommentTypeFilter::All.sql_value(), None);
+    }
+
+    #[test]
+    fn type_filter_maps_known_values_to_bound_literals() {
+        assert_eq!(
+            CommentTypeFilter::parse(Some("native"))
+                .unwrap()
+                .sql_value(),
+            Some("native")
+        );
+        assert_eq!(
+            CommentTypeFilter::parse(Some("webmention"))
+                .unwrap()
+                .sql_value(),
+            Some("webmention")
+        );
+    }
+
+    #[test]
+    fn type_filter_rejects_injection_and_unknown_values() {
+        for raw in [
+            "bogus",
+            "'; DROP TABLE comments;--",
+            "' OR '1'='1",
+            "native' OR 1=1--",
+        ] {
+            assert!(
+                CommentTypeFilter::parse(Some(raw)).is_err(),
+                "type '{raw}' must be rejected"
+            );
+        }
+    }
 }

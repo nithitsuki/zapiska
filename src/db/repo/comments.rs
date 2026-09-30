@@ -141,22 +141,27 @@ pub(crate) fn list_by_source_on_conn(
     Ok(comments)
 }
 
+/// `comment_type` binds the `type` filter as a bound parameter: `None` means
+/// "all origins" via `?3 IS NULL`, and the caller only ever passes the fixed
+/// literals `native`/`webmention` (or `None`), never a user string.
 pub(crate) fn list_approved_on_conn(
     conn: &rusqlite::Connection,
     path: &str,
     limit: i64,
     before: Option<i64>,
+    comment_type: Option<&str>,
 ) -> RepoResult<Vec<Comment>> {
     let sql = format!(
-        "{} LIMIT ?3",
+        "{} LIMIT ?4",
         select_comments(
-            "target_path = ?1 AND status = 'approved' AND (?2 IS NULL OR id < ?2)",
+            "target_path = ?1 AND status = 'approved' AND (?2 IS NULL OR id < ?2) \
+             AND (?3 IS NULL OR comment_type = ?3)",
             "id DESC",
         )
     );
     let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
     let rows = stmt
-        .query_map(params![path, before, limit], row_to_comment)
+        .query_map(params![path, before, comment_type, limit], row_to_comment)
         .map_err(RepoError::from)?;
     let mut comments = Vec::new();
     for row in rows {
@@ -170,17 +175,19 @@ pub(crate) fn list_approved_oldest_on_conn(
     path: &str,
     limit: i64,
     after: Option<i64>,
+    comment_type: Option<&str>,
 ) -> RepoResult<Vec<Comment>> {
     let sql = format!(
-        "{} LIMIT ?3",
+        "{} LIMIT ?4",
         select_comments(
-            "target_path = ?1 AND status = 'approved' AND (?2 IS NULL OR id > ?2)",
+            "target_path = ?1 AND status = 'approved' AND (?2 IS NULL OR id > ?2) \
+             AND (?3 IS NULL OR comment_type = ?3)",
             "id ASC",
         )
     );
     let mut stmt = conn.prepare(&sql).map_err(RepoError::from)?;
     let rows = stmt
-        .query_map(params![path, after, limit], row_to_comment)
+        .query_map(params![path, after, comment_type, limit], row_to_comment)
         .map_err(RepoError::from)?;
     let mut comments = Vec::new();
     for row in rows {
@@ -189,10 +196,17 @@ pub(crate) fn list_approved_oldest_on_conn(
     Ok(comments)
 }
 
-pub(crate) fn count_approved_on_conn(conn: &rusqlite::Connection, path: &str) -> RepoResult<i64> {
+/// Count approved comments for a path, applying the same `comment_type`
+/// filter as the list query so `total` always matches the filtered set.
+pub(crate) fn count_approved_on_conn(
+    conn: &rusqlite::Connection,
+    path: &str,
+    comment_type: Option<&str>,
+) -> RepoResult<i64> {
     conn.query_row(
-        "SELECT count(*) FROM comments WHERE target_path = ?1 AND status = 'approved'",
-        params![path],
+        "SELECT count(*) FROM comments WHERE target_path = ?1 AND status = 'approved' \
+         AND (?2 IS NULL OR comment_type = ?2)",
+        params![path, comment_type],
         |row| row.get(0),
     )
     .map_err(RepoError::from)
@@ -285,16 +299,21 @@ impl Repo {
 
     /// Newest-first page plus its total and approved reaction counts, all on
     /// ONE connection (read batch for `GET /api/comments?sort=newest`).
+    /// `comment_type` filters by origin (`native`/`webmention`); `None` means
+    /// all origins and the count uses the same filter as the list.
     pub async fn list_approved_page(
         &self,
         path: &str,
         limit: i64,
         before: Option<i64>,
+        comment_type: Option<&str>,
     ) -> RepoResult<(Vec<Comment>, i64, HashMap<i64, HashMap<String, i64>>)> {
         let path = path.to_string();
+        let comment_type = comment_type.map(str::to_string);
         self.with_conn(move |conn| {
-            let comments = list_approved_on_conn(conn, &path, limit, before)?;
-            let total = count_approved_on_conn(conn, &path)?;
+            let comments =
+                list_approved_on_conn(conn, &path, limit, before, comment_type.as_deref())?;
+            let total = count_approved_on_conn(conn, &path, comment_type.as_deref())?;
             let ids: Vec<i64> = comments.iter().map(|c| c.id).collect();
             let counts = super::reactions::reaction_counts_on_conn(conn, &ids)?;
             Ok((comments, total, counts))
@@ -304,16 +323,20 @@ impl Repo {
 
     /// Oldest-first page plus its total and approved reaction counts, all on
     /// ONE connection (read batch for `GET /api/comments?sort=oldest`).
+    /// `comment_type` behaves as in [`Repo::list_approved_page`].
     pub async fn list_approved_oldest_page(
         &self,
         path: &str,
         limit: i64,
         after: Option<i64>,
+        comment_type: Option<&str>,
     ) -> RepoResult<(Vec<Comment>, i64, HashMap<i64, HashMap<String, i64>>)> {
         let path = path.to_string();
+        let comment_type = comment_type.map(str::to_string);
         self.with_conn(move |conn| {
-            let comments = list_approved_oldest_on_conn(conn, &path, limit, after)?;
-            let total = count_approved_on_conn(conn, &path)?;
+            let comments =
+                list_approved_oldest_on_conn(conn, &path, limit, after, comment_type.as_deref())?;
+            let total = count_approved_on_conn(conn, &path, comment_type.as_deref())?;
             let ids: Vec<i64> = comments.iter().map(|c| c.id).collect();
             let counts = super::reactions::reaction_counts_on_conn(conn, &ids)?;
             Ok((comments, total, counts))
@@ -328,7 +351,7 @@ impl Repo {
         before: Option<i64>,
     ) -> RepoResult<Vec<Comment>> {
         let path = path.to_string();
-        self.spawn(move |conn| list_approved_on_conn(conn, &path, limit, before))
+        self.spawn(move |conn| list_approved_on_conn(conn, &path, limit, before, None))
             .await
     }
 
@@ -342,7 +365,7 @@ impl Repo {
         after: Option<i64>,
     ) -> RepoResult<Vec<Comment>> {
         let path = path.to_string();
-        self.spawn(move |conn| list_approved_oldest_on_conn(conn, &path, limit, after))
+        self.spawn(move |conn| list_approved_oldest_on_conn(conn, &path, limit, after, None))
             .await
     }
 
@@ -405,7 +428,7 @@ impl Repo {
 
     pub async fn count_approved(&self, path: &str) -> RepoResult<i64> {
         let path = path.to_string();
-        self.spawn(move |conn| count_approved_on_conn(conn, &path))
+        self.spawn(move |conn| count_approved_on_conn(conn, &path, None))
             .await
     }
 
@@ -936,7 +959,7 @@ mod t15_native_unit_tests {
 
         repo.reset_acquire_count();
         let (comments, total, counts) = repo
-            .list_approved_page("/t15-page", 10, None)
+            .list_approved_page("/t15-page", 10, None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -950,7 +973,7 @@ mod t15_native_unit_tests {
 
         repo.reset_acquire_count();
         let (comments, total, _) = repo
-            .list_approved_oldest_page("/t15-page", 2, None)
+            .list_approved_oldest_page("/t15-page", 2, None, None)
             .await
             .unwrap();
         assert_eq!(repo.acquire_count(), 1);
@@ -1230,6 +1253,106 @@ mod tests {
         let rows = repo.list_all_comments().await.unwrap();
         let c = rows.iter().find(|c| c.id == child).unwrap();
         assert_full_fields(c, "/rt-all", parent, child);
+    }
+
+    fn typed_comment(
+        target_path: &str,
+        comment_type: &str,
+        source_url: Option<&str>,
+    ) -> NewComment {
+        NewComment {
+            target_path: target_path.to_string(),
+            comment_type: comment_type.to_string(),
+            source_url: source_url.map(str::to_string),
+            author_name: comment_type.to_string(),
+            author_url: None,
+            author_avatar: None,
+            content: format!("a {comment_type} comment"),
+            parent_id: None,
+            depth: 0,
+            honeypot: false,
+            delete_token: None,
+            submitter_ip: None,
+            submitter_ip_hash: None,
+            content_hash: None,
+        }
+    }
+
+    /// Seed one approved native row and one approved webmention row on the
+    /// same path; returns (native id, webmention id).
+    async fn seed_mixed_types(repo: &Repo, target_path: &str) -> (i64, i64) {
+        let native = repo
+            .insert_comment(typed_comment(target_path, "native", None))
+            .await
+            .unwrap();
+        let mention = repo
+            .upsert_by_source(typed_comment(
+                target_path,
+                "webmention",
+                Some("https://src.example/mixed"),
+            ))
+            .await
+            .unwrap();
+        repo.update_status(native, "approved").await.unwrap();
+        repo.update_status(mention, "approved").await.unwrap();
+        (native, mention)
+    }
+
+    #[tokio::test]
+    async fn type_filter_limits_list_and_total_to_one_origin() {
+        let (repo, _dir) = setup();
+        let (native, mention) = seed_mixed_types(&repo, "/rt-type").await;
+
+        let (all, total, _) = repo
+            .list_approved_page("/rt-type", 10, None, None)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2, "absent filter returns both origins");
+        assert_eq!(total, 2);
+
+        let (rows, total, _) = repo
+            .list_approved_page("/rt-type", 10, None, Some("native"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, native);
+        assert_eq!(total, 1, "total must respect the native filter");
+
+        let (rows, total, _) = repo
+            .list_approved_page("/rt-type", 10, None, Some("webmention"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, mention);
+        assert_eq!(total, 1, "total must respect the webmention filter");
+
+        let (rows, total, _) = repo
+            .list_approved_oldest_page("/rt-type", 10, None, Some("webmention"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, mention);
+        assert_eq!(total, 1, "oldest-order total must respect the filter");
+    }
+
+    #[tokio::test]
+    async fn type_filter_uses_bound_parameters_not_string_interpolation() {
+        let (repo, _dir) = setup();
+        seed_mixed_types(&repo, "/rt-sqli").await;
+        // A malicious type reaches SQL as a bound value, never as query text:
+        // it matches nothing and leaves the table intact.
+        let (rows, total, _) = repo
+            .list_approved_page("/rt-sqli", 10, None, Some("'; DROP TABLE comments;--"))
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(total, 0);
+        let (rows, total, _) = repo
+            .list_approved_page("/rt-sqli", 10, None, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "comments table survived the injection probe");
+        assert_eq!(total, 2);
     }
 }
 

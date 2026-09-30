@@ -19,6 +19,7 @@ parent. A frontend can build the thread tree.
 | `path` | string | Required | Main site path. It must start with `/`. |
 | `limit` | integer | `50` | Maximum result count. The server clamps it to `1` through `100`. |
 | `sort` | string | `newest` | `newest` or `oldest`. |
+| `type` | string | `all` | Filter by origin: `native`, `webmention`, or `all`. |
 | `before` | integer | None | For `newest`, return IDs below this value. |
 | `after` | integer | None | For `oldest`, return IDs above this value. |
 
@@ -31,6 +32,7 @@ Response:
     {
       "id": 42,
       "comment_type": "native",
+      "source_url": null,
       "author_name": "Alice",
       "author_url": "https://alice.blog",
       "author_avatar": "https://alice.blog/avatar.jpg",
@@ -46,12 +48,16 @@ Response:
 }
 ```
 
-`total` counts approved comments for the path. The `reactions` object contains
-approved reaction counts only.
+`total` counts the approved comments for the path that match the `type`
+filter. The `reactions` object contains approved reaction counts only.
+
+`source_url` holds the source page URL for a webmention comment. It is `null`
+for a native comment. A widget can use it to link to the page that mentions
+the target.
 
 Errors:
 
-- `400` for a missing or invalid path.
+- `400` for a missing or invalid path, or for an unknown `type`.
 - `429` when the read limit is reached.
 
 ### GET /feed.xml
