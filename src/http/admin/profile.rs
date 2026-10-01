@@ -10,7 +10,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 use crate::validate;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct AdminProfileInput {
     #[serde(default)]
     pub display_name: String,
@@ -22,7 +22,7 @@ pub struct AdminProfileInput {
     pub avatar_url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AdminProfileResponse {
     pub display_name: String,
     pub github_username: String,
@@ -49,6 +49,16 @@ impl From<AdminProfile> for AdminProfileResponse {
 }
 
 /// GET /api/admin/profile — the current owner profile.
+#[utoipa::path(
+    get,
+    path = "/api/admin/profile",
+    responses(
+        (status = 200, description = "The current owner profile", body = AdminProfileResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn get_profile(
     State(state): State<AppState>,
 ) -> Result<Json<AdminProfileResponse>, AppError> {
@@ -57,6 +67,18 @@ pub async fn get_profile(
 }
 
 /// PUT /api/admin/profile — validate and save the owner profile.
+#[utoipa::path(
+    put,
+    path = "/api/admin/profile",
+    request_body = AdminProfileInput,
+    responses(
+        (status = 200, description = "The saved owner profile", body = AdminProfileResponse),
+        (status = 400, description = "Invalid GitHub username, website URL, or avatar URL"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn set_profile(
     State(state): State<AppState>,
     Json(body): Json<AdminProfileInput>,
@@ -99,13 +121,26 @@ pub async fn set_profile(
 /// with the checkmark immediately. `parent_id` optionally makes it a reply
 /// (parent must be approved and on the same path). Author name / URL default
 /// to the profile.
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct OwnerCommentRequest {
     pub target_path: String,
     pub content: String,
     pub parent_id: Option<i64>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/comments",
+    request_body = OwnerCommentRequest,
+    responses(
+        (status = 200, description = "Verified owner comment created (approved) with id, status, verified"),
+        (status = 400, description = "Invalid path, empty content, or invalid parent"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Parent comment not found"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn create_owner_comment(
     State(state): State<AppState>,
     Json(body): Json<OwnerCommentRequest>,

@@ -3,6 +3,11 @@
 Interactive API docs are available at `/swagger-ui/`.
 The OpenAPI document is available at `/api-docs/openapi.json`.
 
+The document covers every public and admin API route. Protected admin
+operations declare a shared `bearerAuth` HTTP security scheme (Bearer token),
+and both feature builds serve the same scheme; UI-only paths (`/admin`,
+`/embed/comments.js`) are not part of the JSON API document.
+
 All paths use the zapiska origin.
 
 ## Public API
@@ -236,13 +241,27 @@ Form fields:
 | `source` | Yes | Source page URL. |
 | `target` | Yes | Main site URL. Its parsed origin must equal `PUBLIC_TARGET_ORIGIN`. |
 
-The server rejects invalid URLs and equal source and target URLs. It places the
-job in a bounded queue and returns `202`.
+The handler parses both URLs with the WHATWG URL parser and rejects the
+request when either is not an absolute `http`/`https` URL, when the target's
+parsed origin differs from `PUBLIC_TARGET_ORIGIN`, or when `source` and
+`target` are equal. A body whose content type is not
+`application/x-www-form-urlencoded` answers `415`; a missing `source` or
+`target` field answers `422`. It places the job in a bounded queue and
+returns `202`.
+
+The handler does not resolve or SSRF-check `source`. A loopback, link-local,
+or private literal host passes this stage and is enqueued (`202`); the
+worker's guarded fetcher refuses it. A `source` carrying userinfo
+credentials (`https://user:pass@host/post`) is likewise accepted here and
+refused by the fetcher. This split keeps the receipt path free of network
+work and puts every untrusted fetch behind one guarded door.
 
 Errors:
 
-- `400` for invalid input or an origin mismatch.
+- `400` for an invalid URL, an unsupported scheme, or an origin mismatch.
 - `413` for a body above `MAX_BODY_SIZE`.
+- `415` for a content type other than `application/x-www-form-urlencoded`.
+- `422` for a missing form field.
 - `429` for the webmention rate or domain limit.
 - `503` when the worker queue is full.
 

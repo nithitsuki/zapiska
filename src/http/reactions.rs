@@ -36,6 +36,7 @@ pub struct ReactionBody {
 #[utoipa::path(
     post,
     path = "/api/comment/{id}/reaction",
+    request_body = ReactionBody,
     responses(
         (status = 201, description = "Reaction stored (pending moderation)"),
         (status = 200, description = "Reaction unchanged (already active)"),
@@ -135,6 +136,15 @@ pub async fn add_reaction(
 }
 
 /// DELETE /api/comment/{id}/reaction — remove one's own active reaction.
+#[utoipa::path(
+    delete,
+    path = "/api/comment/{id}/reaction",
+    responses(
+        (status = 200, description = "Reaction removed; `success: false` when none existed"),
+        (status = 401, description = "Admin token required (REACTIONS_ALLOWED=admin)"),
+    ),
+    tag = "comments",
+)]
 pub async fn remove_reaction(
     State(state): State<AppState>,
     peer: ClientIdentity,

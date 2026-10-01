@@ -790,6 +790,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openapi_documents_every_route() {
+        // Drift guard (T23 pattern): `ADMIN_ROUTE_PATHS` already pins the
+        // protected surface; this extends the same discipline to the
+        // OpenAPI document. Every listed API path must be documented, and
+        // every documented path must be a listed route — so a future route
+        // cannot be added without documenting it, and a documented path
+        // cannot silently outlive its route.
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/api-docs/openapi.json"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let paths = body["paths"].as_object().expect("OpenAPI paths object");
+
+        let mut expected: Vec<&'static str> = crate::http::routes::PUBLIC_ROUTE_PATHS.to_vec();
+        expected.extend_from_slice(crate::http::routes::ADMIN_ROUTE_PATHS);
+        #[cfg(feature = "webmentions")]
+        expected.extend_from_slice(crate::http::routes::WEBMENTION_ROUTE_PATHS);
+
+        for path in &expected {
+            assert!(
+                paths.contains_key(*path),
+                "OpenAPI must document route {path}; add a #[utoipa::path] macro"
+            );
+        }
+        for path in paths.keys() {
+            assert!(
+                expected.contains(&path.as_str()),
+                "OpenAPI documents unknown route {path}; list it in \
+                 PUBLIC_ROUTE_PATHS or ADMIN_ROUTE_PATHS"
+            );
+        }
+
+        // Pin the route lists so adding a route without listing it fails loud.
+        assert_eq!(
+            crate::http::routes::PUBLIC_ROUTE_PATHS.len(),
+            9,
+            "list every public API route in PUBLIC_ROUTE_PATHS"
+        );
+        assert_eq!(
+            crate::http::routes::ADMIN_ROUTE_PATHS.len(),
+            17,
+            "the pinned admin surface length must not change"
+        );
+        #[cfg(feature = "webmentions")]
+        assert_eq!(
+            crate::http::routes::WEBMENTION_ROUTE_PATHS.len(),
+            2,
+            "list every webmention route in WEBMENTION_ROUTE_PATHS"
+        );
+    }
+
+    #[tokio::test]
+    async fn openapi_admin_routes_use_bearer_scheme() {
+        // The bearer scheme is declared as a `Modify` modifier (the derive
+        // cannot emit securitySchemes) and referenced by every admin path
+        // macro. Pin both halves so a missing modifier or an unsecured
+        // admin operation fails loudly.
+        let (state, _dir) = test_state();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(request(axum::http::Method::GET, "/api-docs/openapi.json"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["components"]["securitySchemes"]["bearerAuth"]["scheme"], "bearer",
+            "admin docs must declare the bearerAuth scheme"
+        );
+        for path in crate::http::routes::ADMIN_ROUTE_PATHS {
+            let ops = body["paths"][path]
+                .as_object()
+                .unwrap_or_else(|| panic!("admin path {path} must be documented"));
+            for (method, op) in ops {
+                assert_eq!(
+                    op["security"][0]["bearerAuth"],
+                    serde_json::json!([]),
+                    "{method} {path} must require bearerAuth"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn body_limit_rejects_oversized_payload() {
         let valid_body = "target_path=/x&author_name=Alice&content=hello";
         let over_body = "target_path=/x&author_name=Alice&content=".to_string() + &"x".repeat(2000);

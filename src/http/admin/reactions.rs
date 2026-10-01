@@ -9,7 +9,7 @@ use crate::error::AppError;
 use crate::moderation::{Actor, InvalidStatus, Moderation, ModerationSink, Status, WebhookSink};
 use crate::state::AppState;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct ReactionsQuery {
     /// Filter by status: pending, approved, spam, deleted, or all.
     pub status: Option<String>,
@@ -18,6 +18,17 @@ pub struct ReactionsQuery {
 }
 
 /// GET /api/admin/reactions — list reactions with comment context.
+#[utoipa::path(
+    get,
+    path = "/api/admin/reactions",
+    params(ReactionsQuery),
+    responses(
+        (status = 200, description = "Reactions with comment context"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn list_reactions(
     State(state): State<AppState>,
     Query(query): Query<ReactionsQuery>,
@@ -30,7 +41,7 @@ pub async fn list_reactions(
     Ok(Json(serde_json::json!({ "reactions": reactions })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct ModerateReactionRequest {
     pub id: i64,
     pub action: String,
@@ -42,7 +53,7 @@ pub struct ModerateReactionRequest {
     pub expected_emoji: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct BatchReactionRequest {
     pub actions: Vec<ModerateReactionRequest>,
 }
@@ -64,6 +75,19 @@ fn parse_action(action: &str) -> Result<Status, AppError> {
 }
 
 /// POST /api/admin/reactions/moderate — approve/spam/delete a single reaction.
+#[utoipa::path(
+    post,
+    path = "/api/admin/reactions/moderate",
+    request_body = ModerateReactionRequest,
+    responses(
+        (status = 200, description = "Reaction moderated"),
+        (status = 400, description = "Invalid action or stale expected_emoji"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Reaction not found"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn moderate_reaction(
     State(state): State<AppState>,
     Json(body): Json<ModerateReactionRequest>,
@@ -91,6 +115,17 @@ pub async fn moderate_reaction(
 }
 
 /// POST /api/admin/reactions/moderate/batch — moderate many reactions at once.
+#[utoipa::path(
+    post,
+    path = "/api/admin/reactions/moderate/batch",
+    request_body = BatchReactionRequest,
+    responses(
+        (status = 200, description = "Per-item reaction moderation results"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn moderate_reactions_batch(
     State(state): State<AppState>,
     Json(body): Json<BatchReactionRequest>,

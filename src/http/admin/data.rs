@@ -48,17 +48,25 @@ pub struct ExportFile {
     pub comment_reactions: Vec<CommentReaction>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, utoipa::ToSchema)]
 pub struct ImportFile {
     pub version: Option<i64>,
     /// Salt status of the exporting server. `None` = pre-flag export,
     /// unverifiable — see the import warning logic.
     #[serde(default)]
     pub ip_hash_salted: Option<bool>,
+    // The section payloads are the export document's own row shapes; the
+    // row structs are not `ToSchema`, so the document shows them as opaque
+    // arrays (the handler's response report is the typed contract).
+    #[schema(value_type = Option<Vec<Object>>)]
     pub comments: Option<Vec<Comment>>,
+    #[schema(value_type = Option<Vec<Object>>)]
     pub webmention_seen: Option<Vec<WebmentionSeen>>,
+    #[schema(value_type = Option<Vec<Object>>)]
     pub comment_urls: Option<Vec<CommentUrl>>,
+    #[schema(value_type = Option<Vec<Object>>)]
     pub github_profiles: Option<Vec<GithubProfile>>,
+    #[schema(value_type = Option<Vec<Object>>)]
     pub comment_reactions: Option<Vec<CommentReaction>>,
     /// Explicit overwrite policy for id collisions (B-21): `false` (default)
     /// refuses when an exported id holds different live data, `true`
@@ -78,6 +86,16 @@ pub type ImportResponse = RestoreReport;
 /// GET /api/admin/export — full JSON dump (backup/migration source).
 /// The five tables come from ONE connection in one read transaction
 /// (T15 unit of work), so the dump is a single WAL snapshot, not five.
+#[utoipa::path(
+    get,
+    path = "/api/admin/export",
+    responses(
+        (status = 200, description = "Versioned export document (comments, webmention ledger, URLs, profiles, reactions)"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn export(State(state): State<AppState>) -> Result<Json<ExportFile>, AppError> {
     let ExportSnapshot {
         comments,
@@ -104,6 +122,19 @@ pub async fn export(State(state): State<AppState>) -> Result<Json<ExportFile>, A
 /// no-op; refusals (unknown version, live-id collision without `force`)
 /// happen before the first write. A mid-restore storage abort answers 500
 /// carrying the counts-so-far (see [`abort_response`]), never a bare message.
+#[utoipa::path(
+    post,
+    path = "/api/admin/import",
+    request_body = ImportFile,
+    responses(
+        (status = 200, description = "Restore report with per-section counts and a salt-mismatch warning"),
+        (status = 400, description = "Unsupported version or a live-id collision without force"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Mid-restore abort; body carries the counts so far plus an error"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn import(
     State(state): State<AppState>,
     Json(body): Json<ImportFile>,

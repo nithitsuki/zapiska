@@ -77,6 +77,26 @@ All notable changes to zapiska are documented here. The format follows
   first try. A retry re-enters the bounded queue with `try_send` only, so a
   full backlog drops the job with a warning instead of blocking the only
   consumer.
+- The OpenAPI document now covers every public and admin API route
+  (previously a fraction of the surface). Protected admin operations
+  declare a shared `bearerAuth` HTTP security scheme, the JSON endpoints
+  carry request-body schemas, and `reactions::add_reaction` — which had a
+  `#[utoipa::path]` macro but was registered in neither `paths(...)` list —
+  is now documented. UI-only paths stay out of the JSON API document.
+- OpenAPI drift tests: `openapi_documents_every_route` asserts the document
+  contains exactly the listed routes (new `PUBLIC_ROUTE_PATHS` plus the
+  pinned `ADMIN_ROUTE_PATHS` plus the feature-gated
+  `WEBMENTION_ROUTE_PATHS`), and `openapi_admin_routes_use_bearer_scheme`
+  asserts every admin operation requires `bearerAuth`. A route added
+  without documenting it, or documented without a route, now fails loudly.
+- Pentests for `POST /api/webmention` pin the handler/worker split against
+  its actual behaviour: scheme, target-origin, and source/target inequality
+  reject with `400`; missing fields answer `422`; a non-form content type
+  answers `415`; an oversized body answers `413`; an SSRF-shaped source
+  (loopback, link-local, private) and a credential-bearing source are
+  accepted (`202`) and refused later by the worker's guarded fetcher; and
+  an injected-fetcher idempotency test proves a repeated identical ping
+  updates one row instead of inserting a second.
 
 ### Changed
 

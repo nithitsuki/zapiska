@@ -81,6 +81,16 @@ pub struct LimitsStatus {
 }
 
 /// GET /api/admin/status — versions, DB health, and non-secret config.
+#[utoipa::path(
+    get,
+    path = "/api/admin/status",
+    responses(
+        (status = 200, description = "Versions, health, and non-secret configuration (secrets never leave the server)"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn status(State(state): State<AppState>) -> Json<AdminStatus> {
     let c = &state.config;
     Json(AdminStatus {

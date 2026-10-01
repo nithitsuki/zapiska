@@ -11,23 +11,23 @@ use crate::state::AppState;
 
 // ── POST /api/admin/moderate/batch ──────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct BatchModerateRequest {
     pub actions: Vec<ModerateAction>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct ModerateAction {
     pub id: i64,
     pub action: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct BatchModerateResponse {
     pub results: Vec<ModerateResult>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ModerateResult {
     pub id: i64,
     pub status: String,
@@ -46,6 +46,17 @@ fn status_sink(state: &AppState) -> Option<WebhookSink> {
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/moderate/batch",
+    request_body = BatchModerateRequest,
+    responses(
+        (status = 200, description = "Per-item moderation results", body = BatchModerateResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn moderate_batch(
     State(state): State<AppState>,
     Json(body): Json<BatchModerateRequest>,
@@ -116,6 +127,7 @@ pub struct ModerateResponse {
         (status = 401, description = "Unauthorized"),
         (status = 404, description = "Comment not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "admin",
 )]
 pub async fn moderate(

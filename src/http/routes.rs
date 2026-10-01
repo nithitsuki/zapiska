@@ -128,6 +128,32 @@ impl AdminGovernors {
     }
 }
 
+/// Every public API path that must appear in the OpenAPI document. The
+/// drift test iterates this list plus [`ADMIN_ROUTE_PATHS`] (plus the
+/// feature-gated `WEBMENTION_ROUTE_PATHS`) and asserts each is documented,
+/// so adding a public API route without documenting it fails loudly. The
+/// HTML/UI routes (`/admin`, `/embed/comments.js`) and the Swagger UI paths
+/// are intentionally excluded: they are not JSON API endpoints. Test-only:
+/// production never reads it.
+#[cfg(test)]
+pub const PUBLIC_ROUTE_PATHS: &[&str] = &[
+    "/healthz",
+    "/api/version",
+    "/api/comment",
+    "/api/comment/{id}/delete",
+    "/api/comment/{id}/reaction",
+    "/api/comments",
+    "/feed.xml",
+    "/api/admin/login",
+    "/api/admin/logout",
+];
+
+/// Feature-gated public paths served only with `webmentions`. Documented in
+/// the `webmentions` `ApiDoc` variant; absent (and not expected) without the
+/// feature. Test-only: production never reads it.
+#[cfg(all(test, feature = "webmentions"))]
+pub const WEBMENTION_ROUTE_PATHS: &[&str] = &["/api/webmention", "/.well-known/webmention"];
+
 /// Every path served by [`protected_admin_routes`]. The no-CORS test
 /// iterates this list, and asserts its length, so adding a protected route
 /// without listing it here fails loudly instead of silently gaining CORS.

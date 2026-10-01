@@ -119,11 +119,22 @@ pub async fn create_comment(
 
 // ── POST /api/comment/{id}/delete ───────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct DeleteRequest {
     pub token: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/comment/{id}/delete",
+    request_body = DeleteRequest,
+    responses(
+        (status = 200, description = "Comment deleted"),
+        (status = 404, description = "Comment not found or the token does not match"),
+        (status = 429, description = "Rate limited"),
+    ),
+    tag = "comments",
+)]
 pub async fn delete_comment(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<i64>,

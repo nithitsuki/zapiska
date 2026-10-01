@@ -76,11 +76,22 @@ pub async fn admin_auth(
 
 // ── POST /api/admin/login ───────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct LoginRequest {
     pub token: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login accepted; sets the __Host-admin_token session cookie"),
+        (status = 401, description = "Invalid token"),
+        (status = 429, description = "Rate limited"),
+    ),
+    tag = "admin",
+)]
 pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
@@ -102,6 +113,14 @@ pub async fn login(
 
 // ── POST /api/admin/logout ──────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/logout",
+    responses(
+        (status = 200, description = "Session cookie cleared"),
+    ),
+    tag = "admin",
+)]
 pub async fn logout() -> Response {
     let cookie = set_cookie_value("", 0);
     let mut resp = Json(serde_json::json!({"success": true})).into_response();

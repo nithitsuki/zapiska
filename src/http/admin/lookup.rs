@@ -12,6 +12,17 @@ use crate::state::AppState;
 
 /// GET /api/admin/authors/lookup — resolve author identity and return stats.
 /// Query params: ip, author_name, author_url, combine (bool).
+#[utoipa::path(
+    get,
+    path = "/api/admin/authors/lookup",
+    params(AuthorLookupQuery),
+    responses(
+        (status = 200, description = "Author activity stats"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn author_lookup(
     State(state): State<AppState>,
     Query(query): Query<AuthorLookupQuery>,
@@ -29,7 +40,7 @@ pub async fn author_lookup(
     Ok(Json(result))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct AuthorLookupQuery {
     pub ip: Option<String>,
     pub author_name: Option<String>,
@@ -40,6 +51,16 @@ pub struct AuthorLookupQuery {
 // ── GET /api/admin/paths ────────────────────────────────────
 
 /// List all paths that have comments, with counts per status.
+#[utoipa::path(
+    get,
+    path = "/api/admin/paths",
+    responses(
+        (status = 200, description = "Paths with comment counts per status"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn list_paths(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -63,6 +84,18 @@ pub async fn list_paths(
 // ── URL query endpoints ─────────────────────────────────────
 
 /// GET /api/admin/urls/lookup?url_hash=<hash> — find all comments with a given URL.
+#[utoipa::path(
+    get,
+    path = "/api/admin/urls/lookup",
+    params(UrlLookupQuery),
+    responses(
+        (status = 200, description = "Comments referencing the URL, or all URLs for a domain"),
+        (status = 400, description = "Neither url_hash nor domain was provided"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn url_lookup(
     State(state): State<AppState>,
     Query(query): Query<UrlLookupQuery>,
@@ -86,13 +119,23 @@ pub async fn url_lookup(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct UrlLookupQuery {
     pub url_hash: Option<String>,
     pub domain: Option<String>,
 }
 
 /// GET /api/admin/comments/{id}/urls — list extracted URLs for a comment.
+#[utoipa::path(
+    get,
+    path = "/api/admin/comments/{id}/urls",
+    responses(
+        (status = 200, description = "URLs extracted from the comment"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn comment_urls(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<i64>,
@@ -104,7 +147,7 @@ pub async fn comment_urls(
 // ── POST /api/admin/comments/context ────────────────────────
 
 /// Fetch context for multiple comments in one call: parent chains, author stats, URLs.
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct BulkContextRequest {
     pub comment_ids: Vec<i64>,
     pub include_parents: Option<bool>,
@@ -112,6 +155,17 @@ pub struct BulkContextRequest {
     pub include_urls: Option<bool>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/comments/context",
+    request_body = BulkContextRequest,
+    responses(
+        (status = 200, description = "Requested context for the found comments"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn bulk_context(
     State(state): State<AppState>,
     Json(body): Json<BulkContextRequest>,

@@ -107,6 +107,7 @@ async fn attach_counts(state: &AppState, comments: &mut [PendingComment]) -> Res
         (status = 200, description = "List of pending comments", body = PendingResponse),
         (status = 401, description = "Unauthorized (missing or invalid admin token)"),
     ),
+    security(("bearerAuth" = [])),
     tag = "admin",
 )]
 pub async fn list_pending(
@@ -147,6 +148,7 @@ pub struct AdminCommentsQuery {
         (status = 200, description = "List of comments with optional status filter", body = PendingResponse),
         (status = 401, description = "Unauthorized"),
     ),
+    security(("bearerAuth" = [])),
     tag = "admin",
 )]
 pub async fn list_comments(
@@ -173,7 +175,7 @@ pub async fn list_comments(
 
 // ── GET /api/admin/comments/:id ─────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct CommentDetail {
     pub comment: PendingComment,
     /// Ancestor chain from immediate parent up to the root comment.
@@ -181,6 +183,17 @@ pub struct CommentDetail {
     pub parents: Vec<PendingComment>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/comments/{id}",
+    responses(
+        (status = 200, description = "Comment with its ancestor chain", body = CommentDetail),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Comment not found"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin",
+)]
 pub async fn get_comment(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<i64>,
