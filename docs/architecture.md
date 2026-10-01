@@ -182,7 +182,11 @@ The webmention endpoint is available only with the `webmentions` feature.
    `SourceFetcher` adapter: production wires SafeFetcher (never the shared
    HTTP client, which serves operator-configured endpoints only), tests
    inject a canned mock — the old `allow_loopback` production parameter is
-   gone. The spawn loop is a thin drain over `process`.
+   gone. The spawn loop owns three things: it drains the queue, it owns the
+   bounded retry policy (a retryable failure re-enters the same bounded queue
+   with `try_send`, on a backoff carried by a detached task so the single
+   consumer never sleeps), and it ends on an explicit shutdown signal rather
+   than channel close, because every handler holds a sender clone.
 7. The processor re-fetches the source in EVERY ledger state
    (`unknown`/`alive`/`gone`): a re-ping after `gone` re-verifies, so
    gone→alive resurrection works.

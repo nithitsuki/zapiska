@@ -142,9 +142,19 @@ async fn e2e_native_post_then_moderate_then_read() {
     // `source_url` is public (null for native comments); the rest are internal.
     assert!(c.get("source_url").is_some(), "source_url must be exposed");
     assert!(c["source_url"].is_null(), "native source_url must be null");
-    assert!(c.get("status").is_none(), "status must not leak");
-    assert!(c.get("updated_at").is_none(), "updated_at must not leak");
-    assert!(c.get("target_path").is_none(), "target_path must not leak");
+    // Every internal column is asserted absent by name.
+    for field in [
+        "status",
+        "updated_at",
+        "target_path",
+        "delete_token",
+        "submitter_ip",
+        "submitter_ip_hash",
+        "content_hash",
+        "honeypot",
+    ] {
+        assert!(c.get(field).is_none(), "{field} must not leak");
+    }
 }
 
 #[tokio::test]

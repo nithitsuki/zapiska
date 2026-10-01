@@ -848,6 +848,58 @@ mod tests {
             2,
             "list every webmention route in WEBMENTION_ROUTE_PATHS"
         );
+
+        // Method-level coverage. A path can carry several methods
+        // (`/api/admin/comments` is GET+POST); documenting only one of them
+        // still satisfies the key check above. Compare against the real
+        // router so a missing method macro fails here.
+        let router = build_app(test_state().0);
+        for path in &expected {
+            let documented: Vec<&str> = paths[*path]
+                .as_object()
+                .expect("documented path must be an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert!(
+                !documented.is_empty(),
+                "{path} must document at least one operation"
+            );
+            for method in documented {
+                // Only API paths are in these lists; the router answers them.
+                assert!(
+                    router_answers(&router, method, path).await,
+                    "{method} {path} is documented but the router does not serve it"
+                );
+            }
+        }
+    }
+
+    /// True when `router` serves `method` + `path` with any status other
+    /// than 404. A documented operation that the router does not route means
+    /// the doc and the surface disagree.
+    async fn router_answers(router: &axum::Router, method: &str, path: &str) -> bool {
+        let m = axum::http::Method::from_bytes(method.to_uppercase().as_bytes())
+            .expect("documented method must be a valid HTTP method");
+        // Parametrised path: substitute a value for each placeholder so the
+        // router can match it.
+        let uri: String = if path.contains('{') {
+            path.split('/')
+                .map(|seg| if seg.starts_with('{') { "1" } else { seg })
+                .collect::<Vec<_>>()
+                .join("/")
+        } else {
+            path.to_string()
+        };
+        let req = axum::http::Request::builder()
+            .method(m)
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        match router.clone().oneshot(req).await {
+            Ok(resp) => resp.status() != axum::http::StatusCode::NOT_FOUND,
+            Err(_) => false,
+        }
     }
 
     #[tokio::test]
@@ -882,6 +934,27 @@ mod tests {
                     op["security"][0]["bearerAuth"],
                     serde_json::json!([]),
                     "{method} {path} must require bearerAuth"
+                );
+            }
+        }
+
+        // Negative case: no PUBLIC route may claim to require auth. Marking
+        // `/healthz` or `/api/comments` as secured would tell a consumer the
+        // endpoint is closed when it is wide open.
+        // `mut` is needed only when the webmention routes extend the list.
+        #[allow(unused_mut)]
+        let mut public: Vec<&'static str> = crate::http::routes::PUBLIC_ROUTE_PATHS.to_vec();
+        #[cfg(feature = "webmentions")]
+        public.extend_from_slice(crate::http::routes::WEBMENTION_ROUTE_PATHS);
+        for path in public {
+            let ops = body["paths"][path]
+                .as_object()
+                .unwrap_or_else(|| panic!("public path {path} must be documented"));
+            for (method, op) in ops {
+                assert!(
+                    op["security"].is_null()
+                        || op["security"].as_array().is_some_and(Vec::is_empty),
+                    "{method} {path} is public and must not require bearerAuth"
                 );
             }
         }
@@ -1519,16 +1592,24 @@ mod tests {
             c["source_url"].is_null(),
             "native comments have a null source_url"
         );
-        // Internal fields should NOT leak.
-        assert!(c.get("status").is_none(), "status must NOT be in response");
-        assert!(
-            c.get("updated_at").is_none(),
-            "updated_at must NOT be in response"
-        );
-        assert!(
-            c.get("target_path").is_none(),
-            "target_path must NOT be in response"
-        );
+        // Internal fields should NOT leak. Every column the projection
+        // deliberately omits is asserted here by name, so adding one to
+        // `CommentJson` by accident fails here instead of shipping.
+        for field in [
+            "status",
+            "updated_at",
+            "target_path",
+            "delete_token",
+            "submitter_ip",
+            "submitter_ip_hash",
+            "content_hash",
+            "honeypot",
+        ] {
+            assert!(
+                c.get(field).is_none(),
+                "{field} must NOT be in the public response"
+            );
+        }
     }
 
     #[tokio::test]

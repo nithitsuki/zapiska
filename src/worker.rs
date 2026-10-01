@@ -185,10 +185,11 @@ pub fn spawn_worker(mut rx: JobReceiver) {
     });
 }
 
-/// Spawn the background worker that processes webmention jobs. The loop
-/// stays a thin drain: build the production processor (its `SafeFetcher`
-/// door carries the configured fetch timeout, its moderation sink carries
-/// the configured webhook URL + signing secret) and pump jobs through it.
+/// Spawn the background worker that processes webmention jobs. This builds
+/// the production processor (its `SafeFetcher` door carries the configured
+/// fetch timeout, its moderation sink carries the configured webhook URL +
+/// signing secret) and hands it to [`spawn_worker_for_processor`], which owns
+/// the loop: draining, the bounded retry policy, and the shutdown drain.
 /// The worker holds a sender clone so retries can re-enter the queue; the
 /// shutdown signal, not channel close, ends the loop.
 #[allow(clippy::too_many_arguments)]
@@ -1495,7 +1496,7 @@ mod t20_processor_tests {
 
     #[tokio::test]
     async fn spawn_loop_drains_jobs_through_the_processor() {
-        // The spawn loop stays a thin drain: jobs in → processor.process.
+        // The spawn loop hands jobs to processor.process.
         let (repo, _dir) = setup_repo("t20-spawn.db");
         let source = "https://src.example/spawn";
         let target = "https://nithitsuki.com/blog/t20-spawn";

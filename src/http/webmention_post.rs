@@ -66,18 +66,39 @@ pub async fn receive_webmention(
         ));
     }
 
-    // 4. Charge the per-domain quota, last.
+    // 4. Enqueue first, then charge the per-domain quota.
     //
-    // The charge must follow every check that can reject the request. An
-    // unauthenticated caller that sends `source=<victim-host>/x` with an
-    // invalid target used to burn that host's hourly budget on every
-    // rejected request, so legitimate webmentions from the victim domain
-    // then met 429. Charging here means only a request this server would
-    // actually accept costs the sender's domain a slot.
+    // Enqueue BEFORE the charge so the two failure paths are separable. A
+    // full backlog (503) must not cost the sender anything: the request was
+    // never accepted, and an unauthenticated caller could otherwise keep the
+    // queue saturated and burn a victim's hourly budget on every rejected
+    // ping.
     //
-    // The key is the source host, so a caller can still spend its OWN
-    // domain's budget with junk targets that pass the origin check. That
-    // is the intended cost of the cap and is not a cross-domain attack.
+    // The charge must also follow every check that can reject the request.
+    // The old order (charge first) meant a caller sending
+    // `source=<victim-host>/x` with an invalid target got 400 and still paid
+    // the victim's budget, after which that domain's real webmentions met 429.
+    let job = WebmentionJob {
+        source: form.source,
+        target: form.target,
+    };
+
+    state.wm_sender.try_send(job).map_err(|e| match e {
+        TrySendError::Full(_) => {
+            AppError::ServiceUnavailable("worker backlog full, retry later".to_string())
+        }
+        TrySendError::Closed(_) => {
+            AppError::Internal("webmention worker is not running".to_string())
+        }
+    })?;
+
+    // 5. Charge the quota, last. Every refusal path above returns before
+    // this point, so only an accepted ping costs the source domain a slot.
+    //
+    // The key is the source host, which is unauthenticated. A caller can
+    // still spend its OWN domain's budget freely by naming itself as the
+    // source of an otherwise-valid ping; the worker later drops a ping with
+    // no backlink. That is the intended cost of the cap.
     if state.config.max_webmentions_per_domain_per_hour > 0 {
         if let Some(host) = source_url.host_str() {
             let key = domain_hourly_key(host);
@@ -96,21 +117,7 @@ pub async fn receive_webmention(
         }
     }
 
-    // 4. Enqueue.
-    let job = WebmentionJob {
-        source: form.source,
-        target: form.target,
-    };
-
-    match state.wm_sender.try_send(job) {
-        Ok(()) => Ok((axum::http::StatusCode::ACCEPTED, "accepted")),
-        Err(TrySendError::Full(_)) => Err(AppError::ServiceUnavailable(
-            "worker backlog full, retry later".to_string(),
-        )),
-        Err(TrySendError::Closed(_)) => Err(AppError::Internal(
-            "webmention worker is not running".to_string(),
-        )),
-    }
+    Ok((axum::http::StatusCode::ACCEPTED, "accepted"))
 }
 
 /// W3C webmention discovery document. The body is the relative receipt path

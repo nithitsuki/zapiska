@@ -146,10 +146,16 @@ header. See [API](api.md).
 The in-memory limiter also applies these caps:
 
 - `MAX_COMMENTS_PER_IP_PER_DAY` limits native comments.
-- `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` limits source domains. A domain is
-  charged only for a request the server accepts. A request the server rejects
-  (bad scheme, wrong target origin, source equal to target) costs the sender
-  nothing, so one sender cannot spend another domain's budget with junk.
+- `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` limits source domains. The domain is
+  charged last, after the job is queued, so every refusal path costs the sender
+  nothing: a bad scheme, a wrong target origin, source equal to target, a
+  malformed form, and a full worker backlog all return an error without
+  spending the quota. One sender cannot spend another domain's budget.
+
+  The cap keys on the unauthenticated `source` host. A caller can still spend
+  its own budget by naming itself as the source of an otherwise-valid ping.
+  The worker later discards a ping with no backlink, but the quota is already
+  spent. Treat the cap as a spam brake, not as an identity check.
 
 Process restart clears the in-memory counters.
 

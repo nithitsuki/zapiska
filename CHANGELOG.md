@@ -186,7 +186,9 @@ All notable changes to zapiska are documented here. The format follows
   The worker watches a shutdown signal, processes the jobs that are already
   buffered until the queue is empty or a bounded deadline expires, and
   `main` waits for that drain before it releases the database lock. A
-  restart no longer loses queued webmentions. `SPEC.md` and
+  restart drains most queued webmentions: the wait is bounded, so a job still
+  buffered at the deadline, or one parked in a retry backoff, is still lost.
+  `SPEC.md` and
   `docs/architecture.md` lost the old "does not drain" statement in the
   same change.
 - Webmention gone/resurrection lifecycle: a re-ping after `gone`
