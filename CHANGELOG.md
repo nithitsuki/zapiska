@@ -6,15 +6,23 @@ All notable changes to zapiska are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
+Public read API gains a field and a query parameter, webmention receipt gains a
+discovery document, and the worker gains retry plus a shutdown drain. No schema
+migration: `schema_version` stays 9 and `export_version` stays 1.
+
 ### Fixed
 
 - A rejected webmention no longer charges the sender's domain quota. The
   per-domain hourly cap ran before the target was parsed and validated, so an
   unauthenticated caller could send `source=<victim-host>/x` with an invalid
   target, receive `400` each time, and still exhaust that host's hourly budget,
-  after which the victim's legitimate webmentions met `429`. The charge now
-  follows every check that can reject the request. The cap still applies to
-  requests the server accepts, so a noisy sender still spends its own budget.
+  after which the victim's legitimate webmentions met `429`. The job is now
+  enqueued before the cap is charged, so every refusal path — bad scheme, wrong
+  target origin, source equal to target, a malformed form, and a full worker
+  backlog — costs the sender nothing. The cap still applies to accepted
+  requests, so a noisy sender still spends its own budget.
 
 ### Added
 
@@ -43,7 +51,7 @@ All notable changes to zapiska are documented here. The format follows
   public ✓ checkmark, migration v9 (`verified` column, `admin_profile`
   table), and dashboard PROFILE tab with impostor flagging.
 - Versioned SQLite migrations via `PRAGMA user_version`
-  (`LATEST_SCHEMA_VERSION = 8` in `src/db/pool.rs`). Fresh databases get the
+  (`LATEST_SCHEMA_VERSION = 9` in `src/db/pool.rs`). Fresh databases get the
   canonical snapshot and a stamp. Legacy `user_version = 0` databases run an
   idempotent existence-checked catch-up and are stamped. A database newer
   than the binary refuses startup instead of running against unknown schema.
