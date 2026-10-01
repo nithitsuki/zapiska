@@ -1672,6 +1672,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_source_url_is_canonicalised_for_raw_stored_source() {
+        // Storage keeps the sender's raw string (the idempotency key). A
+        // pre-existing row can therefore hold a non-canonical source, and the
+        // PUBLIC response must canonicalise it before third-party consumers
+        // interpolate it into HTML.
+        let (state, _dir) = test_state();
+        let raw = "https://evil.example/\"><script>alert(1)</script>";
+        seed_webmention(&state, "/src-canon", raw, "Bob", "approved").await;
+        let body = get_json(build_app(state), "/api/comments?path=/src-canon").await;
+        let c = &body["comments"][0];
+        assert_eq!(
+            c["source_url"], "https://evil.example/%22%3E%3Cscript%3Ealert(1)%3C/script%3E",
+            "a raw stored source must be returned in canonical form"
+        );
+        let returned = c["source_url"].as_str().unwrap();
+        assert!(
+            !returned.contains('<') && !returned.contains('>') && !returned.contains('"'),
+            "the public source_url must carry no raw HTML metacharacters: {returned}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_source_url_falls_back_to_raw_when_unparseable() {
+        // Guidance fallback: a stored source that no longer parses (written
+        // before this rule, or imported) is returned unchanged, not dropped.
+        let (state, _dir) = test_state();
+        seed_webmention(
+            &state,
+            "/src-fallback",
+            "/relative/no-host",
+            "Bob",
+            "approved",
+        )
+        .await;
+        let body = get_json(build_app(state), "/api/comments?path=/src-fallback").await;
+        let c = &body["comments"][0];
+        assert_eq!(
+            c["source_url"], "/relative/no-host",
+            "an unparseable stored source must be returned unchanged, never nulled or dropped"
+        );
+    }
+
+    #[tokio::test]
     async fn read_type_webmention_returns_only_webmentions() {
         let (state, _dir) = test_state();
         seed_comment(&state, "/type-wm", "Native", "approved").await;

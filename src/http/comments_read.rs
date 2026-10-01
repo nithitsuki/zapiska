@@ -165,7 +165,21 @@ pub async fn list_comments(
             reactions: reaction_counts.get(&c.id).cloned().unwrap_or_default(),
             id: c.id,
             comment_type: c.comment_type,
-            source_url: c.source_url,
+            // The public `source_url` is the WHATWG-canonical form, while
+            // STORAGE keeps the sender's raw string (that raw string is the
+            // idempotency key — see `validate::normalize_http_url`). For a
+            // non-canonical source the stored and returned values therefore
+            // differ, by design.
+            //
+            // FALLBACK: a stored value that no longer parses, is not
+            // http/https, or has no host (a row written before this rule, or
+            // an imported row) is returned UNCHANGED rather than dropped —
+            // dropping it would silently change the public contract and hide
+            // the row's source.
+            source_url: c
+                .source_url
+                .as_deref()
+                .map(|raw| validate::normalize_http_url(raw).unwrap_or_else(|| raw.to_string())),
             author_name: c.author_name,
             author_url: c.author_url,
             author_avatar: c.author_avatar,

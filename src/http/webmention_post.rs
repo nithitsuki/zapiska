@@ -6,6 +6,7 @@ use url::Url;
 
 use crate::error::AppError;
 use crate::state::{AppState, domain_hourly_key};
+use crate::validate;
 use crate::worker::WebmentionJob;
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -38,6 +39,43 @@ pub async fn receive_webmention(
         return Err(AppError::BadRequest(
             "source URL must be http or https".to_string(),
         ));
+    }
+
+    // 1b. Cap the source at 1024, measured on the NORMALISED form because
+    // that is what the public read path returns and what would be stored in
+    // the UNIQUE idempotency index.
+    //
+    // 1024 is the same number the sibling key uses: `validate_target_path`
+    // caps a `target_path` there, and the `comments.target_path` CHECK
+    // constraint (`migrations/schema.sql`) rejects a longer one at write time.
+    // A source URL had neither — only the global `MAX_BODY_SIZE` bounded it —
+    // so it was the odd one out. The same number keeps the two halves of the
+    // idempotency key `(source, target_path)` symmetric and keeps a hostile
+    // multi-KB URL out of a public response and out of the UNIQUE index
+    // (`comments(source_url, target_path)`).
+    //
+    // SCOPE NOTE (deliberate, not an oversight): on the webmention path an
+    // over-long TARGET is still accepted here and fails later at the CHECK
+    // constraint instead (`webmention_oversized_target_hits_the_body_limit`
+    // pins the 202). Only the source is capped at ingress here; fixing the
+    // target is a separate change to the target's validation, not to the
+    // source's.
+    //
+    // REJECT, never truncate: a truncated URL is a DIFFERENT URL, so storing
+    // or serving it would change identity and could point at another page.
+    //
+    // Ordering: this sits before the enqueue and before the domain-quota
+    // charge, so a rejected source costs the sender no quota. `MAX_BODY_SIZE`
+    // still runs first for larger bodies; a source that fits the body limit
+    // but normalises past 1024 is now refused where it was once accepted.
+    // That tightening is intentional.
+    let normalized_source = validate::normalize_http_url(&form.source)
+        .ok_or_else(|| AppError::BadRequest("invalid source URL".to_string()))?;
+    if normalized_source.len() > 1024 {
+        return Err(AppError::BadRequest(format!(
+            "source URL exceeds max length of 1024, got {}",
+            normalized_source.len()
+        )));
     }
 
     // The per-domain hourly cap runs as step 4, after every check that can

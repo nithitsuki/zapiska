@@ -256,6 +256,16 @@ The server checks these values:
 - `content` is sanitized and limited to `MAX_CONTENT_LEN` characters.
 - `comment_type` and `status` use SQLite check constraints.
 - A webmention target has the same parsed origin as `PUBLIC_TARGET_ORIGIN`.
+- A webmention `source` is an absolute HTTP or HTTPS URL with a host, and its
+  WHATWG-canonical form is capped at 1024 characters. An over-cap source is a
+  `400` before the enqueue and before the per-domain quota charge, so it costs
+  the sender nothing. Storage keeps the sender's RAW string, because that raw
+  string is the idempotency key (`comments(source_url, target_path)` plus the
+  `webmention_seen` ledger); the public `GET /api/comments` response returns
+  the canonical form instead. For a non-canonical source the stored string and
+  the returned string therefore differ, by design. A stored value that no
+  longer parses, is not http(s), or lacks a host (written before this rule, or
+  imported) is returned unchanged rather than dropped or nulled.
 
 The ingress reads the CONFIGURED honeypot field (`HONEYPOT_FIELD`, fallback
 `website`). When the operator renames the trap, the served widget emits the

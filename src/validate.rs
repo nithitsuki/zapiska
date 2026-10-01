@@ -84,6 +84,42 @@ pub fn validate_http_url(url_str: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Return the WHATWG-canonical serialisation of an absolute http(s) URL with
+/// a host, or `None` when the input does not parse, is not http/https, or has
+/// no host.
+///
+/// `Url::parse` normalises internally (scheme/host lowercased, `"`/`<`/`>`/
+/// space/control bytes percent-encoded, default ports dropped); `as_str`
+/// exposes that canonical form. This is the ONE normaliser shared by the
+/// receipt handler (canonical-form length cap at ingress) and the public read
+/// path (`source_url` in `GET /api/comments`). A duplicated normaliser would
+/// let the two boundaries drift apart.
+///
+/// WHY THE READ PATH NORMALISES BUT STORAGE DOES NOT: webmention idempotency
+/// is keyed on the RAW sender string — `ON CONFLICT(source_url, target_path)`
+/// (`src/db/repo/comments.rs`) plus the ledger PK `(source, target)`
+/// (`migrations/schema.sql`). Normalising at write time would make every
+/// already-stored raw row miss a later ping for the same source, so the page
+/// would be stored and notified twice. Pre-existing raw rows cannot be ruled
+/// out (the deployment lives on a remote homeserver, no live DB is reachable
+/// from this checkout), so storage keeps the exact bytes the sender sent and
+/// only the PUBLIC response is canonicalised.
+///
+/// CONSEQUENCE (intended, not a defect): for a non-canonical source the stored
+/// string and the returned string differ. `source_url` in `GET /api/comments`
+/// is therefore the canonical URL of the source page, not the byte-for-byte
+/// form field the sender sent.
+pub fn normalize_http_url(url_str: &str) -> Option<String> {
+    let parsed = Url::parse(url_str).ok()?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return None;
+    }
+    if parsed.host_str().is_none_or(|h| h.is_empty()) {
+        return None;
+    }
+    Some(parsed.as_str().to_string())
+}
+
 /// Validate a `github_username` BEFORE it is interpolated into
 /// `https://github.com/{name}` or a DiceBear seed (S2). GitHub's shape:
 /// 1-39 chars, ASCII alphanumeric or single hyphens, never leading/trailing.
@@ -337,6 +373,68 @@ mod tests {
     #[test]
     fn accepts_host_with_port_and_path() {
         assert!(validate_http_url("http://example.com:8080/p").is_ok());
+    }
+
+    // ── normalize_http_url ────────────────────────────────
+
+    #[test]
+    fn normalize_returns_whatwg_canonical_form() {
+        assert_eq!(
+            normalize_http_url("https://REMOTE.Example:443/post/../hello"),
+            Some("https://remote.example/hello".to_string())
+        );
+        assert_eq!(
+            normalize_http_url("http://example.com/a b"),
+            Some("http://example.com/a%20b".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_escapes_html_metacharacters() {
+        // The exposure named in the brief: `"`, `<`, `>` parse fine but must
+        // never survive into a public response verbatim. The canonical form
+        // percent-encodes them.
+        let raw = "https://evil.example/\"><script>alert(1)</script>";
+        let canon = normalize_http_url(raw).expect("http source with hosts parses");
+        assert_eq!(
+            canon,
+            "https://evil.example/%22%3E%3Cscript%3Ealert(1)%3C/script%3E"
+        );
+        assert!(
+            !canon.contains('<') && !canon.contains('>') && !canon.contains('"'),
+            "canonical form must not carry raw HTML metacharacters: {canon}"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_existing_percent_escapes() {
+        // An already-escaped octet is kept as written (the parser does not
+        // re-case it); a raw space is escaped by the parser.
+        assert_eq!(
+            normalize_http_url("https://example.com/a%20b"),
+            Some("https://example.com/a%20b".to_string())
+        );
+        assert_eq!(
+            normalize_http_url("https://example.com/a%3cb"),
+            Some("https://example.com/a%3cb".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_non_http_and_hostless() {
+        for bad in [
+            "javascript:alert(1)",
+            "ftp://example.com/x",
+            "data:text/plain,hello",
+            "/relative/path",
+            "not a url",
+            "https://",
+        ] {
+            assert!(
+                normalize_http_url(bad).is_none(),
+                "{bad:?} must not normalise"
+            );
+        }
     }
 
     // ── validate_github_username (S2) ─────────────────────
