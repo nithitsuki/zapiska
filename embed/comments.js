@@ -70,6 +70,9 @@
   var websitePH     = attr('data-website-placeholder', 'Website (optional)');
   var replyPH       = attr('data-reply-placeholder', 'Write your reply...');
   var pendingText   = attr('data-pending-text', 'Reply submitted (pending approval).');
+  var sourceLabel   = attr('data-source-text', 'Webmention');
+  var webmentionHeadingText = attr('data-webmention-heading-text', 'Webmentions (%d)');
+  var commentHeadingText    = attr('data-comment-heading-text', 'Comments (%d)');
 
   // Behavior flags
   var hideReplies   = boolAttr('data-hide-replies', false);
@@ -119,6 +122,9 @@
         '.nc-avatar { border-radius: 50%; object-fit: cover; flex-shrink: 0; }' +
         '.nc-author { font-weight: 600; text-decoration: none; color: #333; }' +
         '.nc-verified { font-weight: 700; color: #1a7f37; }' +
+        '.nc-source { font-size: 11px; text-decoration: none; color: #666; border: 1px solid #ccc; border-radius: 3px; padding: 0 4px; }' +
+        '.nc-source:hover { text-decoration: underline; }' +
+        '.nc-reactions { font-size: 12px; color: #888; margin-top: 4px; }' +
         '.nc-author:hover { text-decoration: underline; }' +
         '.nc-date { font-size: 12px; color: #888; }' +
         '.nc-body { font-size: 14px; line-height: 1.5; margin-bottom: 6px; }' +
@@ -210,6 +216,30 @@
 
     var meta = document.createElement('div');
     meta.className = 'nc-meta';
+
+    // Webmention: link back to the page that mentioned this one. The W3C
+    // UX is a reply, so the source is the primary link for a mention.
+    //
+    // Degrade quietly. `source_url` arrived in the 0.3.0 read API, so a
+    // site can easily be running a newer widget against an older engine
+    // (or the reverse) during a rolling deploy. An absent source_url must
+    // render exactly as it did before this branch: no link, no placeholder,
+    // no error. Native comments never have one.
+    var sourceUrl = c.comment_type === 'webmention' && c.source_url
+      ? c.source_url
+      : null;
+    if (sourceUrl) {
+      var src = document.createElement('a');
+      src.className = 'nc-source';
+      src.href = sourceUrl;
+      src.target = linkTarget;
+      src.rel = 'noopener noreferrer ugc';
+      // textContent, not innerHTML: the server validated the scheme but
+      // the string is attacker-supplied and must never be parsed as HTML.
+      src.textContent = sourceLabel;
+      src.title = sourceUrl;
+      meta.appendChild(src);
+    }
 
     if (avatar) {
       var img = document.createElement('img');
@@ -460,6 +490,13 @@
       .catch(function () {});
   }
 
+  // Webmentions and native comments render into separate sections, each with
+  // its own heading and count. Splitting here rather than in the host page
+  // means the host does not have to fetch the list a second time just to
+  // learn each row's `comment_type` — the widget already holds it.
+  //
+  // Backwards compatible: a host that sets neither target id gets a single
+  // undifferentiated list, exactly as before this branch.
   function renderTree(comments, total) {
     target.innerHTML = '';
 
@@ -468,17 +505,77 @@
       return;
     }
 
-    if (!hideHeading) {
-      var heading = document.createElement('h2');
-      heading.className = 'nc-heading';
-      heading.textContent = headingText.replace('%d', total || comments.length);
-      target.appendChild(heading);
+    var roots = buildTree(comments);
+
+    var webmentionTarget = sectionTarget('nc-webmentions');
+    var commentTarget = webmentionTarget ? null : target;
+
+    if (!webmentionTarget) {
+      // Single-section mode: no host opt-in, render everything as before.
+      if (!hideHeading) {
+        target.appendChild(makeHeading(headingText, total || comments.length, 'h2'));
+      }
+      roots.forEach(function (node) {
+        target.appendChild(renderNode(node));
+      });
+      return;
     }
 
-    var roots = buildTree(comments);
+    // Split mode: the host supplied two containers.
+    var section = document.getElementById('nc-comments');
+    if (!section) { section = target; }
+
+    if (sectionTarget('nc-comments') === target) {
+      // The host pointed both ids at the same node; degrade to one list.
+      if (!hideHeading) {
+        target.appendChild(makeHeading(headingText, total || comments.length, 'h2'));
+      }
+      roots.forEach(function (node) {
+        target.appendChild(renderNode(node));
+      });
+      return;
+    }
+
+    var wmRoots = [];
+    var cRoots = [];
     roots.forEach(function (node) {
-      target.appendChild(renderNode(node));
+      (node.comment.comment_type === 'webmention' ? wmRoots : cRoots).push(node);
     });
+
+    webmentionTarget.innerHTML = '';
+    if (wmRoots.length) {
+      webmentionTarget.appendChild(
+        makeHeading(webmentionHeadingText, wmRoots.length, 'h4')
+      );
+      wmRoots.forEach(function (node) {
+        webmentionTarget.appendChild(renderNode(node));
+      });
+    }
+
+    section.innerHTML = '';
+    if (cRoots.length) {
+      section.appendChild(makeHeading(commentHeadingText, cRoots.length, 'h4'));
+      cRoots.forEach(function (node) {
+        section.appendChild(renderNode(node));
+      });
+    } else if (!wmRoots.length) {
+      section.appendChild(renderEmpty());
+    }
+  }
+
+  // Returns the container for a webmention section, or null when the host
+  // did not opt into split mode. `target` itself never counts, otherwise
+  // every existing host would be treated as opted in.
+  function sectionTarget(id) {
+    var el = document.getElementById(id);
+    return el && el !== target ? el : null;
+  }
+
+  function makeHeading(text, count, tag) {
+    var el = document.createElement(tag);
+    el.className = 'nc-heading';
+    el.textContent = text.replace('%d', count);
+    return el;
   }
 
   function renderEmpty() {
