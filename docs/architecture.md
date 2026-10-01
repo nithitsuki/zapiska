@@ -405,9 +405,13 @@ caught; a job completing after the second pass's checks is best-effort.
 ## Shutdown
 
 The process listens for Ctrl+C and SIGTERM. The shutdown signal stops the Axum
-server, then the shutdown drain flushes open notification windows as final
-digests. The current shutdown function does not drain the webmention queue or
-wait for worker jobs. Queued webmentions can be lost when the process stops.
+server. The signal also reaches the webmention worker. The worker drains the
+jobs that are already in its queue, then exits. The drain stops when the queue
+is empty or a bounded deadline expires. A job that fails with a transient
+fetch error re-enters the queue with bounded backoff (three attempts); a
+terminal error is dropped on the first try. The shutdown drain then flushes
+open notification windows as final digests. The database lock releases after
+the drains.
 
 ## Errors
 

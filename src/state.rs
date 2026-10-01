@@ -12,7 +12,7 @@ use crate::github::{GitHubLookup, RealGitHub};
 use crate::language::LanguageGate;
 use crate::notify::NotificationBatcher;
 #[cfg(feature = "webmentions")]
-use crate::worker::JobSender;
+use crate::worker::{JobSender, WorkerHandle};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -26,6 +26,16 @@ pub struct AppState {
     pub language: LanguageGate,
     #[cfg(feature = "webmentions")]
     pub wm_sender: JobSender,
+    /// Shutdown signal for the webmention worker. `main` clones it out
+    /// before `build_app` consumes the state, then sends `true` after
+    /// `serve` returns so the worker drains its buffered jobs and exits.
+    #[cfg(feature = "webmentions")]
+    pub wm_shutdown: tokio::sync::watch::Sender<bool>,
+    /// Join handle of the spawned webmention worker, awaited (bounded) at
+    /// shutdown after the drain signal. See [`WorkerHandle`] for why it is
+    /// not a bare `JoinHandle`.
+    #[cfg(feature = "webmentions")]
+    pub wm_worker: WorkerHandle,
     /// Shared HTTP client for operator-configured endpoints only (GitHub
     /// enrichment, moderation webhooks, notification delivery, Turnstile).
     /// Untrusted author/webmention URL fetches must go through SafeFetcher,
@@ -162,11 +172,16 @@ impl AppState {
         notifier: Arc<NotificationBatcher>,
         language: LanguageGate,
     ) -> Result<Self, String> {
-        // Webmention worker — only spawned when the feature is enabled.
+        // Webmention worker — only spawned when the feature is enabled. The
+        // worker holds a sender clone (retry requeue); the watch channel is
+        // how `main` tells it to drain and stop.
         #[cfg(feature = "webmentions")]
         let (wm_sender, wm_receiver) = crate::worker::channel(config.worker_backlog);
         #[cfg(feature = "webmentions")]
-        crate::worker::spawn_worker_for_state(
+        let (wm_shutdown, wm_shutdown_rx) = tokio::sync::watch::channel(false);
+        #[cfg(feature = "webmentions")]
+        let wm_worker = crate::worker::spawn_worker_for_state(
+            wm_sender.clone(),
             wm_receiver,
             repo.clone(),
             http_client.clone(),
@@ -178,6 +193,7 @@ impl AppState {
             config
                 .worker_moderation_sink(&http_client)
                 .map(|s| Arc::new(s) as Arc<dyn crate::moderation::ModerationSink>),
+            wm_shutdown_rx,
         );
 
         Ok(AppState {
@@ -189,6 +205,10 @@ impl AppState {
             language,
             #[cfg(feature = "webmentions")]
             wm_sender,
+            #[cfg(feature = "webmentions")]
+            wm_shutdown,
+            #[cfg(feature = "webmentions")]
+            wm_worker,
             http_client,
             limiter: Arc::new(Limiter::new()),
         })

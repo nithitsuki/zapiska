@@ -68,6 +68,15 @@ All notable changes to zapiska are documented here. The format follows
   the webhook URL asserts exactly one signed emission from a processor
   carrying the shared builder's sink — the spawned worker itself stays
   idle, so the spawn call's argument plumbing is review-only).
+- The webmention worker retries transient failures with bounded exponential
+  backoff (three attempts, 250 ms base, a capped delay, and a total time
+  budget). A retryable failure is a fetch timeout, a connect/transport
+  error, a 5xx response, or transient storage contention. A terminal
+  failure (missing backlink, any 4xx including 410, bad or blocked URL,
+  redirect/body cap, other storage or moderation error) is dropped on the
+  first try. A retry re-enters the bounded queue with `try_send` only, so a
+  full backlog drops the job with a warning instead of blocking the only
+  consumer.
 
 ### Changed
 
@@ -143,6 +152,13 @@ All notable changes to zapiska are documented here. The format follows
 
 ### Fixed
 
+- Graceful shutdown now drains the webmention queue instead of losing it.
+  The worker watches a shutdown signal, processes the jobs that are already
+  buffered until the queue is empty or a bounded deadline expires, and
+  `main` waits for that drain before it releases the database lock. A
+  restart no longer loses queued webmentions. `SPEC.md` and
+  `docs/architecture.md` lost the old "does not drain" statement in the
+  same change.
 - Webmention gone/resurrection lifecycle: a re-ping after `gone`
   re-fetches and re-verifies instead of deleting blindly — gone→alive is
   representable again (a restored backlink brings the comment back as

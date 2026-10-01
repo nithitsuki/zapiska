@@ -223,6 +223,8 @@ mod tests {
             notifier: Arc::new(crate::notify::NotificationBatcher::default()),
             language: crate::language::LanguageGate::default(),
             wm_sender,
+            wm_shutdown: tokio::sync::watch::channel(false).0,
+            wm_worker: Arc::new(std::sync::Mutex::new(None)),
             http_client: { reqwest::Client::builder().build().unwrap() },
             limiter: Arc::new(Limiter::new()),
         };

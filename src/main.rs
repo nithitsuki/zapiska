@@ -41,6 +41,12 @@ async fn main() {
     // awaited (narrow: it must finish inside the second drain's tail).
     let drain_notifier = Arc::clone(&state.notifier);
     let drain_client = state.http_client.clone();
+    // Webmention worker drain: clone the shutdown signal and the join handle
+    // beside the notifier handles, before `build_app` consumes the state.
+    #[cfg(feature = "webmentions")]
+    let drain_worker = Arc::clone(&state.wm_worker);
+    #[cfg(feature = "webmentions")]
+    let worker_shutdown = state.wm_shutdown.clone();
 
     let app = build_app(state);
 
@@ -54,6 +60,23 @@ async fn main() {
     .with_graceful_shutdown(shutdown::shutdown_signal())
     .await
     .expect("server exited with error");
+    // Worker first: signal the drain, then bounded-await the worker so its
+    // queued jobs finish (and any notifications they push land) before the
+    // notification drain flushes open windows.
+    #[cfg(feature = "webmentions")]
+    {
+        let _ = worker_shutdown.send(true);
+        // Take the handle out of the shared slot first, so the mutex guard
+        // is dropped before the await below.
+        let worker_handle = drain_worker.lock().expect("worker handle lock").take();
+        if let Some(handle) = worker_handle {
+            let _ = tokio::time::timeout(
+                zapiska::worker::DRAIN_TIMEOUT + std::time::Duration::from_secs(5),
+                handle,
+            )
+            .await;
+        }
+    }
     drain_notifier.drain(&drain_client).await;
     drain_notifier.drain(&drain_client).await;
     zapiska::state::release_db_lock(&database_path);

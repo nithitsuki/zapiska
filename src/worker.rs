@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::Client;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::db::repo::{NewComment, NewWebmentionSeen, Repo, WebmentionSeen};
@@ -45,8 +47,133 @@ pub struct WebmentionJob {
 pub type JobSender = mpsc::Sender<WebmentionJob>;
 type JobReceiver = mpsc::Receiver<WebmentionJob>;
 
+/// Shared handle to the spawned worker task. `JoinHandle` is not `Clone`,
+/// and every handler's `AppState` is: the slot behind an `Arc<Mutex<..>>`
+/// lets all clones observe one handle, and `main` takes and awaits it once
+/// at shutdown.
+pub type WorkerHandle = Arc<std::sync::Mutex<Option<JoinHandle<()>>>>;
+
 pub fn channel(buffer: usize) -> (JobSender, JobReceiver) {
     mpsc::channel(buffer)
+}
+
+// ── Retry and drain policy ──────────────────────────────────
+
+/// Total processing attempts for one job: the first try plus two retries.
+/// Matches the notification channel's bounded-retry budget.
+const MAX_JOB_ATTEMPTS: u32 = 3;
+
+/// First retry delay. Attempt N waits `RETRY_BASE_DELAY * 2^(N-1)`.
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+
+/// Cap on one retry delay.
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// Total time one job may spend retrying before the worker drops it. This
+/// is a safety net over the attempt cap; with [`MAX_JOB_ATTEMPTS`] and
+/// [`RETRY_BASE_DELAY`] the two retry waits sum below it.
+const RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(120);
+
+/// Bound on the shutdown drain: buffered jobs get this long to finish
+/// before the worker exits. `main` waits for this bound plus a small tail.
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Ceiling on the retry bookkeeping map. A retry that is dropped after
+/// re-enqueue (a full queue) is never seen again, so its record would
+/// linger. The key comes from an unauthenticated caller, so the map must
+/// not grow without limit.
+const MAX_TRACKED_RETRIES: usize = 4096;
+
+/// Bounded exponential-backoff policy for retryable jobs. Production uses
+/// [`RetryPolicy::DEFAULT`]; tests build short-delay policies to prove the
+/// attempt cap and the total-budget branch without slow sleeps.
+#[derive(Clone, Copy, Debug)]
+pub struct RetryPolicy {
+    max_attempts: u32,
+    base_delay: Duration,
+    max_delay: Duration,
+    total_budget: Duration,
+}
+
+impl RetryPolicy {
+    pub const DEFAULT: Self = Self {
+        max_attempts: MAX_JOB_ATTEMPTS,
+        base_delay: RETRY_BASE_DELAY,
+        max_delay: RETRY_MAX_DELAY,
+        total_budget: RETRY_TOTAL_BUDGET,
+    };
+
+    /// Wait before retry `attempt` (1-based), or `None` when the attempt cap
+    /// or the total time budget is exhausted (drop the job).
+    fn delay_for(&self, attempt: u32, elapsed: Duration) -> Option<Duration> {
+        if attempt >= self.max_attempts {
+            return None;
+        }
+        let shift = (attempt - 1).min(31);
+        let delay = self
+            .base_delay
+            .saturating_mul(1u32 << shift)
+            .min(self.max_delay);
+        if elapsed.saturating_add(delay) > self.total_budget {
+            return None;
+        }
+        Some(delay)
+    }
+}
+
+/// Per-pair retry bookkeeping for the worker loop: the number of retryable
+/// failures already seen, and when the first one happened (for the budget).
+#[derive(Clone, Copy)]
+struct RetryState {
+    attempts: u32,
+    first_failure: Instant,
+}
+
+/// Classify a processing error. `true` means a retry can succeed.
+///
+/// Retryable: fetch timeout/connect/transport errors, body-read failures,
+/// 5xx responses, and transient storage contention (`Busy`/`Io`).
+/// Terminal: a missing backlink, every 4xx (410 included), bad/blocked
+/// URLs, redirect and body caps, and all other storage/moderation errors.
+fn is_retryable(err: &WorkerError) -> bool {
+    match err {
+        WorkerError::Fetch(e) => fetch_is_retryable(e),
+        WorkerError::Repo(crate::db::RepoError::Busy(_))
+        | WorkerError::Repo(crate::db::RepoError::Io(_)) => true,
+        _ => false,
+    }
+}
+
+fn fetch_is_retryable(err: &FetchError) -> bool {
+    match err {
+        FetchError::Http { .. } | FetchError::BodyRead { .. } => true,
+        FetchError::HttpStatus { status, .. } => *status >= 500,
+        FetchError::Gone(_)
+        | FetchError::InvalidUrl { .. }
+        | FetchError::NoHost(_)
+        | FetchError::UnsupportedScheme(_)
+        | FetchError::Blocked(_)
+        | FetchError::TooManyRedirects(_)
+        | FetchError::TooLarge { .. } => false,
+    }
+}
+
+/// Drop the retry record with the oldest first-failure timestamp. Runs only
+/// when the map hits [`MAX_TRACKED_RETRIES`], so the linear scan is off the
+/// hot path.
+fn evict_oldest_retry(retries: &mut HashMap<(String, String), RetryState>) {
+    let oldest = retries
+        .iter()
+        .min_by_key(|(_, state)| state.first_failure)
+        .map(|(key, _)| key.clone());
+    match oldest {
+        Some(key) => {
+            retries.remove(&key);
+        }
+        None => {
+            tracing::warn!("retry map at capacity but empty; nothing to evict");
+        }
+    }
 }
 
 /// Spawn a no-op worker that drains the channel (for tests / scaffolding).
@@ -62,8 +189,11 @@ pub fn spawn_worker(mut rx: JobReceiver) {
 /// stays a thin drain: build the production processor (its `SafeFetcher`
 /// door carries the configured fetch timeout, its moderation sink carries
 /// the configured webhook URL + signing secret) and pump jobs through it.
+/// The worker holds a sender clone so retries can re-enter the queue; the
+/// shutdown signal, not channel close, ends the loop.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_worker_for_state(
+    tx: JobSender,
     rx: JobReceiver,
     repo: Repo,
     client: Client,
@@ -73,7 +203,8 @@ pub fn spawn_worker_for_state(
     timeout_ms: u64,
     notifier: Arc<NotificationBatcher>,
     moderation_sink: Option<Arc<dyn ModerationSink>>,
-) {
+    shutdown: watch::Receiver<bool>,
+) -> WorkerHandle {
     let processor = WebmentionProcessor::new(
         repo,
         github,
@@ -84,21 +215,150 @@ pub fn spawn_worker_for_state(
         Duration::from_millis(timeout_ms),
         moderation_sink,
     );
-    spawn_worker_for_processor(rx, processor);
+    let handle = spawn_worker_for_processor(tx, rx, processor, shutdown, RetryPolicy::DEFAULT);
+    Arc::new(std::sync::Mutex::new(Some(handle)))
 }
 
 /// Spawn the loop over an explicit processor. Tests inject a mock fetcher
 /// (and a counting moderation sink) here; production arrives via
 /// [`spawn_worker_for_state`].
-pub fn spawn_worker_for_processor(mut rx: JobReceiver, processor: WebmentionProcessor) {
+///
+/// The loop takes `tx` as well as `rx` because a retryable failure
+/// re-enters the SAME bounded channel. The worker is the only consumer, so
+/// the requeue must be `try_send` (see [`process_one`]): an awaited `send`
+/// on a full queue would block the task that drains it.
+pub fn spawn_worker_for_processor(
+    tx: JobSender,
+    mut rx: JobReceiver,
+    processor: WebmentionProcessor,
+    mut shutdown: watch::Receiver<bool>,
+    policy: RetryPolicy,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(job) = rx.recv().await {
-            if let Err(e) = processor.process(&job).await {
-                tracing::warn!(source = %job.source, target = %job.target, err = %e, "webmention worker error");
+        let mut retries: HashMap<(String, String), RetryState> = HashMap::new();
+        loop {
+            tokio::select! {
+                biased;
+                // Shutdown wins over new work: stop accepting jobs, drain
+                // what is already buffered, then exit. The channel never
+                // closes on its own because every handler holds a sender,
+                // so the explicit signal (not `recv` returning `None`) ends
+                // the loop.
+                _ = shutdown.changed() => {
+                    drain_bounded(&mut rx, &processor, DRAIN_TIMEOUT).await;
+                    break;
+                }
+                maybe = rx.recv() => {
+                    match maybe {
+                        Some(job) => process_one(&tx, &processor, &job, &mut retries, policy).await,
+                        None => break,
+                    }
+                }
             }
         }
-        tracing::warn!("webmention worker channel closed");
-    });
+        tracing::warn!("webmention worker stopped");
+    })
+}
+
+/// Process one job and schedule a bounded retry on a transient failure.
+///
+/// A retry re-enters the same bounded queue with `try_send` only. The
+/// worker is the only consumer, so an awaiting `send` on a full queue would
+/// block the one task that could drain it and wedge the process. A full
+/// queue drops the retry with a warning.
+async fn process_one(
+    tx: &JobSender,
+    processor: &WebmentionProcessor,
+    job: &WebmentionJob,
+    retries: &mut HashMap<(String, String), RetryState>,
+    policy: RetryPolicy,
+) {
+    let key = (job.source.clone(), job.target.clone());
+    match processor.process(job).await {
+        Ok(()) => {
+            retries.remove(&key);
+        }
+        Err(e) if is_retryable(&e) => {
+            let (attempt, elapsed) = {
+                // Bound the map. The key comes from an unauthenticated
+                // caller, and a retry dropped after re-enqueue (a full
+                // queue) is never observed again, so without this the map
+                // grows without limit.
+                if retries.len() >= MAX_TRACKED_RETRIES {
+                    evict_oldest_retry(retries);
+                }
+                let state = retries.entry(key.clone()).or_insert_with(|| RetryState {
+                    attempts: 0,
+                    first_failure: Instant::now(),
+                });
+                state.attempts += 1;
+                (state.attempts, state.first_failure.elapsed())
+            };
+            match policy.delay_for(attempt, elapsed) {
+                Some(delay) => {
+                    // Never sleep in this loop. This task is the only
+                    // consumer, so a sleep here stalls every other queued
+                    // webmention for the whole backoff window, and delays
+                    // the shutdown signal by the same amount because the
+                    // `select!` cannot observe it mid-sleep. Hand the delay
+                    // to a detached task that sleeps and then re-enqueues
+                    // with `try_send`.
+                    let tx = tx.clone();
+                    let job = job.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        if tx.try_send(job).is_err() {
+                            tracing::warn!("webmention retry dropped: worker queue full");
+                        }
+                    });
+                }
+                None => {
+                    retries.remove(&key);
+                    tracing::warn!(
+                        source = %job.source,
+                        target = %job.target,
+                        attempt,
+                        err = %e,
+                        "webmention retries exhausted; dropping job"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            retries.remove(&key);
+            tracing::warn!(
+                source = %job.source,
+                target = %job.target,
+                err = %e,
+                "webmention worker error (terminal)"
+            );
+        }
+    }
+}
+
+/// Drain the jobs already buffered in the channel, awaiting each one.
+/// Bounded: tests inject a short timeout to prove the deadline; production
+/// uses [`DRAIN_TIMEOUT`]. Jobs still buffered when the deadline expires
+/// are abandoned (best-effort, like the notification drain).
+pub(crate) async fn drain_bounded(
+    rx: &mut JobReceiver,
+    processor: &WebmentionProcessor,
+    timeout: Duration,
+) {
+    let _ = tokio::time::timeout(timeout, drain_inner(rx, processor)).await;
+}
+
+async fn drain_inner(rx: &mut JobReceiver, processor: &WebmentionProcessor) {
+    while let Ok(job) = rx.try_recv() {
+        if let Err(e) = processor.process(&job).await {
+            tracing::warn!(
+                source = %job.source,
+                target = %job.target,
+                err = %e,
+                "webmention drain error"
+            );
+        }
+    }
 }
 
 // ── WebmentionProcessor ───────────────────────────────────────
@@ -574,20 +834,39 @@ mod t20_processor_tests {
 
     /// Canned source fetcher: scripted responses per URL, no network. The
     /// worker-level replacement for `allow_loopback=true` — tests steer the
-    /// fetch outcome instead of loosening the production SSRF check.
+    /// fetch outcome instead of loosening the production SSRF check. The
+    /// extra variants let retry/drain tests inject a transient 5xx, a fixed
+    /// number of failures, or a fetch that waits on a gate.
+    #[derive(Clone)]
     enum MockOutcome {
         Html(String),
         Gone,
+        Status(u16),
+        /// Fail with `status` for the first `remaining` calls, then return
+        /// `html`.
+        Flaky {
+            remaining: u32,
+            status: u16,
+            html: String,
+        },
+        /// Wait for `gate` before returning `html`, so a test can hold a job
+        /// in flight while it queues another and signals shutdown.
+        Gated {
+            gate: Arc<tokio::sync::Notify>,
+            html: String,
+        },
     }
 
     struct MockFetcher {
         responses: Mutex<HashMap<String, MockOutcome>>,
+        calls: Mutex<HashMap<String, u32>>,
     }
 
     impl MockFetcher {
         fn with_html(url: &str, html: String) -> Arc<Self> {
             let mock = Self {
                 responses: Mutex::new(HashMap::new()),
+                calls: Mutex::new(HashMap::new()),
             };
             mock.set_html(url, html);
             Arc::new(mock)
@@ -606,27 +885,100 @@ mod t20_processor_tests {
                 .expect("mock lock")
                 .insert(url.to_string(), MockOutcome::Gone);
         }
+
+        fn set_status(&self, url: &str, status: u16) {
+            self.responses
+                .lock()
+                .expect("mock lock")
+                .insert(url.to_string(), MockOutcome::Status(status));
+        }
+
+        fn set_flaky(&self, url: &str, failures: u32, html: String) {
+            self.responses.lock().expect("mock lock").insert(
+                url.to_string(),
+                MockOutcome::Flaky {
+                    remaining: failures,
+                    status: 503,
+                    html,
+                },
+            );
+        }
+
+        fn set_gated(&self, url: &str, gate: Arc<tokio::sync::Notify>, html: String) {
+            self.responses
+                .lock()
+                .expect("mock lock")
+                .insert(url.to_string(), MockOutcome::Gated { gate, html });
+        }
+
+        fn calls_for(&self, url: &str) -> u32 {
+            self.calls
+                .lock()
+                .expect("mock lock")
+                .get(url)
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    fn ok_doc(url: &str, body: String) -> Result<FetchedDoc, FetchError> {
+        let parsed = Url::parse(url).map_err(|e| FetchError::InvalidUrl {
+            url: url.to_string(),
+            source: e,
+        })?;
+        Ok(FetchedDoc {
+            url: parsed,
+            status: reqwest::StatusCode::OK,
+            bytes: body.as_bytes().to_vec(),
+            // Single parse, like the production door: every consumer reads
+            // this one tree.
+            doc: scraper::Html::parse_document(&body),
+        })
     }
 
     #[async_trait::async_trait]
     impl SourceFetcher for MockFetcher {
         async fn fetch_source(&self, url: &str) -> Result<FetchedDoc, FetchError> {
-            match self.responses.lock().expect("mock lock").get(url) {
-                Some(MockOutcome::Html(body)) => {
-                    let parsed = Url::parse(url).map_err(|e| FetchError::InvalidUrl {
-                        url: url.to_string(),
-                        source: e,
-                    })?;
-                    Ok(FetchedDoc {
-                        url: parsed,
-                        status: reqwest::StatusCode::OK,
-                        bytes: body.as_bytes().to_vec(),
-                        // Single parse, like the production door: every
-                        // consumer reads this one tree.
-                        doc: scraper::Html::parse_document(body),
-                    })
-                }
+            *self
+                .calls
+                .lock()
+                .expect("mock lock")
+                .entry(url.to_string())
+                .or_insert(0) += 1;
+            let outcome = self.responses.lock().expect("mock lock").get(url).cloned();
+            match outcome {
+                Some(MockOutcome::Html(body)) => ok_doc(url, body),
                 Some(MockOutcome::Gone) => Err(FetchError::Gone(url.to_string())),
+                Some(MockOutcome::Status(status)) => Err(FetchError::HttpStatus {
+                    url: url.to_string(),
+                    status,
+                }),
+                Some(MockOutcome::Flaky {
+                    remaining,
+                    status,
+                    html,
+                }) => {
+                    if remaining > 0 {
+                        self.responses.lock().expect("mock lock").insert(
+                            url.to_string(),
+                            MockOutcome::Flaky {
+                                remaining: remaining - 1,
+                                status,
+                                html,
+                            },
+                        );
+                        Err(FetchError::HttpStatus {
+                            url: url.to_string(),
+                            status,
+                        })
+                    } else {
+                        ok_doc(url, html)
+                    }
+                }
+                Some(MockOutcome::Gated { gate, html }) => {
+                    gate.notified().await;
+                    ok_doc(url, html)
+                }
                 None => Err(FetchError::HttpStatus {
                     url: url.to_string(),
                     status: 404,
@@ -668,6 +1020,144 @@ mod t20_processor_tests {
             source: source.to_string(),
             target: target.to_string(),
         }
+    }
+
+    /// Poll `f` until it is true or the bound (4 s) expires.
+    async fn wait_until(mut f: impl FnMut() -> bool, what: &str) {
+        for _ in 0..400 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Poll until the worker stored the comment for `(source, path)`.
+    async fn wait_for_comment(repo: &Repo, source: &str, path: &str) {
+        for _ in 0..400 {
+            if repo
+                .get_comment_by_source_and_target(source, path)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for comment {source} -> {path}");
+    }
+
+    /// Poll until `url` has been fetched at least `n` times.
+    async fn wait_for_calls(mock: &Arc<MockFetcher>, url: &str, n: u32) {
+        for _ in 0..400 {
+            if mock.calls_for(url) >= n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {n} calls to {url}");
+    }
+
+    /// A policy whose first retry waits far longer than any test waits.
+    /// A consumer that sleeps through its own backoff would blow every
+    /// deadline below; one that hands the delay to a detached task does not.
+    fn slow_retry_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_secs(30),
+            max_delay: Duration::from_secs(60),
+            total_budget: Duration::from_secs(300),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_retry_delay_does_not_block_the_consumer() {
+        // Regression: the worker is the only consumer, so sleeping through
+        // its own backoff window would stall every other queued webmention
+        // for that window. Job A fails retryably and parks a 30s retry. Job
+        // B must still be processed now.
+        let (repo, _dir) = setup_repo("t21-retry-not-blocking.db");
+        let stuck = "https://src.example/stuck";
+        let moving = "https://src.example/moving";
+        let mock = MockFetcher::with_html(
+            moving,
+            mention_html("https://nithitsuki.com/blog/t21-mv", "moved on"),
+        );
+        mock.set_flaky(
+            stuck,
+            1,
+            mention_html("https://nithitsuki.com/blog/t21-stuck", "later"),
+        );
+        let (tx, rx) = channel(4);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let _worker = spawn_worker_for_processor(
+            tx.clone(),
+            rx,
+            processor(repo.clone(), mock.clone(), None),
+            shutdown_rx,
+            slow_retry_policy(),
+        );
+
+        tx.send(job(stuck, "https://nithitsuki.com/blog/t21-stuck"))
+            .await
+            .unwrap();
+        // Job A has now failed once, so a 30s retry is pending.
+        wait_for_calls(&mock, stuck, 1).await;
+
+        tx.send(job(moving, "https://nithitsuki.com/blog/t21-mv"))
+            .await
+            .unwrap();
+
+        // Must land far inside the 30s backoff window.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_comment(&repo, moving, "/blog/t21-mv"),
+        )
+        .await
+        .expect("a pending retry must not stall the only consumer");
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_observed_while_a_retry_delay_is_pending() {
+        // Regression: a sleep inside the consumer loop hides the shutdown
+        // signal until it ends, so `main`'s bounded await would expire and
+        // the queued job would be lost. With a 30s retry pending, the
+        // worker must still exit promptly.
+        let (repo, _dir) = setup_repo("t21-retry-shutdown.db");
+        let stuck = "https://src.example/shutdown-stuck";
+        let mock = MockFetcher::with_html(
+            stuck,
+            mention_html("https://nithitsuki.com/blog/t21-sd", "later"),
+        );
+        mock.set_flaky(
+            stuck,
+            1,
+            mention_html("https://nithitsuki.com/blog/t21-sd", "later"),
+        );
+        let (tx, rx) = channel(4);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = spawn_worker_for_processor(
+            tx.clone(),
+            rx,
+            processor(repo.clone(), mock.clone(), None),
+            shutdown_rx,
+            slow_retry_policy(),
+        );
+
+        tx.send(job(stuck, "https://nithitsuki.com/blog/t21-sd"))
+            .await
+            .unwrap();
+        wait_for_calls(&mock, stuck, 1).await;
+        let _ = shutdown_tx.send(true);
+
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("shutdown must not wait out a pending retry delay")
+            .expect("worker task must not panic");
     }
 
     #[test]
@@ -1011,19 +1501,349 @@ mod t20_processor_tests {
         let target = "https://nithitsuki.com/blog/t20-spawn";
         let mock = MockFetcher::with_html(source, mention_html(target, "Spawned"));
         let (tx, rx) = channel(8);
-        spawn_worker_for_processor(rx, processor(repo.clone(), mock, None));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        spawn_worker_for_processor(
+            tx.clone(),
+            rx,
+            processor(repo.clone(), mock, None),
+            shutdown_rx,
+            RetryPolicy::DEFAULT,
+        );
         tx.send(job(source, target)).await.unwrap();
-        let mut comment = None;
-        for _ in 0..100 {
-            comment = repo
-                .get_comment_by_source_and_target(source, "/blog/t20-spawn")
-                .await
-                .unwrap();
-            if comment.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        wait_for_comment(&repo, source, "/blog/t20-spawn").await;
+    }
+
+    // ── E3: retry and shutdown-drain behavior ──────────────
+
+    #[test]
+    fn retry_delay_is_exponential_bounded_and_budgeted() {
+        // The default policy is exponential and never exceeds the attempt
+        // cap: attempts 1 and 2 get 250 ms and 500 ms, attempt 3 is dropped.
+        let policy = RetryPolicy::DEFAULT;
+        assert_eq!(policy.delay_for(1, Duration::ZERO), Some(RETRY_BASE_DELAY));
+        assert_eq!(
+            policy.delay_for(2, Duration::ZERO),
+            Some(RETRY_BASE_DELAY * 2)
+        );
+        assert_eq!(
+            policy.delay_for(MAX_JOB_ATTEMPTS, Duration::ZERO),
+            None,
+            "attempt cap drops the job"
+        );
+
+        // Cap branch: the delay never exceeds `max_delay` even at high
+        // attempts (uses a policy wide enough to reach it).
+        let capped = RetryPolicy {
+            max_attempts: 40,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_millis(250),
+            total_budget: Duration::from_secs(3600),
+        };
+        assert_eq!(capped.delay_for(20, Duration::ZERO), Some(capped.max_delay));
+
+        // Budget branch: a spent budget drops the job even with attempts
+        // left.
+        let budgeted = RetryPolicy {
+            max_attempts: 10,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(10),
+            total_budget: Duration::from_millis(150),
+        };
+        assert_eq!(
+            budgeted.delay_for(2, Duration::from_millis(120)),
+            None,
+            "elapsed + delay over the budget drops the job"
+        );
+    }
+
+    #[test]
+    fn error_classification_is_terminal_or_retryable() {
+        // Terminal: a missing backlink, 410, other 4xx, bad/blocked URLs,
+        // caps, and non-contention storage errors.
+        assert!(!is_retryable(&WorkerError::NoBacklink));
+        assert!(!is_retryable(&WorkerError::InvalidTarget("x".to_string())));
+        assert!(!is_retryable(&WorkerError::OriginMismatch("x".to_string())));
+        assert!(!is_retryable(&WorkerError::Fetch(FetchError::Gone(
+            "x".to_string()
+        ))));
+        for status in [400, 403, 404, 410, 429] {
+            assert!(
+                !is_retryable(&WorkerError::Fetch(FetchError::HttpStatus {
+                    url: "https://x.example/".to_string(),
+                    status,
+                })),
+                "4xx {status} is terminal"
+            );
         }
-        assert!(comment.is_some(), "spawned worker must process the job");
+        assert!(!is_retryable(&WorkerError::Fetch(FetchError::Blocked(
+            "x".to_string()
+        ))));
+        assert!(!is_retryable(&WorkerError::Fetch(FetchError::TooLarge {
+            url: "x".to_string(),
+            limit: 10,
+        })));
+        assert!(!is_retryable(&WorkerError::Repo(
+            crate::db::RepoError::Constraint("x".to_string())
+        )));
+
+        // Retryable: 5xx and transient storage contention.
+        for status in [500, 502, 503, 504] {
+            assert!(
+                is_retryable(&WorkerError::Fetch(FetchError::HttpStatus {
+                    url: "https://x.example/".to_string(),
+                    status,
+                })),
+                "5xx {status} is retryable"
+            );
+        }
+        assert!(is_retryable(&WorkerError::Repo(
+            crate::db::RepoError::Busy("x".to_string())
+        )));
+        assert!(is_retryable(&WorkerError::Repo(crate::db::RepoError::Io(
+            "x".to_string()
+        ))));
+    }
+
+    #[tokio::test]
+    async fn transport_error_is_retryable() {
+        // A real reqwest transport error (invalid URL, no network touched)
+        // classifies as retryable through the `FetchError::Http` arm.
+        let source = Client::new()
+            .get("http://")
+            .send()
+            .await
+            .expect_err("invalid URL must fail to send");
+        assert!(is_retryable(&WorkerError::Fetch(FetchError::Http {
+            url: "http://".to_string(),
+            source,
+        })));
+    }
+
+    #[tokio::test]
+    async fn retryable_error_is_retried_then_succeeds() {
+        // A transient 503 is retried once and then succeeds; the comment
+        // lands and the URL is fetched exactly twice.
+        let (repo, _dir) = setup_repo("t21-retry-success.db");
+        let source = "https://src.example/retry";
+        let target = "https://nithitsuki.com/blog/t21-retry";
+        let mock = MockFetcher::with_html(source, mention_html(target, "Recovered"));
+        mock.set_flaky(source, 1, mention_html(target, "Recovered"));
+        let (tx, rx) = channel(4);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let _worker = spawn_worker_for_processor(
+            tx.clone(),
+            rx,
+            processor(repo.clone(), mock.clone(), None),
+            shutdown_rx,
+            RetryPolicy::DEFAULT,
+        );
+
+        tx.send(job(source, target)).await.unwrap();
+        wait_for_comment(&repo, source, "/blog/t21-retry").await;
+        assert_eq!(
+            mock.calls_for(source),
+            2,
+            "one retry after the transient 503"
+        );
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn terminal_no_backlink_is_not_retried() {
+        // `NoBacklink` is terminal: the source is fetched once, no retry.
+        let (repo, _dir) = setup_repo("t21-terminal-nobacklink.db");
+        let source = "https://src.example/noback";
+        let target = "https://nithitsuki.com/blog/t21-noback";
+        let mock = MockFetcher::with_html(source, unlink_html());
+        let (tx, rx) = channel(4);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let _worker = spawn_worker_for_processor(
+            tx.clone(),
+            rx,
+            processor(repo.clone(), mock.clone(), None),
+            shutdown_rx,
+            RetryPolicy::DEFAULT,
+        );
+
+        tx.send(job(source, target)).await.unwrap();
+        // Wait past one retry delay: a retry would show as a second fetch.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            mock.calls_for(source),
+            1,
+            "terminal NoBacklink must not retry"
+        );
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn gone_is_not_retried() {
+        // A 410 is handled inside `process` (confirm-gone) and returns Ok:
+        // the source is fetched exactly once and no retry is scheduled.
+        let (repo, _dir) = setup_repo("t21-terminal-gone.db");
+        let source = "https://src.example/gone";
+        let target = "https://nithitsuki.com/blog/t21-gone";
+        let mock = MockFetcher::with_html(source, mention_html(target, "x"));
+        mock.set_gone(source);
+        let (tx, rx) = channel(4);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let _worker = spawn_worker_for_processor(
+            tx.clone(),
+            rx,
+            processor(repo.clone(), mock.clone(), None),
+            shutdown_rx,
+            RetryPolicy::DEFAULT,
+        );
+
+        tx.send(job(source, target)).await.unwrap();
+        wait_until(|| mock.calls_for(source) == 1, "the gone fetch").await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(mock.calls_for(source), 1, "410 must not retry");
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn retry_cap_drops_the_job_after_max_attempts() {
+        // A permanently failing source is attempted exactly
+        // `MAX_JOB_ATTEMPTS` times, then dropped. The worker stays alive.
+        let (repo, _dir) = setup_repo("t21-retry-cap.db");
+        let bad = "https://src.example/always-503";
+        let good = "https://src.example/after";
+        let target = "https://nithitsuki.com/blog/t21-cap";
+        let mock = MockFetcher::with_html(bad, mention_html(target, "x"));
+        mock.set_status(bad, 503);
+        mock.set_html(good, mention_html(target, "After"));
+        let (tx, rx) = channel(8);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let _worker = spawn_worker_for_processor(
+            tx.clone(),
+            rx,
+            processor(repo.clone(), mock.clone(), None),
+            shutdown_rx,
+            RetryPolicy::DEFAULT,
+        );
+
+        tx.send(job(bad, target)).await.unwrap();
+        // Two retry waits (250 ms + 500 ms) plus slack.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            mock.calls_for(bad),
+            MAX_JOB_ATTEMPTS,
+            "the attempt cap must stop the retries"
+        );
+
+        // The worker is not wedged: a healthy job still flows.
+        tx.send(job(good, target)).await.unwrap();
+        wait_for_comment(&repo, good, "/blog/t21-cap").await;
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn full_queue_drops_the_retry_instead_of_deadlocking() {
+        // The worker is the only consumer and the retry re-enters the same
+        // bounded channel. With the single slot held by another job, the
+        // retry must be dropped (try_send), never awaited (which would
+        // deadlock). Bounded so a regression fails fast instead of hanging.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (repo, _dir) = setup_repo("t21-full.db");
+            let flaky = "https://src.example/flaky";
+            let queued = "https://src.example/queued";
+            let target = "https://nithitsuki.com/blog/t21-full";
+            let mock = MockFetcher::with_html(flaky, mention_html(target, "Flaky"));
+            mock.set_flaky(flaky, 1, mention_html(target, "Flaky"));
+            mock.set_html(queued, mention_html(target, "Queued"));
+            let (tx, rx) = channel(1);
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            let _worker = spawn_worker_for_processor(
+                tx.clone(),
+                rx,
+                processor(repo.clone(), mock.clone(), None),
+                shutdown_rx,
+                RetryPolicy::DEFAULT,
+            );
+
+            // The worker takes `flaky`; the send of `queued` fills the one
+            // remaining slot while the worker backs off before its retry.
+            tx.send(job(flaky, target)).await.unwrap();
+            tx.send(job(queued, target)).await.unwrap();
+
+            // `queued` must still be processed: the dropped retry must not
+            // block the consumer.
+            wait_for_comment(&repo, queued, "/blog/t21-full").await;
+            assert_eq!(
+                mock.calls_for(flaky),
+                1,
+                "the retry was dropped on the full queue, not sent"
+            );
+            let _ = shutdown_tx.send(true);
+        })
+        .await
+        .expect("worker must not deadlock when a retry meets a full queue");
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_buffered_jobs_before_exit() {
+        // A job buffered behind an in-flight job is still processed after
+        // the shutdown signal fires: the drain arm of the select must run.
+        let (repo, _dir) = setup_repo("t21-drain-shutdown.db");
+        let slow = "https://src.example/slow";
+        let fast = "https://src.example/fast";
+        let target = "https://nithitsuki.com/blog/t21-drain";
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let mock = MockFetcher::with_html(fast, mention_html(target, "Fast"));
+        mock.set_gated(slow, gate.clone(), mention_html(target, "Slow"));
+        let (tx, rx) = channel(4);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let _worker = spawn_worker_for_processor(
+            tx.clone(),
+            rx,
+            processor(repo.clone(), mock.clone(), None),
+            shutdown_rx,
+            RetryPolicy::DEFAULT,
+        );
+
+        tx.send(job(slow, target)).await.unwrap();
+        // The worker is now blocked inside the gated fetch.
+        wait_until(|| mock.calls_for(slow) == 1, "the slow fetch to start").await;
+        // Buffer the fast job behind it, then signal shutdown.
+        tx.send(job(fast, target)).await.unwrap();
+        shutdown_tx.send(true).unwrap();
+        // Release the slow fetch so the loop can reach the shutdown arm.
+        gate.notify_one();
+
+        wait_for_comment(&repo, fast, "/blog/t21-drain").await;
+    }
+
+    #[tokio::test]
+    async fn drain_respects_its_deadline() {
+        // A drain over a job that never completes must return at the
+        // deadline, not run forever. The outer bound turns a missing
+        // deadline into a clean failure instead of a hung suite.
+        let (repo, _dir) = setup_repo("t21-drain-deadline.db");
+        let source = "https://src.example/hang";
+        let target = "https://nithitsuki.com/blog/t21-hang";
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let mock = MockFetcher::with_html(source, mention_html(target, "x"));
+        mock.set_gated(source, gate.clone(), mention_html(target, "x"));
+        let p = processor(repo.clone(), mock.clone(), None);
+        let (tx, mut rx) = channel(1);
+        tx.try_send(job(source, target)).unwrap();
+
+        let start = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            drain_bounded(&mut rx, &p, Duration::from_millis(100)),
+        )
+        .await;
+        assert!(outcome.is_ok(), "drain must return, not run forever");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "drain should use its budget: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "drain must respect its deadline: {elapsed:?}"
+        );
     }
 }

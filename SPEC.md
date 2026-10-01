@@ -523,10 +523,17 @@ The author lookup still builds escaped filter expressions.
 ## Shutdown
 
 The process listens for Ctrl+C and SIGTERM.
-The shutdown handler stops the Axum server, then drains open notification
-windows as final digests (twice, to catch a webmention job finishing
-mid-drain). It does not drain the webmention queue: queued webmentions can
-be lost when the process stops. The database lock releases after the drain.
+The shutdown handler stops the Axum server.
+It then signals the webmention worker and waits for a bounded drain.
+The worker processes the jobs that are already in the queue.
+It stops when the queue is empty or the drain deadline expires.
+Then the shutdown handler drains open notification windows as final digests
+(twice, to catch a job that finishes mid-drain).
+The database lock releases after the drains.
+
+A job that fails a fetch with a transient error re-enters the queue with
+bounded backoff. The worker drops the job after three attempts, or when the
+queue is full.
 
 ## Error response
 
