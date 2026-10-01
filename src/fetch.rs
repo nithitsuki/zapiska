@@ -236,6 +236,10 @@ impl SafeFetcher {
 /// *how* a URL becomes bytes. Production wires [`SafeFetcher`] (the guarded
 /// door); tests inject a canned mock with no network instead of loosening
 /// the loopback check — no boolean flips a security invariant anymore.
+// `double_must_use` (clippy 1.99) fires on the `#[must_use]` that
+// `async_trait` generates on a method already returning a must-use type.
+// The attribute is the macro's, not ours; the lint has no fix on our side.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait SourceFetcher: Send + Sync {
     /// Fetch `url` as a source page, returning the single-parse document.

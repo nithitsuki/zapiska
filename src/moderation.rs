@@ -271,6 +271,8 @@ pub fn reaction_created_payload(
 /// `decide` is the sync (10 s POST + `action` parse) adapter. Both share the
 /// payload builders above, so the two copy-pasted sync loops and four
 /// hand-built payload blocks collapse here. Tests use [`CountingSink`].
+/// See the note on `SourceFetcher` for the `double_must_use` allow.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait ModerationSink: Send + Sync {
     /// Fire-and-forget delivery. Never fails the caller.

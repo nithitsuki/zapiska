@@ -12,6 +12,9 @@ pub struct Profile {
 }
 
 /// Trait for resolving a GitHub username into profile info.
+// See the note on `SourceFetcher`: `double_must_use` fires on an attribute
+// `async_trait` generates, not on code written here.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait GitHubLookup: Send + Sync {
     async fn lookup(&self, username: &str) -> Option<Profile>;
