@@ -205,7 +205,19 @@ The webmention endpoint is available only with the `webmentions` feature.
     B10).
 
 The queue capacity is `WORKER_BACKLOG`, with a default of `64`. A full queue
-returns `503`. A source update keeps the existing moderation status.
+returns `503`. A queue whose consumer has died also returns `503`, never
+`500`: the server is up, but the dependency is not. A source update keeps the
+existing moderation status.
+
+A consumer death fails loud. The worker supervisor classifies the exit. On a
+panic it logs at error level with the `source` and `target` of the in-flight
+job, then publishes the exit to `main` and to `/healthz`. `/healthz` answers
+`503` while the worker is dead. `main` stops serving, runs the normal drain
+sequence, releases the database lock, and exits non-zero. The shipped
+orchestrators restart on a non-zero exit (`restart: unless-stopped` in
+`docker-compose.yml`, `Restart=on-failure` in `deploy/zapiska.service`), so a
+broken server becomes a self-healing one. A graceful exit keeps the zero exit
+status.
 
 SafeFetcher permits HTTP and HTTPS. It resolves and checks the source
 before the request and re-checks every redirect target with a fresh
@@ -416,6 +428,10 @@ fetch error re-enters the queue with bounded backoff (three attempts); a
 terminal error is dropped on the first try. The shutdown drain then flushes
 open notification windows as final digests. The database lock releases after
 the drains.
+
+The signal is not the only shutdown trigger. A dead webmention consumer stops
+the server earlier, through the same drain path, and then exits non-zero. The
+webmention flow above describes that path.
 
 ## Errors
 

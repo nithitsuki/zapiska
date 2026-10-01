@@ -263,7 +263,7 @@ Errors:
 - `415` for a content type other than `application/x-www-form-urlencoded`.
 - `422` for a missing form field.
 - `429` for the webmention rate or domain limit.
-- `503` when the worker queue is full.
+- `503` when the worker queue is full or the worker is not running.
 
 The worker fetches the source, checks the backlink, parses h-entry data, and
 upserts the comment by source and target path. The first sighting can trigger
@@ -699,6 +699,10 @@ Return `ok` with status `200` when the database answers `SELECT 1` through
 the pool. Return `unavailable` with status `503` when it does not: the
 endpoint is a readiness probe, and the Docker and compose health checks flip
 unhealthy on database failure instead of staying green.
+
+Also return `unavailable` with status `503` when the webmention worker has
+died. A dead worker fails every webmention request, so the server is not
+ready. A graceful worker exit at shutdown is not a failure.
 
 ### GET /api/version
 

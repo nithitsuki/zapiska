@@ -126,7 +126,10 @@ pub async fn receive_webmention(
             AppError::ServiceUnavailable("worker backlog full, retry later".to_string())
         }
         TrySendError::Closed(_) => {
-            AppError::Internal("webmention worker is not running".to_string())
+            // The receiver was dropped: the consumer is dead, not the
+            // server. The dependency is down, so this is a 503 (retry
+            // later), never a 500. Restarting the process fixes it.
+            AppError::ServiceUnavailable("webmention worker is not running".to_string())
         }
     })?;
 
@@ -283,6 +286,7 @@ mod tests {
             wm_sender,
             wm_shutdown: tokio::sync::watch::channel(false).0,
             wm_worker: Arc::new(std::sync::Mutex::new(None)),
+            wm_worker_exit: tokio::sync::watch::channel(None::<crate::worker::WorkerExit>).1,
             http_client: { reqwest::Client::builder().build().unwrap() },
             limiter: Arc::new(Limiter::new()),
         };
@@ -297,5 +301,30 @@ mod tests {
         let body2 = "source=https://b.example/post&target=https://nithitsuki.com/x";
         let resp = app.clone().oneshot(form_request(body2)).await.unwrap();
         assert_eq!(resp.status(), 503);
+    }
+
+    #[tokio::test]
+    async fn dead_worker_returns_503_not_500() {
+        // A dead consumer drops its receiver, so `try_send` returns `Closed`.
+        // The server is up and the dependency is not: this must be 503, not
+        // 500. Shut the real worker down and await it so the receiver is
+        // provably gone before the request.
+        let (state, _dir) = test_state();
+        state.wm_shutdown.send(true).unwrap();
+        let worker = state.wm_worker.lock().expect("worker handle lock").take();
+        if let Some(worker) = worker {
+            tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+                .await
+                .expect("worker must stop after the shutdown signal")
+                .expect("supervisor must not panic");
+        }
+        let app = build_app(state);
+        let body = "source=https://remote.example/post&target=https://nithitsuki.com/blog/dead";
+        let resp = app.oneshot(form_request(body)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            503,
+            "a dead worker is a 503 (dependency down), never a 500"
+        );
     }
 }

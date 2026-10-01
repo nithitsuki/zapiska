@@ -47,11 +47,30 @@ pub struct WebmentionJob {
 pub type JobSender = mpsc::Sender<WebmentionJob>;
 type JobReceiver = mpsc::Receiver<WebmentionJob>;
 
-/// Shared handle to the spawned worker task. `JoinHandle` is not `Clone`,
-/// and every handler's `AppState` is: the slot behind an `Arc<Mutex<..>>`
-/// lets all clones observe one handle, and `main` takes and awaits it once
-/// at shutdown.
-pub type WorkerHandle = Arc<std::sync::Mutex<Option<JoinHandle<()>>>>;
+/// Why the webmention consumer task ended. The supervisor task (see
+/// [`spawn_worker_for_processor`]) resolves to this value, so a consumer
+/// death is programmatically observable — by `main` at shutdown and by the
+/// shared watch channel `/healthz` reads — not only logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerExit {
+    /// The loop exited on the shutdown signal or channel close: normal.
+    Graceful,
+    /// The consumer task panicked. `source`/`target` are the job that was in
+    /// flight, when known.
+    Panicked {
+        source: Option<String>,
+        target: Option<String>,
+        message: String,
+    },
+    /// The consumer task was aborted (not observed today; fail loudly anyway).
+    Cancelled,
+}
+
+/// Shared handle to the spawned worker supervisor task. `JoinHandle` is not
+/// `Clone`, and every handler's `AppState` is: the slot behind an
+/// `Arc<Mutex<..>>` lets all clones observe one handle, and `main` takes and
+/// awaits it once at shutdown.
+pub type WorkerHandle = Arc<std::sync::Mutex<Option<JoinHandle<WorkerExit>>>>;
 
 pub fn channel(buffer: usize) -> (JobSender, JobReceiver) {
     mpsc::channel(buffer)
@@ -205,6 +224,7 @@ pub fn spawn_worker_for_state(
     notifier: Arc<NotificationBatcher>,
     moderation_sink: Option<Arc<dyn ModerationSink>>,
     shutdown: watch::Receiver<bool>,
+    exit_tx: watch::Sender<Option<WorkerExit>>,
 ) -> WorkerHandle {
     let processor = WebmentionProcessor::new(
         repo,
@@ -216,7 +236,8 @@ pub fn spawn_worker_for_state(
         Duration::from_millis(timeout_ms),
         moderation_sink,
     );
-    let handle = spawn_worker_for_processor(tx, rx, processor, shutdown, RetryPolicy::DEFAULT);
+    let handle =
+        spawn_worker_for_processor(tx, rx, processor, shutdown, RetryPolicy::DEFAULT, exit_tx);
     Arc::new(std::sync::Mutex::new(Some(handle)))
 }
 
@@ -228,37 +249,114 @@ pub fn spawn_worker_for_state(
 /// re-enters the SAME bounded channel. The worker is the only consumer, so
 /// the requeue must be `try_send` (see [`process_one`]): an awaited `send`
 /// on a full queue would block the task that drains it.
+///
+/// A panic in the consumer must not stop at a bare `JoinHandle` that nobody
+/// reads, so the returned task is a SUPERVISOR: it awaits the consumer,
+/// classifies the outcome as a [`WorkerExit`], logs a panic at error level
+/// with the in-flight job, and publishes the outcome on `exit_tx`.
+///
+/// Per-job panic ISOLATION (catching a panic inside [`process_one`] and
+/// continuing) is a deliberate NON-GOAL. A panic inside the consumer means
+/// the single-consumer invariant is already broken. Swallowing it would
+/// leave a half-dead worker that looks healthy, so this fails loud instead:
+/// `main` exits non-zero and the orchestrator restarts the process.
 pub fn spawn_worker_for_processor(
     tx: JobSender,
     mut rx: JobReceiver,
     processor: WebmentionProcessor,
     mut shutdown: watch::Receiver<bool>,
     policy: RetryPolicy,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut retries: HashMap<(String, String), RetryState> = HashMap::new();
-        loop {
-            tokio::select! {
-                biased;
-                // Shutdown wins over new work: stop accepting jobs, drain
-                // what is already buffered, then exit. The channel never
-                // closes on its own because every handler holds a sender,
-                // so the explicit signal (not `recv` returning `None`) ends
-                // the loop.
-                _ = shutdown.changed() => {
-                    drain_bounded(&mut rx, &processor, DRAIN_TIMEOUT).await;
-                    break;
-                }
-                maybe = rx.recv() => {
-                    match maybe {
-                        Some(job) => process_one(&tx, &processor, &job, &mut retries, policy).await,
-                        None => break,
+    exit_tx: watch::Sender<Option<WorkerExit>>,
+) -> JoinHandle<WorkerExit> {
+    // The job currently inside `process_one`. The consumer sets it before the
+    // call and clears it after; a panic leaves it set, so the supervisor can
+    // name the job that died. A `std::sync::Mutex` guard is never held across
+    // an await.
+    let in_flight: Arc<std::sync::Mutex<Option<(String, String)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
+    let consumer = {
+        let in_flight = Arc::clone(&in_flight);
+        tokio::spawn(async move {
+            let mut retries: HashMap<(String, String), RetryState> = HashMap::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    // Shutdown wins over new work: stop accepting jobs, drain
+                    // what is already buffered, then exit. The channel never
+                    // closes on its own because every handler holds a sender,
+                    // so the explicit signal (not `recv` returning `None`) ends
+                    // the loop.
+                    _ = shutdown.changed() => {
+                        drain_bounded(&mut rx, &processor, DRAIN_TIMEOUT).await;
+                        break;
+                    }
+                    maybe = rx.recv() => {
+                        match maybe {
+                            Some(job) => {
+                                *in_flight.lock().expect("in-flight lock") =
+                                    Some((job.source.clone(), job.target.clone()));
+                                process_one(&tx, &processor, &job, &mut retries, policy).await;
+                                *in_flight.lock().expect("in-flight lock") = None;
+                            }
+                            None => break,
+                        }
                     }
                 }
             }
-        }
-        tracing::warn!("webmention worker stopped");
+            tracing::warn!("webmention worker stopped");
+        })
+    };
+
+    tokio::spawn(async move {
+        let exit = match consumer.await {
+            Ok(()) => WorkerExit::Graceful,
+            Err(join) if join.is_panic() => {
+                let (source, target) = in_flight
+                    .lock()
+                    .expect("in-flight lock")
+                    .clone()
+                    .map_or((None, None), |(s, t)| (Some(s), Some(t)));
+                let message = panic_message(join);
+                tracing::error!(
+                    source = source.as_deref().unwrap_or("<unknown>"),
+                    target = target.as_deref().unwrap_or("<unknown>"),
+                    panic = %message,
+                    "webmention worker panicked; the consumer is dead and every \
+                     future webmention will fail until the process restarts"
+                );
+                WorkerExit::Panicked {
+                    source,
+                    target,
+                    message,
+                }
+            }
+            Err(join) => {
+                debug_assert!(join.is_cancelled());
+                tracing::error!("webmention worker task was cancelled");
+                WorkerExit::Cancelled
+            }
+        };
+        // Publish before returning. `main` watches this to stop serving, and
+        // `/healthz` reads the latest value. No receiver (some tests) is fine:
+        // the send error is expected and ignored.
+        let _ = exit_tx.send(Some(exit.clone()));
+        exit
     })
+}
+
+/// Extract a `JoinError`'s panic payload into a `String`. The payload is
+/// whatever the panicking task passed to `panic!`, usually a `String` or a
+/// `&'static str`. Any other payload becomes a fixed placeholder.
+fn panic_message(err: tokio::task::JoinError) -> String {
+    let payload = err.into_panic();
+    match payload.downcast::<String>() {
+        Ok(text) => *text,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(text) => (*text).to_string(),
+            Err(_) => "panic payload was not a string".to_string(),
+        },
+    }
 }
 
 /// Process one job and schedule a bounded retry on a transient failure.
@@ -856,6 +954,9 @@ mod t20_processor_tests {
             gate: Arc<tokio::sync::Notify>,
             html: String,
         },
+        /// Panic on fetch, to force a panic inside the consumer and prove the
+        /// supervisor reports and logs it.
+        Panic,
     }
 
     struct MockFetcher {
@@ -910,6 +1011,13 @@ mod t20_processor_tests {
                 .lock()
                 .expect("mock lock")
                 .insert(url.to_string(), MockOutcome::Gated { gate, html });
+        }
+
+        fn set_panic(&self, url: &str) {
+            self.responses
+                .lock()
+                .expect("mock lock")
+                .insert(url.to_string(), MockOutcome::Panic);
         }
 
         fn calls_for(&self, url: &str) -> u32 {
@@ -980,6 +1088,7 @@ mod t20_processor_tests {
                     gate.notified().await;
                     ok_doc(url, html)
                 }
+                Some(MockOutcome::Panic) => panic!("mock fetcher exploded for {url}"),
                 None => Err(FetchError::HttpStatus {
                     url: url.to_string(),
                     status: 404,
@@ -1074,6 +1183,13 @@ mod t20_processor_tests {
         }
     }
 
+    /// Exit sender for tests that do not assert on the published signal. The
+    /// dropped receiver is fine: the supervisor ignores a send with no
+    /// receiver.
+    fn exit_tx() -> watch::Sender<Option<WorkerExit>> {
+        watch::channel(None).0
+    }
+
     #[tokio::test]
     async fn pending_retry_delay_does_not_block_the_consumer() {
         // Regression: the worker is the only consumer, so sleeping through
@@ -1100,6 +1216,7 @@ mod t20_processor_tests {
             processor(repo.clone(), mock.clone(), None),
             shutdown_rx,
             slow_retry_policy(),
+            exit_tx(),
         );
 
         tx.send(job(stuck, "https://nithitsuki.com/blog/t21-stuck"))
@@ -1147,6 +1264,7 @@ mod t20_processor_tests {
             processor(repo.clone(), mock.clone(), None),
             shutdown_rx,
             slow_retry_policy(),
+            exit_tx(),
         );
 
         tx.send(job(stuck, "https://nithitsuki.com/blog/t21-sd"))
@@ -1155,10 +1273,198 @@ mod t20_processor_tests {
         wait_for_calls(&mock, stuck, 1).await;
         let _ = shutdown_tx.send(true);
 
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        let exit = tokio::time::timeout(Duration::from_secs(2), worker)
             .await
             .expect("shutdown must not wait out a pending retry delay")
-            .expect("worker task must not panic");
+            .expect("supervisor must not panic");
+        assert_eq!(
+            exit,
+            WorkerExit::Graceful,
+            "the shutdown signal must land on the graceful path"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_reports_graceful_on_normal_shutdown() {
+        // The supervisor must resolve to `Graceful` on the ordinary path, so
+        // `Panicked`/`Cancelled` are provably distinct rather than the only
+        // reachable outcome.
+        let (repo, _dir) = setup_repo("t21-exit-graceful.db");
+        let mock = MockFetcher::with_html(
+            "https://src.example/graceful",
+            mention_html("https://nithitsuki.com/blog/t21-graceful", "x"),
+        );
+        let (tx, rx) = channel(4);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (exit_tx, exit_rx) = watch::channel(None);
+        let worker = spawn_worker_for_processor(
+            tx,
+            rx,
+            processor(repo, mock, None),
+            shutdown_rx,
+            RetryPolicy::DEFAULT,
+            exit_tx,
+        );
+
+        shutdown_tx.send(true).unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("worker must exit after the shutdown signal")
+            .expect("supervisor must not itself panic");
+        assert_eq!(exit, WorkerExit::Graceful);
+        assert_eq!(
+            *exit_rx.borrow(),
+            Some(WorkerExit::Graceful),
+            "the published signal must match the returned outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn panicking_consumer_reports_panicked_with_job_identity() {
+        // A panic inside the consumer must be observable, must distinguish
+        // itself from a graceful exit, and must carry the in-flight job's
+        // source and target — the same values the supervisor logs at error
+        // level.
+        let (repo, _dir) = setup_repo("t21-exit-panic.db");
+        let source = "https://src.example/boom";
+        let target = "https://nithitsuki.com/blog/t21-boom";
+        let mock = MockFetcher::with_html(source, String::new());
+        mock.set_panic(source);
+        let (tx, rx) = channel(4);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (exit_tx, exit_rx) = watch::channel(None);
+        let worker = spawn_worker_for_processor(
+            tx.clone(),
+            rx,
+            processor(repo, mock, None),
+            shutdown_rx,
+            RetryPolicy::DEFAULT,
+            exit_tx,
+        );
+
+        tx.send(job(source, target)).await.unwrap();
+
+        let exit = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("a panicking consumer must not hang the supervisor")
+            .expect("the supervisor itself must not panic");
+        match &exit {
+            WorkerExit::Panicked {
+                source: s,
+                target: t,
+                message,
+            } => {
+                assert_eq!(s.as_deref(), Some(source), "panic must name the source");
+                assert_eq!(t.as_deref(), Some(target), "panic must name the target");
+                assert!(
+                    message.contains("mock fetcher exploded"),
+                    "panic payload must survive: {message}"
+                );
+            }
+            other => panic!("a panic must not read as {other:?}"),
+        }
+        assert_eq!(
+            *exit_rx.borrow(),
+            Some(exit.clone()),
+            "the shared signal (what /healthz and main read) must carry the panic"
+        );
+        assert_ne!(exit, WorkerExit::Graceful);
+        assert_ne!(exit, WorkerExit::Cancelled);
+    }
+
+    /// Process-global capture of `tracing` output. A global subscriber is
+    /// used instead of a thread-local one on purpose: `tracing` caches each
+    /// callsite's interest against the global max level, and a thread-local
+    /// default set after the supervisor's callsite first registered can miss
+    /// the event when the full suite runs in parallel. The global subscriber
+    /// makes callsite registration see the ERROR level, so the assertion is
+    /// deterministic. The buffer is shared, so the test matches on values
+    /// unique to its own panic.
+    static CAPTURE_LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+    static CAPTURE_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+    #[derive(Clone, Copy)]
+    struct GlobalCaptureWriter;
+
+    impl std::io::Write for GlobalCaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            CAPTURE_LOG
+                .lock()
+                .expect("capture lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GlobalCaptureWriter {
+        type Writer = GlobalCaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            GlobalCaptureWriter
+        }
+    }
+
+    fn capture_log() -> String {
+        String::from_utf8_lossy(&CAPTURE_LOG.lock().expect("capture lock")).into_owned()
+    }
+
+    #[tokio::test]
+    async fn panicked_worker_logs_error_with_job_identity() {
+        // Install the capture subscriber once for the process. This test may
+        // run before or after the other panic test and in parallel with it,
+        // so it asserts on substrings unique to its own job below.
+        CAPTURE_INSTALLED.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(GlobalCaptureWriter)
+                .with_max_level(tracing::Level::ERROR)
+                .with_target(false)
+                .without_time()
+                .finish();
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+        CAPTURE_LOG.lock().expect("capture lock").clear();
+
+        let (repo, _dir) = setup_repo("t21-log-panic.db");
+        let source = "https://src.example/log-boom";
+        let target = "https://nithitsuki.com/blog/t21-log-boom";
+        let mock = MockFetcher::with_html(source, String::new());
+        mock.set_panic(source);
+        let (tx, rx) = channel(4);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = spawn_worker_for_processor(
+            tx.clone(),
+            rx,
+            processor(repo, mock, None),
+            shutdown_rx,
+            RetryPolicy::DEFAULT,
+            exit_tx(),
+        );
+        tx.send(job(source, target)).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("supervisor must resolve after the panic")
+            .expect("supervisor must not panic");
+
+        let log = capture_log();
+        // `with_max_level(ERROR)` filters the subscriber to ERROR: a warn or
+        // info log for this panic would leave the buffer without the line,
+        // so the substring assertions below also prove the level.
+        assert!(
+            log.contains("ERROR"),
+            "panic must log at error level: {log}"
+        );
+        assert!(
+            log.contains("webmention worker panicked"),
+            "log must name the death: {log}"
+        );
+        assert!(log.contains(source), "log must carry the source: {log}");
+        assert!(log.contains(target), "log must carry the target: {log}");
+        assert!(
+            log.contains("mock fetcher exploded"),
+            "log must carry the panic payload: {log}"
+        );
     }
 
     #[test]
@@ -1509,6 +1815,7 @@ mod t20_processor_tests {
             processor(repo.clone(), mock, None),
             shutdown_rx,
             RetryPolicy::DEFAULT,
+            exit_tx(),
         );
         tx.send(job(source, target)).await.unwrap();
         wait_for_comment(&repo, source, "/blog/t20-spawn").await;
@@ -1637,6 +1944,7 @@ mod t20_processor_tests {
             processor(repo.clone(), mock.clone(), None),
             shutdown_rx,
             RetryPolicy::DEFAULT,
+            exit_tx(),
         );
 
         tx.send(job(source, target)).await.unwrap();
@@ -1664,6 +1972,7 @@ mod t20_processor_tests {
             processor(repo.clone(), mock.clone(), None),
             shutdown_rx,
             RetryPolicy::DEFAULT,
+            exit_tx(),
         );
 
         tx.send(job(source, target)).await.unwrap();
@@ -1694,6 +2003,7 @@ mod t20_processor_tests {
             processor(repo.clone(), mock.clone(), None),
             shutdown_rx,
             RetryPolicy::DEFAULT,
+            exit_tx(),
         );
 
         tx.send(job(source, target)).await.unwrap();
@@ -1722,6 +2032,7 @@ mod t20_processor_tests {
             processor(repo.clone(), mock.clone(), None),
             shutdown_rx,
             RetryPolicy::DEFAULT,
+            exit_tx(),
         );
 
         tx.send(job(bad, target)).await.unwrap();
@@ -1761,6 +2072,7 @@ mod t20_processor_tests {
                 processor(repo.clone(), mock.clone(), None),
                 shutdown_rx,
                 RetryPolicy::DEFAULT,
+                exit_tx(),
             );
 
             // The worker takes `flaky`; the send of `queued` fills the one
@@ -1801,6 +2113,7 @@ mod t20_processor_tests {
             processor(repo.clone(), mock.clone(), None),
             shutdown_rx,
             RetryPolicy::DEFAULT,
+            exit_tx(),
         );
 
         tx.send(job(slow, target)).await.unwrap();

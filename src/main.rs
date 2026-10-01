@@ -47,17 +47,43 @@ async fn main() {
     let drain_worker = Arc::clone(&state.wm_worker);
     #[cfg(feature = "webmentions")]
     let worker_shutdown = state.wm_shutdown.clone();
+    // Prompt worker-death observation: the supervisor publishes its exit
+    // here. `main` stops serving as soon as this changes, so a dead consumer
+    // is noticed during the run, not only when the process is asked to stop.
+    #[cfg(feature = "webmentions")]
+    let worker_exit = state.wm_worker_exit.clone();
 
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .expect("failed to bind address");
+    // Graceful shutdown fires on the OS signal OR on webmention-worker death.
+    // A dead consumer means the webmention queue is permanently dead: every
+    // POST would 503 until a restart, so stop serving now.
+    #[cfg(feature = "webmentions")]
+    let shutdown_signal = {
+        let mut worker_exit = worker_exit.clone();
+        async move {
+            // A worker that already died before this receiver was cloned must
+            // not be missed: `changed` only fires on changes after the clone.
+            if worker_exit.borrow().is_some() {
+                return;
+            }
+            tokio::select! {
+                _ = shutdown::shutdown_signal() => {}
+                _ = worker_exit.changed() => {}
+            }
+        }
+    };
+    #[cfg(not(feature = "webmentions"))]
+    let shutdown_signal = shutdown::shutdown_signal();
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown::shutdown_signal())
+    .with_graceful_shutdown(shutdown_signal)
     .await
     .expect("server exited with error");
     // Worker first: signal the drain, then bounded-await the worker so its
@@ -80,4 +106,25 @@ async fn main() {
     drain_notifier.drain(&drain_client).await;
     drain_notifier.drain(&drain_client).await;
     zapiska::state::release_db_lock(&database_path);
+
+    // A dead consumer must fail the process. Both shipped orchestrators
+    // restart on a non-zero exit: `docker-compose.yml` uses
+    // `restart: unless-stopped` and `deploy/zapiska.service` uses
+    // `Restart=on-failure`. Exiting non-zero turns a silently broken server
+    // into a self-healing one. This runs AFTER the graceful sequence above
+    // (worker drain, notification drain, `release_db_lock`) so the database
+    // lock is released cleanly and the next start claims it fresh. A graceful
+    // worker exit is the normal path and does not exit non-zero.
+    #[cfg(feature = "webmentions")]
+    if worker_exit
+        .borrow()
+        .as_ref()
+        .is_some_and(|exit| !matches!(exit, zapiska::worker::WorkerExit::Graceful))
+    {
+        tracing::error!(
+            exit = ?worker_exit.borrow().as_ref(),
+            "webmention worker died; exiting non-zero so the orchestrator restarts the process"
+        );
+        std::process::exit(1);
+    }
 }

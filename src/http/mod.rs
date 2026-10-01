@@ -138,17 +138,32 @@ async fn comments_js(
     path = "/healthz",
     responses(
         (status = 200, description = "Server is healthy", body = String),
-        (status = 503, description = "Database is unreachable", body = String),
+        (status = 503, description = "Database is unreachable or a background worker is not running", body = String),
     ),
 )]
 async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     // Readiness, not just liveness: the orchestrator must see failures when
     // the database stops answering (full disk, corruption, lost volume).
-    if db_is_healthy(&state.pool).await {
-        (StatusCode::OK, "ok")
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+    if !db_is_healthy(&state.pool).await {
+        return (StatusCode::SERVICE_UNAVAILABLE, "unavailable");
     }
+    // A dead webmention consumer is also a readiness failure: the server
+    // still answers, but every webmention POST would fail until a restart.
+    // The supervisor publishes the exit; `None` means the worker is running.
+    // A graceful exit (shutdown) is not a failure.
+    #[cfg(feature = "webmentions")]
+    if state
+        .wm_worker_exit
+        .borrow()
+        .as_ref()
+        .is_some_and(|exit| !matches!(exit, crate::worker::WorkerExit::Graceful))
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "webmention worker not running",
+        );
+    }
+    (StatusCode::OK, "ok")
 }
 
 /// Bounded `SELECT 1` probe shared by `healthz` and the admin status
@@ -396,6 +411,39 @@ mod tests {
             resp.status(),
             503,
             "healthz must fail when the database does not answer"
+        );
+    }
+
+    #[cfg(feature = "webmentions")]
+    #[tokio::test]
+    async fn healthz_reports_503_when_worker_dead_and_ok_when_alive() {
+        use crate::worker::WorkerExit;
+
+        let (mut state, _dir) = test_state();
+        // A live worker (the state's real one) must not fail readiness.
+        let resp = build_app(state.clone())
+            .oneshot(request(axum::http::Method::GET, "/healthz"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "a live worker must not fail healthz");
+
+        // Drive the published exit to the dead value and expect 503.
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        state.wm_worker_exit = rx;
+        tx.send(Some(WorkerExit::Panicked {
+            source: Some("https://src.example/x".to_string()),
+            target: Some("https://nithitsuki.com/x".to_string()),
+            message: "boom".to_string(),
+        }))
+        .unwrap();
+        let resp = build_app(state)
+            .oneshot(request(axum::http::Method::GET, "/healthz"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            503,
+            "a dead webmention worker must fail readiness"
         );
     }
 

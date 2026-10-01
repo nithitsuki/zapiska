@@ -12,7 +12,7 @@ use crate::github::{GitHubLookup, RealGitHub};
 use crate::language::LanguageGate;
 use crate::notify::NotificationBatcher;
 #[cfg(feature = "webmentions")]
-use crate::worker::{JobSender, WorkerHandle};
+use crate::worker::{JobSender, WorkerExit, WorkerHandle};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -36,6 +36,12 @@ pub struct AppState {
     /// not a bare `JoinHandle`.
     #[cfg(feature = "webmentions")]
     pub wm_worker: WorkerHandle,
+    /// Latest webmention-worker exit, published by the worker supervisor.
+    /// `None` while the worker runs. `/healthz` reports 503 once this reads
+    /// a non-graceful exit, and `main` watches it to stop serving and exit
+    /// non-zero.
+    #[cfg(feature = "webmentions")]
+    pub wm_worker_exit: tokio::sync::watch::Receiver<Option<WorkerExit>>,
     /// Shared HTTP client for operator-configured endpoints only (GitHub
     /// enrichment, moderation webhooks, notification delivery, Turnstile).
     /// Untrusted author/webmention URL fetches must go through SafeFetcher,
@@ -179,6 +185,11 @@ impl AppState {
         let (wm_sender, wm_receiver) = crate::worker::channel(config.worker_backlog);
         #[cfg(feature = "webmentions")]
         let (wm_shutdown, wm_shutdown_rx) = tokio::sync::watch::channel(false);
+        // The supervisor publishes its `WorkerExit` here. `main` watches the
+        // receiver to stop serving the moment the consumer dies, and the
+        // receiver stored on `AppState` lets `/healthz` report 503.
+        #[cfg(feature = "webmentions")]
+        let (wm_worker_exit_tx, wm_worker_exit) = tokio::sync::watch::channel(None::<WorkerExit>);
         #[cfg(feature = "webmentions")]
         let wm_worker = crate::worker::spawn_worker_for_state(
             wm_sender.clone(),
@@ -194,6 +205,7 @@ impl AppState {
                 .worker_moderation_sink(&http_client)
                 .map(|s| Arc::new(s) as Arc<dyn crate::moderation::ModerationSink>),
             wm_shutdown_rx,
+            wm_worker_exit_tx,
         );
 
         Ok(AppState {
@@ -209,6 +221,8 @@ impl AppState {
             wm_shutdown,
             #[cfg(feature = "webmentions")]
             wm_worker,
+            #[cfg(feature = "webmentions")]
+            wm_worker_exit,
             http_client,
             limiter: Arc::new(Limiter::new()),
         })

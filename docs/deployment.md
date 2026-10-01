@@ -478,6 +478,9 @@ readiness probe, not just liveness: a wedged database (full disk,
 corruption, lost volume) answers `unavailable` with status `503`, and the
 Docker and compose health checks flip unhealthy accordingly.
 
+The probe also answers `503` after the webmention worker dies. The process
+then exits non-zero, and the configured restart policy restarts it.
+
 ## Startup integrity gate
 
 | Variable | Default | Description |
