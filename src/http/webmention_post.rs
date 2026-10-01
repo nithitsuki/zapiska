@@ -40,25 +40,8 @@ pub async fn receive_webmention(
         ));
     }
 
-    // 1b. Per-domain hourly cap for webmentions.
-    if state.config.max_webmentions_per_domain_per_hour > 0 {
-        if let Some(host) = source_url.host_str() {
-            let key = domain_hourly_key(host);
-            if !state
-                .limiter
-                .check_and_increment(&key, state.config.max_webmentions_per_domain_per_hour)
-            {
-                return Err(AppError::RateLimited {
-                    retry_after_secs: 3600,
-                    reason: format!(
-                        "hourly webmention limit ({}) reached for domain '{host}'",
-                        state.config.max_webmentions_per_domain_per_hour,
-                    ),
-                });
-            }
-        }
-    }
-
+    // The per-domain hourly cap runs as step 4, after every check that can
+    // reject the request. See the comment there.
     let target_url = Url::parse(&form.target)
         .map_err(|_| AppError::BadRequest("invalid target URL".to_string()))?;
     if target_url.scheme() != "http" && target_url.scheme() != "https" {
@@ -81,6 +64,36 @@ pub async fn receive_webmention(
         return Err(AppError::BadRequest(
             "source and target must differ".to_string(),
         ));
+    }
+
+    // 4. Charge the per-domain quota, last.
+    //
+    // The charge must follow every check that can reject the request. An
+    // unauthenticated caller that sends `source=<victim-host>/x` with an
+    // invalid target used to burn that host's hourly budget on every
+    // rejected request, so legitimate webmentions from the victim domain
+    // then met 429. Charging here means only a request this server would
+    // actually accept costs the sender's domain a slot.
+    //
+    // The key is the source host, so a caller can still spend its OWN
+    // domain's budget with junk targets that pass the origin check. That
+    // is the intended cost of the cap and is not a cross-domain attack.
+    if state.config.max_webmentions_per_domain_per_hour > 0 {
+        if let Some(host) = source_url.host_str() {
+            let key = domain_hourly_key(host);
+            if !state
+                .limiter
+                .check_and_increment(&key, state.config.max_webmentions_per_domain_per_hour)
+            {
+                return Err(AppError::RateLimited {
+                    retry_after_secs: 3600,
+                    reason: format!(
+                        "hourly webmention limit ({}) reached for domain '{host}'",
+                        state.config.max_webmentions_per_domain_per_hour,
+                    ),
+                });
+            }
+        }
     }
 
     // 4. Enqueue.

@@ -146,7 +146,10 @@ header. See [API](api.md).
 The in-memory limiter also applies these caps:
 
 - `MAX_COMMENTS_PER_IP_PER_DAY` limits native comments.
-- `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` limits source domains.
+- `MAX_WEBMENTIONS_PER_DOMAIN_PER_HOUR` limits source domains. A domain is
+  charged only for a request the server accepts. A request the server rejects
+  (bad scheme, wrong target origin, source equal to target) costs the sender
+  nothing, so one sender cannot spend another domain's budget with junk.
 
 Process restart clears the in-memory counters.
 

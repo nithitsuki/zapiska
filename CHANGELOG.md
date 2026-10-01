@@ -6,6 +6,16 @@ All notable changes to zapiska are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A rejected webmention no longer charges the sender's domain quota. The
+  per-domain hourly cap ran before the target was parsed and validated, so an
+  unauthenticated caller could send `source=<victim-host>/x` with an invalid
+  target, receive `400` each time, and still exhaust that host's hourly budget,
+  after which the victim's legitimate webmentions met `429`. The charge now
+  follows every check that can reject the request. The cap still applies to
+  requests the server accepts, so a noisy sender still spends its own budget.
+
 ### Added
 
 - `GET /.well-known/webmention`: the W3C webmention discovery document,
