@@ -271,7 +271,13 @@ pub fn spawn_worker_for_processor(
     // The job currently inside `process_one`. The consumer sets it before the
     // call and clears it after; a panic leaves it set, so the supervisor can
     // name the job that died. A `std::sync::Mutex` guard is never held across
-    // an await.
+    // an await (both uses are single statements).
+    //
+    // Read poison-tolerantly (`lock_in_flight`) on BOTH sides. A panic while
+    // the guard is held would poison the mutex, and an `.expect` in the
+    // SUPERVISOR would then panic too — turning a reported worker failure into
+    // an unreported one, which is the exact outcome this change exists to
+    // prevent. The value may be stale; it is only ever used to name a job.
     let in_flight: Arc<std::sync::Mutex<Option<(String, String)>>> =
         Arc::new(std::sync::Mutex::new(None));
 
@@ -294,10 +300,10 @@ pub fn spawn_worker_for_processor(
                     maybe = rx.recv() => {
                         match maybe {
                             Some(job) => {
-                                *in_flight.lock().expect("in-flight lock") =
+                                *lock_in_flight(&in_flight) =
                                     Some((job.source.clone(), job.target.clone()));
                                 process_one(&tx, &processor, &job, &mut retries, policy).await;
-                                *in_flight.lock().expect("in-flight lock") = None;
+                                *lock_in_flight(&in_flight) = None;
                             }
                             None => break,
                         }
@@ -312,9 +318,7 @@ pub fn spawn_worker_for_processor(
         let exit = match consumer.await {
             Ok(()) => WorkerExit::Graceful,
             Err(join) if join.is_panic() => {
-                let (source, target) = in_flight
-                    .lock()
-                    .expect("in-flight lock")
+                let (source, target) = lock_in_flight(&in_flight)
                     .clone()
                     .map_or((None, None), |(s, t)| (Some(s), Some(t)));
                 let message = panic_message(join);
@@ -343,6 +347,22 @@ pub fn spawn_worker_for_processor(
         let _ = exit_tx.send(Some(exit.clone()));
         exit
     })
+}
+
+/// Lock the in-flight slot, tolerating poisoning.
+///
+/// A `std::sync::Mutex` poisons when a holder panics. The supervisor must
+/// never panic on a poisoned mutex: that would swallow the consumer's death
+/// and leave the process serving with a dead queue and nothing logged. The
+/// guarded value is only used to name a job in an error log, so recovering
+/// the inner value is safe and strictly better than aborting.
+fn lock_in_flight(
+    slot: &std::sync::Mutex<Option<(String, String)>>,
+) -> std::sync::MutexGuard<'_, Option<(String, String)>> {
+    match slot.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// Extract a `JoinError`'s panic payload into a `String`. The payload is
@@ -1316,6 +1336,41 @@ mod t20_processor_tests {
             *exit_rx.borrow(),
             Some(WorkerExit::Graceful),
             "the published signal must match the returned outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn poisoned_in_flight_slot_does_not_silence_the_supervisor() {
+        // Regression: the supervisor reads the in-flight slot to name the dead
+        // job. A `std::sync::Mutex` poisons when a holder panics, and an
+        // `.expect` there would make the SUPERVISOR panic too — turning a
+        // reported worker death into a silent one, the exact failure this
+        // supervisor exists to prevent. Reading must survive a poisoned lock.
+        let poisoned = std::sync::Mutex::new(Some((
+            "https://src.example/poisoned".to_string(),
+            "https://nithitsuki.com/blog/poisoned".to_string(),
+        )));
+        // Simulate the consumer dying while still holding the guard: the
+        // guard is moved into the panicking closure, so the mutex is left
+        // locked-and-poisoned exactly as a real panic would leave it.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.lock().expect("test lock");
+            panic!("consumer died holding the in-flight guard");
+        }));
+        assert!(poisoned.is_poisoned(), "the test must actually poison");
+
+        // The supervisor's read path must return the value, not panic.
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lock_in_flight(&poisoned).clone()
+        }));
+        assert!(
+            read.is_ok(),
+            "reading a poisoned in-flight slot must not panic the supervisor"
+        );
+        assert_eq!(
+            read.expect("read must succeed").map(|(s, _)| s),
+            Some("https://src.example/poisoned".to_string()),
+            "the poisoned slot's value is still the best available job identity"
         );
     }
 

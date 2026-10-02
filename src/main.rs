@@ -96,11 +96,34 @@ async fn main() {
         // is dropped before the await below.
         let worker_handle = drain_worker.lock().expect("worker handle lock").take();
         if let Some(handle) = worker_handle {
-            let _ = tokio::time::timeout(
+            // Observe the result. The supervisor publishes the exit on
+            // `wm_worker_exit` for the shutdown decision below, but the handle
+            // is the authoritative answer and discarding it is the defect this
+            // change set exists to remove. A timeout is not an exit: it means
+            // the worker did not stop in time, so it is reported separately
+            // rather than being confused with a clean stop.
+            match tokio::time::timeout(
                 zapiska::worker::DRAIN_TIMEOUT + std::time::Duration::from_secs(5),
                 handle,
             )
-            .await;
+            .await
+            {
+                Ok(Ok(exit)) => tracing::info!(?exit, "webmention worker stopped"),
+                // The supervisor itself failing is a worker failure: nothing
+                // published, so the exit code below may read `None` and exit 0.
+                // Log it loudly so the failure is never silent.
+                Ok(Err(join_err)) => tracing::error!(
+                    error = %join_err,
+                    panicked = join_err.is_panic(),
+                    "webmention worker supervisor could not be joined"
+                ),
+                Err(_) => tracing::warn!(
+                    timeout_secs = (zapiska::worker::DRAIN_TIMEOUT
+                        + std::time::Duration::from_secs(5))
+                    .as_secs(),
+                    "webmention worker did not stop within the drain bound"
+                ),
+            }
         }
     }
     drain_notifier.drain(&drain_client).await;
@@ -115,16 +138,27 @@ async fn main() {
     // (worker drain, notification drain, `release_db_lock`) so the database
     // lock is released cleanly and the next start claims it fresh. A graceful
     // worker exit is the normal path and does not exit non-zero.
+    //
+    // `None` is a FAILURE here, not "still running": this code runs after
+    // `serve` has returned, so the server is stopping either way, and a
+    // `None` means the supervisor never published an outcome (it failed, or
+    // the drain timed out). Treating it as success would restore the exact
+    // silent failure this commit set removes.
     #[cfg(feature = "webmentions")]
-    if worker_exit
-        .borrow()
-        .as_ref()
-        .is_some_and(|exit| !matches!(exit, zapiska::worker::WorkerExit::Graceful))
-    {
-        tracing::error!(
-            exit = ?worker_exit.borrow().as_ref(),
-            "webmention worker died; exiting non-zero so the orchestrator restarts the process"
-        );
-        std::process::exit(1);
+    match worker_exit.borrow().clone() {
+        Some(zapiska::worker::WorkerExit::Graceful) => {}
+        Some(exit) => {
+            tracing::error!(
+                ?exit,
+                "webmention worker died; exiting non-zero so the orchestrator restarts the process"
+            );
+            std::process::exit(1);
+        }
+        None => {
+            tracing::error!(
+                "webmention worker published no exit outcome; exiting non-zero so the                  orchestrator restarts the process"
+            );
+            std::process::exit(1);
+        }
     }
 }
